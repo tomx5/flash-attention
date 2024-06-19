@@ -24,6 +24,10 @@ from torch.utils.cpp_extension import (
     CUDA_HOME,
 )
 
+def is_hip():
+    if torch.version.hip is not None:
+        return True
+    return False
 
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
@@ -45,6 +49,8 @@ SKIP_CUDA_BUILD = os.getenv("FLASH_ATTENTION_SKIP_CUDA_BUILD", "FALSE") == "TRUE
 # For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("FLASH_ATTENTION_FORCE_CXX11_ABI", "FALSE") == "TRUE"
 
+if is_hip():
+    SKIP_CUDA_BUILD = True
 
 def get_platform():
     """
