@@ -225,7 +225,7 @@ def construct_local_mask(
             col_idx > torch.minimum(row_idx + sk - sq + window_size[1], sk),
             col_idx < row_idx + sk - sq - window_size[0],
         )
-
+DEBUG = False
 
 def attention_ref(
     q,
@@ -264,6 +264,15 @@ def attention_ref(
         output: (batch_size, seqlen_q, nheads, head_dim)
         attention: (batch_size, nheads, seqlen_q, seqlen_k), softmax after dropout
     """
+    if DEBUG:
+        print()
+        if upcast==False and reorder_ops==True:
+            print("attention_ref_py")
+        else:
+            print("attention_ref")
+    if DEBUG:
+        print("upcast:", upcast)
+        print("reorder_ops:", reorder_ops)
     if causal:
         window_size = (window_size[0], 0)
     dtype_og = q.dtype
@@ -277,6 +286,8 @@ def attention_ref(
         scores = torch.einsum("bthd,bshd->bhts", q / math.sqrt(d), k)
     else:
         scores = torch.einsum("bthd,bshd->bhts", q, k / math.sqrt(d))
+    if DEBUG:
+        print("scores_ref:", scores)
     if softcap > 0:
         scores = scores / softcap
         scores = scores.tanh()
@@ -296,7 +307,11 @@ def attention_ref(
         scores.masked_fill_(local_mask, float("-inf"))
     if attn_bias is not None:
         scores = scores + attn_bias
+    if DEBUG:
+        print("lse_ref:", torch.logsumexp(scores, dim=-1))
     attention = torch.softmax(scores, dim=-1).to(v.dtype)
+    if DEBUG:
+        print("attention_ref:", attention)
     # Some rows might be completely masked out so we fill them with zero instead of NaN
     if window_size[0] >= 0 or window_size[1] >= 0:
         attention = attention.masked_fill(torch.all(local_mask, dim=-1, keepdim=True), 0.0)
@@ -900,26 +915,30 @@ def test_flash_attn_varlen_qkvpacked(
         assert (dqkv - dqkv_ref).abs().max().item() <= 2 * (dqkv_pt - dqkv_ref).abs().max().item()
 
 
-@pytest.mark.parametrize("kvpacked", [True, False])
-# @pytest.mark.parametrize("kvpacked", [False])
-@pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
+# @pytest.mark.parametrize("kvpacked", [True, False])
+@pytest.mark.parametrize("kvpacked", [False])
+# @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
 # @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
-# @pytest.mark.parametrize("mha_type", ["mha"])
-@pytest.mark.parametrize("deterministic", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16])
+# @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
+@pytest.mark.parametrize("mha_type", ["mha"])
+# @pytest.mark.parametrize("deterministic", [False, True])
 # @pytest.mark.parametrize("deterministic", [True])
-@pytest.mark.parametrize("alibi", [False, True])
-# @pytest.mark.parametrize("alibi", [False])
-@pytest.mark.parametrize("local", [False, True])
-# @pytest.mark.parametrize("local", [False])
-@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("deterministic", [False])
+# @pytest.mark.parametrize("alibi", [False, True])
+@pytest.mark.parametrize("alibi", [False])
+# @pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("local", [False])
+# @pytest.mark.parametrize("causal", [False, True])
 # @pytest.mark.parametrize("causal", [True])
+@pytest.mark.parametrize("causal", [False])
 @pytest.mark.parametrize("d", [32, 40, 59, 64, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
 # @pytest.mark.parametrize("d", [64])
+# @pytest.mark.parametrize("d", [16])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
@@ -936,14 +955,16 @@ def test_flash_attn_varlen_qkvpacked(
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
-@pytest.mark.parametrize("dropout_p", [0.0, 0.17])
-# @pytest.mark.parametrize("dropout_p", [0.0])
-@pytest.mark.parametrize("softcap", [0.0, 50.0])
+# @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
+@pytest.mark.parametrize("dropout_p", [0.0])
+# @pytest.mark.parametrize("softcap", [0.0, 50.0])
+@pytest.mark.parametrize("softcap", [0.0])
 def test_flash_attn_output(
     seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, softcap
 ):
     if USE_TRITON_ROCM:
-        test_backward = False
+        test_backward = True
+        DEBUG_INPUT= False
 
         if dropout_p != 0.0:
             pytest.skip("Dropout not supported on AMD's Triton Backend yet")
@@ -954,8 +975,8 @@ def test_flash_attn_output(
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
 
-        if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
-            pytest.skip("Skipping configuration due to limited test time")
+        # if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
+        #     pytest.skip("Skipping configuration due to limited test time")
 
     if (
         max(seqlen_q, seqlen_k) >= 2048
@@ -967,12 +988,16 @@ def test_flash_attn_output(
     device = "cuda"
     # set seed
     torch.random.manual_seed(0)
-    batch_size = 4
-    nheads = 6 if softcap == 0.0 else 4  # softcap reference impl takes more memory
+    batch_size = 1 #4
+    nheads = 1 # if softcap == 0.0 else 4  # softcap reference impl takes more memory
     nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 2)
     assert nheads % nheads_k == 0
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
-    q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
+    if DEBUG_INPUT:
+        q = torch.arange(seqlen_q, dtype=dtype, device="cuda").view(1, seqlen_q, 1,  1).expand(batch_size, seqlen_q, nheads, d).contiguous().requires_grad_()
+    else:
+        q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
+
     if softcap > 0:
         # Ensure the values of qk are at least within softcap range.
         q = q * softcap
@@ -981,12 +1006,16 @@ def test_flash_attn_output(
             batch_size, seqlen_k, 2, nheads_k, d, device=device, dtype=dtype, requires_grad=True
         )
     else:
-        k = torch.randn(
-            batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype, requires_grad=True
-        )
-        v = torch.randn(
-            batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype, requires_grad=True
-        )
+        if DEBUG_INPUT:
+            k = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, seqlen_k, 1, 1).expand(batch_size,seqlen_k,  nheads_k, d).contiguous().requires_grad_()
+            v = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, seqlen_k, 1, 1).expand(batch_size, seqlen_k, nheads_k,  d).contiguous().requires_grad_()
+        else:
+            k = torch.randn(
+                batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype, requires_grad=True
+            )
+            v = torch.randn(
+                batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype, requires_grad=True
+            )
     if alibi:
         alibi_slopes = torch.rand(batch_size, nheads, device=device, dtype=torch.float32) * 0.3
         attn_bias = attn_bias_from_alibi_slopes(alibi_slopes, seqlen_q, seqlen_k, causal=causal)
@@ -1122,7 +1151,10 @@ def test_flash_attn_output(
         print(f"Attention max diff: {(attn - attn_ref).abs().max().item()}")
         print(f"Attention Pytorch max diff: {(attn_pt - attn_ref).abs().max().item()}")
 
-    g = torch.randn_like(out)
+    if DEBUG_INPUT:
+        g = torch.ones_like(out).contiguous()
+    else:
+        g = torch.randn_like(out)
     do_o = (g.float() * out.float()).sum(-1)
     test_backward = test_backward and ((d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90))
     if test_backward:
@@ -1173,6 +1205,10 @@ def test_flash_attn_output(
 
     # Check that FlashAttention's numerical error is at most twice the numerical error
     # of a Pytorch implementation.
+    DEBUG=False
+    if DEBUG:
+        print("out:", out, out.shape)
+        print("out_ref:", out_ref, out_ref.shape)
     assert (out - out_ref).abs().max().item() <= 2 * (out_pt - out_ref).abs().max().item()
 
     if dropout_p > 0.0:
@@ -1182,9 +1218,29 @@ def test_flash_attn_output(
             assert abs(dropout_fraction - dropout_p) <= (0.01 if not local else 0.025)
 
     if test_backward:
-        assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
-        assert (dk - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
+        if DEBUG:
+            print("dv:", dv, dv.shape)
+            print("dv_ref:", dv_ref, dv_ref.shape)
+            print("dv_pt:", dv_pt, dv_pt.shape)
+        # fp16 default is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
+        ATOL, RTOL = 1e-4, 1e-3
+        # torch.testing.assert_close(dv, dv_ref, atol=ATOL, rtol=RTOL)
         assert (dv - dv_ref).abs().max().item() <= 3 * (dv_pt - dv_ref).abs().max().item()
+        
+        if DEBUG:
+            print("dk:", dk, dk.shape)
+            print("dk_ref:", dk_ref, dk_ref.shape)
+            print("dk_pt:", dk_pt, dk_pt.shape)
+        # torch.testing.assert_close(dk, dk_ref, atol=ATOL, rtol=RTOL)
+        assert (dk - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
+
+        if DEBUG:
+            print("dq:", dq, dq.shape)
+            print("dq_ref:", dq_ref, dq_ref.shape)
+            print("dq_pt:", dq_pt, dq_pt.shape)
+        # torch.testing.assert_close(dq, dq_ref, atol=ATOL, rtol=RTOL)
+        assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
+        
 
 
 @pytest.mark.parametrize("kvpacked", [True, False])

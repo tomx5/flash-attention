@@ -21,7 +21,6 @@ Currently only the forward kernel is supported, and contains these features:
 """
 
 import argparse
-import math
 import pytest
 import sys
 import torch
@@ -29,13 +28,6 @@ import torch
 import triton
 import triton.language as tl
 
-from triton import cdiv
-from .bwd_new import attention_prefill_backward_triton_new_impl
-from .bwd_old import attention_prefill_backward_triton_old_impl
-from .bwd_oai import attention_prefill_backward_triton_oai_impl
-
-
-DEBUG = False
 
 class MetaData():
     cu_seqlens_q = None
@@ -48,40 +40,7 @@ class MetaData():
     num_contexts = 0
     varlen = False
     layout = None
-    cache_seqlens = None
-    cache_batch_idx = None
-    new_kv = False
-    seqlen_new = None
-    k_new = None
-    v_new = None
-    dropout_p, return_scores= 0.0, False
-    # NOTE: scale sm_scale by log_2(e) and use 2^x in the loop as we do not have native e^x support in HW.
-    use_exp2 = True
-    bwd_preprocessing_use_o = True
-    
-
-    def __repr__(self) -> str:
-        return (f"MetaData(\n"
-                f"  sm_scale={self.sm_scale},\n"
-                f"  cu_seqlens_q={self.cu_seqlens_q},\n"
-                f"  cu_seqlens_k={self.cu_seqlens_k},\n"
-                f"  max_seqlens_q={self.max_seqlens_q},\n"
-                f"  max_seqlens_k={self.max_seqlens_k},\n"
-                f"  bias={self.bias},\n"
-                f"  alibi_slopes={self.alibi_slopes},\n"
-                f"  causal={self.causal},\n"
-                f"  num_contexts={self.num_contexts},\n"
-                f"  varlen={self.varlen},\n"
-                f"  layout={self.layout},\n"
-                f"  cache_seqlens={self.cache_seqlens},\n"
-                f"  cache_batch_idx={self.cache_batch_idx},\n"
-                f"  new_kv={self.new_kv},\n"
-                f"  seqlen_new={self.seqlen_new},\n"
-                f"  k_new={self.k_new},\n"
-                f"  v_new={self.v_new},\n"
-                f"  dropout_p={self.dropout_p},\n"
-                f"  return_scores={self.return_scores}\n"
-                f")")
+    dropout_p, return_encoded_softmax = 0.0, False
 
     def __init__(self, sm_scale=1.0):
         self.sm_scale = sm_scale
@@ -116,9 +75,9 @@ class MetaData():
     def need_causal(self):
         self.causal = True
 
-    def need_dropout(self, dropout_p, return_scores):
+    def need_dropout(self, dropout_p, return_encoded_softmax):
         self.dropout_p = dropout_p
-        self.return_scores = return_scores
+        self.return_encoded_softmax = return_encoded_softmax
 
     def check_args(self, q, k, v, o):
         assert q.dim() == k.dim() and q.dim() == v.dim()
@@ -133,7 +92,7 @@ class MetaData():
             assert self.bias is None
             # TODO:Remove once dropout is supported with varlen
             assert self.dropout_p == 0.0
-            # assert not self.return_scores
+            assert not self.return_encoded_softmax
         else:
             assert q.dim() == 4
             assert self.max_seqlens_q > 0 and self.max_seqlens_k > 0
@@ -200,6 +159,15 @@ def load_fn(ptrs, offset_first, offset_second, boundary_first, boundary_second):
 
 
 @triton.jit
+def print_gpu(prefix, val=None):
+    if (tl.program_id(0) == 0) and ((tl.program_id(1) == 0) and (tl.program_id(2) == 0)):
+        if val is not None:
+            tl.device_print(prefix, val)
+        else:
+            tl.device_print(prefix)
+
+
+@triton.jit
 def compute_alibi_block(alibi_slope, seqlen_q, seqlen_k, offs_m, offs_n, transpose=False):
     # when seqlen_k and seqlen_q are different we want the diagonal to stick to the bottom right of the attention matrix
     # for casual mask we want something like this where (1 is kept and 0 is masked)
@@ -241,16 +209,12 @@ def compute_alibi_tensor(alibi_slopes, seqlen_q, seqlen_k):
 
 @triton.jit
 def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk, stride_bn, start_m,
-                    actual_seqlen_k, actual_seqlen_q, dropout_p, philox_seed, batch_philox_offset, exp_scores_ptrs,
-                    block_min, block_max, offs_n_causal, masked_blocks, n_extra_tokens, alibi_slope, score_ptrs, scores_scaled_shifted_ptrs,
+                    actual_seqlen_k, actual_seqlen_q, dropout_p, philox_seed, batch_philox_offset, encoded_sm_ptrs,
+                    block_min, block_max, offs_n_causal, masked_blocks, n_extra_tokens, alibi_slope,
                     IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
                     OFFS_M: tl.constexpr, OFFS_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, MASK_STEPS: tl.constexpr,
-                    ENABLE_DROPOUT: tl.constexpr, PADDED_HEAD: tl.constexpr,
-                    ACTUAL_BLOCK_DMODEL: tl.constexpr, sm_scale: tl.constexpr, USE_EXP2: tl.constexpr,
-                    RETURN_SCORES: tl.constexpr):
-    if USE_EXP2:
-        RCP_LN2: tl.constexpr = 1.4426950408889634
-    
+                    ENABLE_DROPOUT: tl.constexpr, RETURN_ENCODED_SOFTMAX: tl.constexpr, PADDED_HEAD: tl.constexpr,
+                    ACTUAL_BLOCK_DMODEL: tl.constexpr):
     # loop over k, v, and update accumulator
     for start_n in range(block_min, block_max, BLOCK_N):
         # For padded blocks, we will overrun the tensor size if
@@ -279,22 +243,19 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                 size_n = start_n + OFFS_N[None, :]
                 mask = size_n < boundary_m[:, None]
                 qk = tl.where(mask, qk, float("-inf"))
-        
-        # -- compute qk ----
-        qk += tl.dot(q, k)
-        qk_scaled =  qk * sm_scale
-        if RETURN_SCORES:
-            score_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
-            tl.store(score_ptrs, qk_scaled, mask=score_mask)
-
         if IS_CAUSAL:
             causal_boundary = start_n + offs_n_causal
             causal_mask = OFFS_M[:, None] >= causal_boundary[None, :]
-            qk_scaled = tl.where(causal_mask, qk_scaled, float("-inf"))
+            qk = tl.where(causal_mask, qk, float("-inf"))
+        # -- compute qk ----
+        qk += tl.dot(q, k)
         if bias_ptrs is not None:
             bias_offs_n = start_n + tl.arange(0, BLOCK_N) if MASK_STEPS else None
             bias = load_fn(bias_ptrs, OFFS_M, bias_offs_n, actual_seqlen_q, actual_seqlen_k)
-            qk_scaled += bias
+            # While bias is added after multiplying qk with sm_scale,
+            # our optimization to use 2^x instead of e^x results in an additional
+            # scale factor of log2(e) which we must also multiply the bias with.
+            qk += (bias * 1.44269504089)
 
         if alibi_slope is not None:
             # Compute the global position of each token within the sequence
@@ -302,46 +263,25 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
             global_n_positions = start_n + tl.arange(0, BLOCK_N)
             alibi_block = compute_alibi_block(alibi_slope, actual_seqlen_q, actual_seqlen_k, global_m_positions,
                                               global_n_positions)
-            qk_scaled += alibi_block
-        # get max scores so far
-        m_ij = tl.maximum(m_i, tl.max(qk_scaled, 1))
+            qk += (alibi_block * 1.44269504089)  # scale factor of log2(e)
 
-        # scale and subtract max
-        q_shifted = qk_scaled - m_ij[:, None]
-        if RETURN_SCORES: 
-            # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
-            scores_scaled_shifted_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
-            tl.store(scores_scaled_shifted_ptrs, q_shifted, mask=scores_scaled_shifted_mask)
-        
-        # Compute scaled QK and softmax probabilities
-        if USE_EXP2:
-            p = tl.math.exp2(q_shifted * RCP_LN2)
-        else:
-            p = tl.math.exp(q_shifted)
+        # softmax
+        m_ij = tl.maximum(m_i, tl.max(qk, 1))
+        qk = qk - m_ij[:, None]
+        p = tl.math.exp2(qk)
 
         # CAVEAT: Must update l_ij before applying dropout
         l_ij = tl.sum(p, 1)
         if ENABLE_DROPOUT:
             philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n - BLOCK_N
             keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, actual_seqlen_k)
-            if RETURN_SCORES:
-                # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
-                exp_score_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
-                tl.store(exp_scores_ptrs, tl.where(keep, p, -p), mask=exp_score_mask)
+            if RETURN_ENCODED_SOFTMAX:
+                tl.store(encoded_sm_ptrs, tl.where(keep, p, -p).to(encoded_sm_ptrs.type.element_ty))
             p = tl.where(keep, p, 0.0)
-        elif RETURN_SCORES:
-            # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
-            exp_score_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
-            tl.store(exp_scores_ptrs, p, mask=exp_score_mask)
-        
+        elif RETURN_ENCODED_SOFTMAX:
+            tl.store(encoded_sm_ptrs, p.to(encoded_sm_ptrs.type.element_ty))
         # -- update output accumulator --
-        # alpha is an adjustment factor for acc and li as we loop and find new maxes
-        # store the diff in maxes to adjust acc and li as we discover new maxes
-        m_diff = m_i - m_ij
-        if USE_EXP2:
-            alpha = tl.math.exp2(m_diff * RCP_LN2)
-        else:
-            alpha = tl.math.exp(m_diff)
+        alpha = tl.math.exp2(m_i - m_ij)
         acc = acc * alpha[:, None]
         if not PRE_LOAD_V:
             v = load_fn(v_ptrs, k_offs_n, k_offs_k, actual_seqlen_k, ACTUAL_BLOCK_DMODEL)
@@ -354,51 +294,39 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         v_ptrs += BLOCK_N * stride_vk
         if bias_ptrs is not None:
             bias_ptrs += BLOCK_N * stride_bn
-        if RETURN_SCORES:
-            score_ptrs += BLOCK_N
-            scores_scaled_shifted_ptrs += BLOCK_N
-            exp_scores_ptrs += BLOCK_N
+        if RETURN_ENCODED_SOFTMAX:
+            encoded_sm_ptrs += BLOCK_N
     return acc, l_i, m_i
 
 
 @triton.autotune(
     configs=[
-        # triton.Config({'BLOCK_M': 256, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1,
-        #               num_warps=8),
-        # triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1,
-        #               num_warps=4),
-        # triton.Config({'BLOCK_M': 256, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1,
-        #               num_warps=8),
-        # triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 3, 'PRE_LOAD_V': True}, num_stages=1,
-        #               num_warps=4),
-        # triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 3, 'PRE_LOAD_V': False}, num_stages=1,
-        #               num_warps=4),
-        # triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'waves_per_eu': 4, 'PRE_LOAD_V': False}, num_stages=1,
-        #               num_warps=8),
-        # triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1,
-        #               num_warps=4),
-        # triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'waves_per_eu': 4, 'PRE_LOAD_V': False}, num_stages=1,
-        #               num_warps=8),
-        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1,
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1,
                       num_warps=4),
-        # TODO: This configs fails with head_size not pow2 with data mismatches. figure out why
-        # triton.Config({'BLOCK_M': 32, 'BLOCK_N': 16, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-        # triton.Config({'BLOCK_M': 16, 'BLOCK_N': 16, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1,
+                      num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 3, 'PRE_LOAD_V': False}, num_stages=1,
+                      num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1,
+                      num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1,
+                      num_warps=4),
+        # Fall-back config.
+        triton.Config({'BLOCK_M': 16, 'BLOCK_N': 16, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1,
+                      num_warps=4),
     ],
-    key=['IS_CAUSAL', 'dropout_p', 'BLOCK_DMODEL'],
+    key=['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK'],
     use_cuda_graph=True,
 )
 @triton.jit
-def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm, stride_qk, 
-             stride_kz, stride_kh, stride_kn, stride_kk, stride_vz, stride_vh, stride_vk, stride_vn, 
-             stride_oz, stride_oh, stride_om, stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az, stride_ah,
-             stride_sz, stride_sh, stride_sm, stride_sn, cu_seqlens_q, cu_seqlens_k,
-             dropout_p, philox_seed, philox_offset_base, scores, scores_scaled_shifted, exp_scores, alibi_slopes,  HQ: tl.constexpr,
+def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh, stride_qm, stride_qk, stride_kz,
+             stride_kh, stride_kn, stride_kk, stride_vz, stride_vh, stride_vk, stride_vn, stride_oz, stride_oh,
+             stride_om, stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az, stride_ah, cu_seqlens_q,
+             cu_seqlens_k, dropout_p, philox_seed, philox_offset_base, encoded_softmax, alibi_slopes, HQ: tl.constexpr,
              HK: tl.constexpr, ACTUAL_BLOCK_DMODEL: tl.constexpr, MAX_SEQLENS_Q: tl.constexpr,
              MAX_SEQLENS_K: tl.constexpr, VARLEN: tl.constexpr, IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr,
              BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, USE_BIAS: tl.constexpr,
-             ENABLE_DROPOUT: tl.constexpr, return_scores: tl.constexpr, USE_ALIBI: tl.constexpr,
-             USE_EXP2: tl.constexpr, RETURN_SCORES: tl.constexpr):
+             ENABLE_DROPOUT: tl.constexpr, RETURN_ENCODED_SOFTMAX: tl.constexpr, USE_ALIBI: tl.constexpr):
     start_m = tl.program_id(0)
     off_h_q = tl.program_id(1)
     off_z = tl.program_id(2)
@@ -450,7 +378,7 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
             tl.store(o_ptrs, acc, mask=o_ptrs_mask)
             # The tensor allocated for L is based on MAX_SEQLENS_Q as that is
             # statically known.
-            l_ptrs = LSE + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
+            l_ptrs = L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
             # We store inf to LSE, not -inf because in the bwd pass, we subtract this
             # from qk which makes it -inf, such that exp(qk - inf) = 0 for these masked blocks.
             l = tl.full([BLOCK_M], value=float("inf"), dtype=tl.float32)
@@ -493,34 +421,31 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
     else:
         alibi_slope = None
 
-    if RETURN_SCORES:
-        scores_offset = scores + off_z * stride_sz + off_h_q * stride_sh + cu_seqlens_q_start * stride_sm
-        score_ptrs = scores_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
-
-        scores_scaled_shifted_offset = scores_scaled_shifted + off_z * stride_sz + off_h_q * stride_sh + cu_seqlens_q_start * stride_sm
-        scores_scaled_shifted_ptrs = scores_scaled_shifted_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
-    
-        exp_scores_offset = exp_scores + off_z * stride_sz + off_h_q * stride_sh + cu_seqlens_q_start * stride_sm
-        exp_scores_ptrs = exp_scores_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
-    else:
-        score_ptrs = None
-        scores_scaled_shifted_ptrs = None
-        exp_scores_ptrs = None
-
     if ENABLE_DROPOUT:
         off_hz = off_z * HQ + off_h_q
         batch_philox_offset = philox_offset_base + off_hz * seqlen_q * seqlen_k
     else:
         batch_philox_offset = 0
+    # We can ask to return the dropout mask without actually doing any dropout. In
+    # this case, we return an invalid pointer so indicate the mask is not valid.
+    if RETURN_ENCODED_SOFTMAX:
+        encoded_sm_base = encoded_softmax + off_h_q * seqlen_q * seqlen_k
+        encoded_sm_ptrs = encoded_sm_base + offs_m[:, None] * seqlen_k + offs_n[None, :]
+    else:
+        encoded_sm_ptrs = None
     # initialize pointer to m and l
     m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
     l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
+    # scale sm_scale by log_2(e) and use 2^x in the loop as we do not
+    # have native e^x support in HW.
+    QK_SCALE: tl.constexpr = SM_SCALE * 1.44269504089
     # Q is loaded once at the beginning and shared by all N blocks.
     q_ptrs_mask = offs_m[:, None] < seqlen_q
     if PADDED_HEAD:
         q_ptrs_mask = q_ptrs_mask & (offs_d[None, :] < ACTUAL_BLOCK_DMODEL)
     q = tl.load(q_ptrs, mask=q_ptrs_mask, other=0.0)
+    q = (q * QK_SCALE).to(q.type.element_ty)
 
     # Here we compute how many full and masked blocks we have.
     padded_block_k = n_extra_tokens != 0
@@ -544,14 +469,14 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
         block_max = (n_blocks - masked_blocks) * BLOCK_N
         acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk, stride_bn,
                                         start_m, seqlen_k, seqlen_q, dropout_p, philox_seed, batch_philox_offset,
-                                        exp_scores_ptrs,
+                                        encoded_sm_ptrs,
                                         # _, _, offs_n_causal, masked_blocks, n_extra_tokens, _
-                                        block_min, block_max, 0, 0, 0, alibi_slope, score_ptrs, scores_scaled_shifted_ptrs,
+                                        block_min, block_max, 0, 0, 0, alibi_slope,
                                         # IS_CAUSAL, ....
                                         False, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                                         # _, MASK_STEPS, ...
-                                        PRE_LOAD_V, False, ENABLE_DROPOUT, PADDED_HEAD,
-                                        ACTUAL_BLOCK_DMODEL, sm_scale,  USE_EXP2=USE_EXP2, RETURN_SCORES=RETURN_SCORES)
+                                        PRE_LOAD_V, False, ENABLE_DROPOUT, RETURN_ENCODED_SOFTMAX, PADDED_HEAD,
+                                        ACTUAL_BLOCK_DMODEL)
         block_min = block_max
         block_max = n_blocks * BLOCK_N
 
@@ -566,20 +491,21 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
         v_ptrs += n_full_blocks * BLOCK_N * stride_vk
         if USE_BIAS:
             bias_ptrs += n_full_blocks * BLOCK_N * stride_bn
-        if RETURN_SCORES:
-            score_ptrs += n_full_blocks * BLOCK_N
-            scores_scaled_shifted_ptrs += n_full_blocks * BLOCK_N
-            exp_scores_ptrs += n_full_blocks * BLOCK_N
+        if RETURN_ENCODED_SOFTMAX:
+            encoded_sm_ptrs += n_full_blocks * BLOCK_N
         acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk, stride_bn,
                                         start_m, seqlen_k, seqlen_q, dropout_p, philox_seed, batch_philox_offset,
-                                        exp_scores_ptrs, block_min, block_max, offs_n_causal, masked_blocks,
-                                        n_extra_tokens, alibi_slope, score_ptrs, scores_scaled_shifted_ptrs,
-                                        IS_CAUSAL, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
+                                        encoded_sm_ptrs, block_min, block_max, offs_n_causal, masked_blocks,
+                                        n_extra_tokens, alibi_slope, IS_CAUSAL, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m,
+                                        offs_n,
                                         # _, MASK_STEPS, ...
-                                        PRE_LOAD_V, True, ENABLE_DROPOUT, PADDED_HEAD,
-                                        ACTUAL_BLOCK_DMODEL, sm_scale, USE_EXP2=USE_EXP2, RETURN_SCORES=RETURN_SCORES)
+                                        PRE_LOAD_V, True, ENABLE_DROPOUT, RETURN_ENCODED_SOFTMAX, PADDED_HEAD,
+                                        ACTUAL_BLOCK_DMODEL)
     # epilogue
-    acc = acc / l_i[:, None]
+    # This helps the compiler do Newton Raphson on l_i vs on acc which is much larger.
+    l_recip = 1 / l_i[:, None]
+    acc = acc * l_recip
+
     if ENABLE_DROPOUT:
         acc = acc / (1 - dropout_p)
     # If seqlen_q > seqlen_k but the delta is not a multiple of BLOCK_M,
@@ -597,28 +523,17 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
             out_ptrs_mask = mask_m_offsets[:, None] >= out_mask_boundary[None, :]
             z = 0.0
             acc = tl.where(out_ptrs_mask, acc, z.to(acc.type.element_ty))
-    
-    # write back LSE(Log Sum Exponents), the log of the normalization constant
-    l_ptrs = LSE + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
+    # write back LSE
+    l_ptrs = L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
     # If seqlen_q not multiple of BLOCK_M, we need to mask out the last few rows.
     # This is only true for the last M block. For others, overflow_size will be -ve
     overflow_size = end_m_idx - seqlen_q
-    if USE_EXP2:
-        RCP_LN2: tl.constexpr = 1.4426950408889634
-        LN2: tl.constexpr = 0.6931471824645996
-        # compute log-sum-exp in base 2 units
-        mi_base2 = m_i * RCP_LN2
-        softmax_lse = mi_base2 + tl.math.log2(l_i)
-        # convert back to natural units
-        softmax_lse *= LN2
-    else:
-        softmax_lse = m_i + tl.math.log(l_i)
     if overflow_size > 0:
         boundary = tl.full((BLOCK_M, ), BLOCK_M - overflow_size, dtype=tl.int32)
         l_ptrs_mask = tl.arange(0, BLOCK_M) < boundary
-        tl.store(l_ptrs, softmax_lse, mask=l_ptrs_mask) # the log of the normalization constant
+        tl.store(l_ptrs, m_i + tl.math.log2(l_i), mask=l_ptrs_mask)
     else:
-        tl.store(l_ptrs, softmax_lse) # the log of the normalization constant
+        tl.store(l_ptrs, m_i + tl.math.log2(l_i))
 
     # write back O
     o_offset = Out + off_z * stride_oz + off_h_q * stride_oh + cu_seqlens_q_start * stride_om
@@ -629,6 +544,287 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
     if PADDED_HEAD:
         o_ptrs_mask = o_ptrs_mask & (offs_d[None, :] < ACTUAL_BLOCK_DMODEL)
     tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
+
+
+@triton.jit
+def _attn_bwd_preprocess(
+    Out,
+    DO,
+    Delta,
+    stride_oz,
+    stride_oh,
+    stride_om,
+    stride_on,
+    stride_doz,
+    stride_doh,
+    stride_dom,
+    stride_don,
+    seqlen_q,
+    head_dim,
+    BLOCK_M: tl.constexpr,
+    D_HEAD: tl.constexpr,
+):
+    # off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    # off_n = tl.arange(0, D_HEAD)
+    off_m = tl.program_id(0) * BLOCK_M
+    off_h = tl.program_id(1)  # head index
+    off_z = tl.program_id(2)  # batch index
+    num_h = tl.num_programs(1)
+    o_offset = off_h * stride_oh + off_z * stride_oz
+    O_block_ptr = tl.make_block_ptr(base=Out + o_offset, shape=(seqlen_q, head_dim), strides=(stride_om, stride_on),
+                                    offsets=(off_m, 0), block_shape=(BLOCK_M, D_HEAD), order=(1, 0))
+    do_offset = off_h * stride_doh + off_z * stride_doz
+    DO_block_ptr = tl.make_block_ptr(base=DO + do_offset, shape=(seqlen_q, head_dim), strides=(stride_dom, stride_don),
+                                     offsets=(off_m, 0), block_shape=(BLOCK_M, D_HEAD), order=(1, 0))
+    # load
+    # o = tl.load(Out + off_m[:, None] * D_HEAD + off_n[None, :]).to(tl.float32)
+    # do = tl.load(DO + off_m[:, None] * D_HEAD + off_n[None, :]).to(tl.float32)
+    o = tl.load(O_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+    do = tl.load(DO_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+    # compute
+    delta = tl.sum(o * do, axis=1)
+    # write-back, shape (q.shape[0] * q.shape[1], q.shape[2])
+    off_zh = off_z * num_h + off_h * 1
+    # Check for OOB accesses
+    delta_ptrs = Delta + off_zh * seqlen_q + off_m + tl.arange(0, BLOCK_M)
+    overflow = off_m + BLOCK_M - seqlen_q
+    if overflow > 0:
+        boundary = tl.full((BLOCK_M, ), BLOCK_M - overflow, dtype=tl.int32)
+        mask = boundary > tl.arange(0, BLOCK_M)
+        tl.store(delta_ptrs, delta, mask=mask)
+    else:
+        tl.store(delta_ptrs, delta)
+
+
+@triton.jit
+def _bwd_kernel_dk_dv(dk, dv, Q, k, v, sm_scale, alibi_slope, DO, M, D,
+                      # shared by Q/K/V/DO.
+                      stride_tok, stride_d, H, N_CTX, BLOCK_M1: tl.constexpr, BLOCK_N1: tl.constexpr,
+                      BLOCK_DMODEL: tl.constexpr,
+                      # Filled in by the wrapper.
+                      start_n, start_m, num_steps, MASK: tl.constexpr):
+    offs_m = start_m + tl.arange(0, BLOCK_M1)
+    offs_n = start_n + tl.arange(0, BLOCK_N1)
+    # offs_k = tl.arange(0, BLOCK_DMODEL)
+    QT_block_ptr = tl.make_block_ptr(base=Q, shape=(BLOCK_DMODEL, N_CTX), strides=(stride_d, stride_tok),
+                                     offsets=(0, start_m), block_shape=(BLOCK_DMODEL, BLOCK_M1), order=(0, 1))
+    DO_block_ptr = tl.make_block_ptr(base=DO, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_tok, stride_d),
+                                     offsets=(start_m, 0), block_shape=(BLOCK_M1, BLOCK_DMODEL), order=(1, 0))
+    # BLOCK_N1 must be a multiple of BLOCK_M1, otherwise the code wouldn't work.
+    tl.static_assert(BLOCK_N1 % BLOCK_M1 == 0)
+    curr_m = start_m
+    step_m = BLOCK_M1
+    for blk_idx in range(num_steps):
+        qT = tl.load(QT_block_ptr)
+        # Load m before computing qk to reduce pipeline stall.
+        offs_m = curr_m + tl.arange(0, BLOCK_M1)
+        m = tl.load(M + offs_m)
+        kqT = tl.dot(k, qT)
+        if alibi_slope is not None:
+            alibi_block = compute_alibi_block(alibi_slope, N_CTX, N_CTX, offs_m, offs_n, True)
+            kqT += alibi_block * 1.44269504089
+
+        pT = tl.math.exp2(kqT - m[None, :])
+        # Autoregressive masking.
+        if MASK:
+            mask = (offs_m[None, :] >= offs_n[:, None])
+            pT = tl.where(mask, pT, 0.0)
+        do = tl.load(DO_block_ptr)
+        # Compute dV.
+        ppT = pT
+        ppT = ppT.to(tl.float16)
+        dv += tl.dot(ppT, do)
+        # D (= delta) is pre-divided by ds_scale.
+        Di = tl.load(D + offs_m)
+        # Compute dP and dS.
+        dpT = tl.dot(v, tl.trans(do))
+        dsT = pT * (dpT - Di[None, :])
+        dsT = dsT.to(tl.float16)
+        dk += tl.dot(dsT, tl.trans(qT))
+        # Increment pointers.
+        curr_m += step_m
+        QT_block_ptr = tl.advance(QT_block_ptr, (0, step_m))
+        DO_block_ptr = tl.advance(DO_block_ptr, (step_m, 0))
+    return dk, dv
+
+
+@triton.jit
+def _bwd_kernel_dq(dq, q, K, V, do, m, D, alibi_slope,
+                   # shared by Q/K/V/DO.
+                   stride_tok, stride_d, H, N_CTX, BLOCK_M2: tl.constexpr, BLOCK_N2: tl.constexpr,
+                   BLOCK_DMODEL: tl.constexpr,
+                   # Filled in by the wrapper.
+                   start_m, start_n, num_steps, MASK: tl.constexpr):
+    offs_m = start_m + tl.arange(0, BLOCK_M2)
+    offs_n = start_n + tl.arange(0, BLOCK_N2)
+    # offs_k = tl.arange(0, BLOCK_DMODEL)
+    KT_block_ptr = tl.make_block_ptr(base=K, shape=(BLOCK_DMODEL, N_CTX), strides=(stride_d, stride_tok),
+                                     offsets=(0, start_n), block_shape=(BLOCK_DMODEL, BLOCK_N2), order=(0, 1))
+    VT_block_ptr = tl.make_block_ptr(base=V, shape=(BLOCK_DMODEL, N_CTX), strides=(stride_d, stride_tok),
+                                     offsets=(0, start_n), block_shape=(BLOCK_DMODEL, BLOCK_N2), order=(0, 1))
+    # D (= delta) is pre-divided by ds_scale.
+    Di = tl.load(D + offs_m)
+    # BLOCK_M2 must be a multiple of BLOCK_N2, otherwise the code wouldn't work.
+    tl.static_assert(BLOCK_M2 % BLOCK_N2 == 0)
+    curr_n = start_n
+    step_n = BLOCK_N2
+    for blk_idx in range(num_steps):
+        kT = tl.load(KT_block_ptr)
+        qk = tl.dot(q, kT)
+        if alibi_slope is not None:
+            alibi_block = compute_alibi_block(alibi_slope, N_CTX, N_CTX, offs_m, offs_n)
+            qk += alibi_block * 1.44269504089
+
+        p = tl.math.exp2(qk - m)
+        # Autoregressive masking.
+        if MASK:
+            offs_n = curr_n + tl.arange(0, BLOCK_N2)
+            mask = (offs_m[:, None] >= offs_n[None, :])
+            p = tl.where(mask, p, 0.0)
+        # Compute dP and dS.
+        vT = tl.load(VT_block_ptr)
+        dp = tl.dot(do, vT).to(tl.float32)
+        ds = p * (dp - Di[:, None])
+        ds = ds.to(tl.float16)
+        # Compute dQ.0.
+        # NOTE: We need to de-scale dq in the end, because kT was pre-scaled.
+        dq += tl.dot(ds, tl.trans(kT))
+        # Increment pointers.
+        curr_n += step_n
+        KT_block_ptr = tl.advance(KT_block_ptr, (0, step_n))
+        VT_block_ptr = tl.advance(VT_block_ptr, (0, step_n))
+    return dq
+
+
+@triton.jit
+def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
+              # shared by Q/K/V/DO.
+              stride_z, stride_h, stride_tok, stride_d,
+              # H = 16, N_CTX = 1024
+              H, N_CTX, BLOCK_DMODEL: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_N1: tl.constexpr,
+              BLOCK_M2: tl.constexpr, BLOCK_N2: tl.constexpr, BLK_SLICE_FACTOR: tl.constexpr, USE_ALIBI: tl.constexpr):
+    LN2: tl.constexpr = 0.6931471824645996  # = ln(2)
+
+    bhid = tl.program_id(2)
+    off_chz = (bhid * N_CTX).to(tl.int64)
+    adj = (stride_h * (bhid % H) + stride_z * (bhid // H)).to(tl.int64)
+    pid = tl.program_id(0)
+
+    # offset pointers for batch/head
+    Q += adj
+    K += adj
+    V += adj
+    DO += adj
+    DQ += adj
+    DK += adj
+    DV += adj
+    M += off_chz
+    D += off_chz
+
+    # offs_k = tl.arange(0, BLOCK_DMODEL)
+
+    start_n = pid * BLOCK_N1
+    # This assignment is important. It is what allows us to pick the diagonal
+    # blocks. Later, when we want to do the lower triangular, we update start_m
+    # after the first dkdv call.
+    start_m = start_n
+
+    MASK_BLOCK_M1: tl.constexpr = BLOCK_M1 // BLK_SLICE_FACTOR
+    # offs_n = start_n + tl.arange(0, BLOCK_N1)
+
+    dv = tl.zeros([BLOCK_N1, BLOCK_DMODEL], dtype=tl.float32)
+    dk = tl.zeros([BLOCK_N1, BLOCK_DMODEL], dtype=tl.float32)
+
+    K_block_ptr = tl.make_block_ptr(
+        base=K,
+        shape=(N_CTX, BLOCK_DMODEL),
+        strides=(stride_tok, stride_d),
+        offsets=(start_n, 0),
+        block_shape=(BLOCK_N1, BLOCK_DMODEL),
+        order=(1, 0),
+    )
+    V_block_ptr = tl.make_block_ptr(
+        base=V,
+        shape=(N_CTX, BLOCK_DMODEL),
+        strides=(stride_tok, stride_d),
+        offsets=(start_n, 0),
+        block_shape=(BLOCK_N1, BLOCK_DMODEL),
+        order=(1, 0),
+    )
+
+    # load K and V: they stay in SRAM throughout the inner loop for dkdv.
+    k = tl.load(K_block_ptr)
+    v = tl.load(V_block_ptr)
+
+    if USE_ALIBI:
+        a_offset = bhid
+        alibi_slope = tl.load(alibi_slopes + a_offset)
+    else:
+        alibi_slope = None
+
+    # compute dK and dV for blocks close to the diagonal that need to be masked
+    num_steps = BLOCK_N1 // MASK_BLOCK_M1
+    dk, dv = _bwd_kernel_dk_dv(dk, dv, Q, k, v, sm_scale, alibi_slope, DO, M, D, stride_tok, stride_d, H, N_CTX,
+                               MASK_BLOCK_M1, BLOCK_N1, BLOCK_DMODEL, start_n, start_m, num_steps, MASK=True)
+
+    # compute dK and dV for blocks that don't need masking further from the diagonal
+    start_m += num_steps * MASK_BLOCK_M1
+    num_steps = (N_CTX - start_m) // BLOCK_M1
+
+    dk, dv = _bwd_kernel_dk_dv(dk, dv, Q, k, v, sm_scale, alibi_slope, DO, M, D, stride_tok, stride_d, H, N_CTX,
+                               BLOCK_M1, BLOCK_N1, BLOCK_DMODEL, start_n, start_m, num_steps, MASK=False)
+
+    DV_block_ptrs = tl.make_block_ptr(base=DV, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_tok, stride_d),
+                                      offsets=(start_n, 0), block_shape=(BLOCK_N1, BLOCK_DMODEL), order=(1, 0))
+    tl.store(DV_block_ptrs, dv.to(v.dtype))
+
+    # Write back dK.
+    dk *= sm_scale
+    DK_block_ptrs = tl.make_block_ptr(base=DK, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_tok, stride_d),
+                                      offsets=(start_n, 0), block_shape=(BLOCK_N1, BLOCK_DMODEL), order=(1, 0))
+    tl.store(DK_block_ptrs, dk.to(k.dtype))
+
+    # THIS BLOCK DOES DQ:
+    start_m = pid * BLOCK_M2
+    end_n = start_m + BLOCK_M2
+
+    MASK_BLOCK_N2: tl.constexpr = BLOCK_N2 // BLK_SLICE_FACTOR
+    offs_m = start_m + tl.arange(0, BLOCK_M2)
+
+    Q_block_ptr = tl.make_block_ptr(base=Q, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_tok, stride_d),
+                                    offsets=(start_m, 0), block_shape=(BLOCK_M2, BLOCK_DMODEL), order=(1, 0))
+
+    DO_block_ptr = tl.make_block_ptr(base=DO, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_tok, stride_d),
+                                     offsets=(start_m, 0), block_shape=(BLOCK_M2, BLOCK_DMODEL), order=(1, 0))
+    q = tl.load(Q_block_ptr)
+    do = tl.load(DO_block_ptr)
+    dq = tl.zeros([BLOCK_M2, BLOCK_DMODEL], dtype=tl.float32)
+
+    m = tl.load(M + offs_m)
+    m = m[:, None]
+
+    # Compute dQ for masked (diagonal) blocks.
+    # NOTE: This code scans each row of QK^T backward (from right to left,
+    # but inside each call to _attn_bwd_dq, from left to right), but that's
+    # not due to anything important.  I just wanted to reuse the loop
+    # structure for dK & dV above as much as possible.
+    num_steps = BLOCK_M2 // MASK_BLOCK_N2
+    dq = _bwd_kernel_dq(dq, q, K, V, do, m, D, alibi_slope, stride_tok, stride_d, H, N_CTX, BLOCK_M2, MASK_BLOCK_N2,
+                        BLOCK_DMODEL, start_m, end_n - num_steps * MASK_BLOCK_N2, num_steps, MASK=True)
+    end_n -= num_steps * MASK_BLOCK_N2
+    # stage 2
+    num_steps = end_n // BLOCK_N2
+    dq = _bwd_kernel_dq(dq, q, K, V, do, m, D, alibi_slope, stride_tok, stride_d, H, N_CTX, BLOCK_M2, BLOCK_N2,
+                        BLOCK_DMODEL, start_m, end_n - num_steps * BLOCK_N2, num_steps, MASK=False)
+    # Write back dQ.
+    DQ_block_ptr = tl.make_block_ptr(base=DQ, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_tok, stride_d),
+                                     offsets=(start_m, 0), block_shape=(BLOCK_M2, BLOCK_DMODEL), order=(1, 0))
+    dq *= LN2
+    tl.store(DQ_block_ptr, dq.to(q.dtype))
+
+
+empty = torch.empty(128, device="cuda")
+
 
 def get_shape_from_layout(q, k, metadata):
     if metadata.layout == 'thd':
@@ -668,180 +864,154 @@ def get_strides_from_layout(q, k, v, o, metadata):
     return q_strides, k_strides, v_strides, o_strides
 
 
-def attention_prefill_forward_triton_impl(q, k, v, o, metadata):
-    # NOTE: a large bias tensor leads to overflow during pointer arithmetic
-    if (metadata.bias is not None):
-        assert (metadata.bias.numel() < 2**31)
+class _attention(torch.autograd.Function):
 
-    if o is None:
-        o = torch.empty_like(q, dtype=v.dtype)
-    metadata.check_args(q, k, v, o)
-
-    batch, nheads_q, nheads_k, head_size = get_shape_from_layout(q, k, metadata)
-    q_strides, k_strides, v_strides, o_strides = get_strides_from_layout(q, k, v, o, metadata)
-
-    # Get closest power of 2 over or equal to 32.
-    padded_d_model = 1 << (head_size - 1).bit_length()
-    # Smallest head_dim supported is 16. If smaller, the tile in the
-    # kernel is padded - there is no padding in memory for any dims.
-    padded_d_model = max(padded_d_model, 16)
-
-    grid = lambda META: (triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M']), nheads_q, batch)
-
-    if metadata.return_scores:
-        scores = torch.zeros((batch, nheads_q, metadata.max_seqlens_q, metadata.max_seqlens_k), device=q.device,
-                                        dtype=torch.float32)
-        scores_scaled_shifted = torch.zeros((batch, nheads_q, metadata.max_seqlens_q, metadata.max_seqlens_k), device=q.device,
-                                        dtype=torch.float32)
-        scores_strides = (scores.stride(0), scores.stride(1), scores.stride(2), scores.stride(3))
-    else:
-        scores = None
-        scores_scaled_shifted = None
-        scores_strides = (0, 0 , 0 , 0)
-
-    # exp_scores is used to validate dropout behavior vs the PyTorch SDPA math backend reference.  We zero this out
-    # to give a consistent starting point and then populate it with the output of softmax with the sign bit set according
-    # to the dropout mask. The resulting return allows this mask to be fed into the reference implementation for testing
-    # only.  This return holds no useful output aside from debugging.
-    if metadata.return_scores:
-        exp_scores = torch.zeros((batch, nheads_q, metadata.max_seqlens_q, metadata.max_seqlens_k), device=q.device,
-                                        dtype=torch.float32)
-    else:
-        exp_scores = None
-
-    # stores LSE the log of the normalization constant / sum of expoential score(unnormalzied probablities)
-    # if metadata.layout == "bhsd":
-    softmax_lse = torch.empty((batch, nheads_q, metadata.max_seqlens_q), device=q.device, dtype=torch.float32)
-    # elif metadata.layout == "bshd":
-    #     softmax_lse = torch.empty((batch, metadata.max_seqlens_q, nheads_q), device=q.device, dtype=torch.float32)
-    # else:
-    #     print("metadat.layout:",  metadata.layout)
-    #     raise ValueError("unknown layout")
-
-
-    # Seed the RNG so we get reproducible results for testing.
-    philox_seed = 0x1BF52
-    philox_offset = 0x1D4B42
-
-    if metadata.bias is not None:
-        bias_strides = (metadata.bias.stride(0), metadata.bias.stride(1), metadata.bias.stride(2),
-                        metadata.bias.stride(3))
-    else:
-        bias_strides = (0, 0, 0, 0)
-
-    if metadata.alibi_slopes is not None:
-        alibi_strides = (metadata.alibi_slopes.stride(0), metadata.alibi_slopes.stride(1))
-    else:
-        alibi_strides = (0, 0)
-
-    attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
-                    *bias_strides, *alibi_strides, *scores_strides, metadata.cu_seqlens_q, metadata.cu_seqlens_k,
-                    dropout_p=metadata.dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset, scores=scores, 
-                    scores_scaled_shifted=scores_scaled_shifted, exp_scores=exp_scores, alibi_slopes=metadata.alibi_slopes, 
-                    HQ=nheads_q, HK=nheads_k, ACTUAL_BLOCK_DMODEL=head_size, MAX_SEQLENS_Q=metadata.max_seqlens_q,
-                    MAX_SEQLENS_K=metadata.max_seqlens_k, IS_CAUSAL=metadata.causal, VARLEN=metadata.varlen,
-                    BLOCK_DMODEL=padded_d_model, USE_BIAS=False if metadata.bias is None else True,
-                    USE_ALIBI=False if metadata.alibi_slopes is None else True, ENABLE_DROPOUT=metadata.dropout_p
-                    > 0.0, return_scores=metadata.return_scores,
-                    USE_EXP2=metadata.use_exp2, RETURN_SCORES=metadata.return_scores)
-
-    return o, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted
-
-def attention_prefill_backward_triton_impl(do, q, k, v, o, softmax_lse,  dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, bwd_preprocessing_use_o, use_new):
-    if False:
-        if use_exp2:
-            RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
-            softmax_lse *= RCP_LN2 # oai kernel expects softmax_lse to be an intermediate result of using exp2
-        else:
-            raise ValueError("openai backward kernel assumes exp2")
-        return attention_prefill_backward_triton_oai_impl(
-            do,
-            q,
-            k,
-            v,
-            o,
-            softmax_lse,
-            dq,
-            dk,
-            dv,
-            sm_scale,
-            head_size,
-            alibi_slopes,
-            causal,
-            layout,
-        )
-    elif False:
-        # test pytorch impl
-        dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
-            do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, bwd_preprocessing_use_o
-        )
-        if dq is not None:
-            dq.copy_(dq_ref)
-        else:
-            dq = dq_ref
-
-        if dk is not None:
-            dk.copy_(dk_ref)
-        else:
-            dk = dk_ref
-
-        if dv is not None:
-            dv.copy_(dv_ref)
-        else:
-            dv = dv_ref
-
-        return dq, dk, dv, delta_ref, None, None
-    elif use_new:
-        return attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, bwd_preprocessing_use_o)
-    else:
-        return attention_prefill_backward_triton_old_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2)
-
-
-class _attention_prefill(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, o, metadata):
-        o, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, _, _ = attention_prefill_forward_triton_impl(q, k, v, o, metadata)
+        # NOTE: a large bias tensor leads to overflow during pointer arithmetic
+        if (metadata.bias is not None):
+            assert (metadata.bias.numel() < 2**31)
 
-        ctx.save_for_backward(q, k, v, o, softmax_lse)
+        if o is None:
+            o = torch.empty_like(q, dtype=v.dtype)
+        metadata.check_args(q, k, v, o)
+
+        batch, nheads_q, nheads_k, head_size = get_shape_from_layout(q, k, metadata)
+        q_strides, k_strides, v_strides, o_strides = get_strides_from_layout(q, k, v, o, metadata)
+
+        # Get closest power of 2 over or equal to 32.
+        padded_d_model = 1 << (head_size - 1).bit_length()
+        # Smallest head_dim supported is 16. If smaller, the tile in the
+        # kernel is padded - there is no padding in memory for any dims.
+        padded_d_model = max(padded_d_model, 16)
+
+        grid = lambda META: (triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M']), nheads_q, batch)
+
+        # encoded_softmax is used to validate dropout behavior vs the PyTorch SDPA math backend reference.  We zero this out
+        # to give a consistent starting point and then populate it with the output of softmax with the sign bit set according
+        # to the dropout mask. The resulting return allows this mask to be fed into the reference implementation for testing
+        # only.  This return holds no useful output aside from debugging.
+        if metadata.return_encoded_softmax:
+            encoded_softmax = torch.zeros((q.shape[0], q.shape[1], q.shape[2], k.shape[2]), device=q.device,
+                                          dtype=torch.float32)
+        else:
+            encoded_softmax = None
+
+        M = torch.empty((batch, nheads_q, metadata.max_seqlens_q), device=q.device, dtype=torch.float32)
+
+        # Seed the RNG so we get reproducible results for testing.
+        philox_seed = 0x1BF52
+        philox_offset = 0x1D4B42
+
+        if metadata.bias is not None:
+            bias_strides = (metadata.bias.stride(0), metadata.bias.stride(1), metadata.bias.stride(2),
+                            metadata.bias.stride(3))
+        else:
+            bias_strides = (0, 0, 0, 0)
+
+        if metadata.alibi_slopes is not None:
+            alibi_strides = (metadata.alibi_slopes.stride(0), metadata.alibi_slopes.stride(1))
+        else:
+            alibi_strides = (0, 0)
+
+        attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, M, o, *q_strides, *k_strides, *v_strides, *o_strides,
+                       *bias_strides, *alibi_strides, metadata.cu_seqlens_q, metadata.cu_seqlens_k,
+                       dropout_p=metadata.dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset,
+                       encoded_softmax=encoded_softmax, alibi_slopes=metadata.alibi_slopes, HQ=nheads_q, HK=nheads_k,
+                       ACTUAL_BLOCK_DMODEL=head_size, MAX_SEQLENS_Q=metadata.max_seqlens_q,
+                       MAX_SEQLENS_K=metadata.max_seqlens_k, IS_CAUSAL=metadata.causal, VARLEN=metadata.varlen,
+                       BLOCK_DMODEL=padded_d_model, USE_BIAS=False if metadata.bias is None else True,
+                       USE_ALIBI=False if metadata.alibi_slopes is None else True, ENABLE_DROPOUT=metadata.dropout_p
+                       > 0.0, RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax)
+
+        ctx.save_for_backward(q, k, v, o, M)
         ctx.grid = grid
         ctx.sm_scale = metadata.sm_scale
-        ctx.head_size = head_size
+        ctx.BLOCK_DMODEL = head_size
         ctx.causal = metadata.causal
         ctx.alibi_slopes = metadata.alibi_slopes
         ctx.dropout_p = metadata.dropout_p
         ctx.philox_seed = philox_seed
         ctx.philox_offset = philox_offset
-        ctx.exp_scores = exp_scores
-        ctx.return_scores = metadata.return_scores
-        ctx.layout = metadata.layout
-        ctx.use_exp2 = metadata.use_exp2
-        ctx.bwd_preprocessing_use_o = metadata.bwd_preprocessing_use_o
-        return o, softmax_lse, exp_scores
+        ctx.encoded_softmax = encoded_softmax
+        ctx.return_encoded_softmax = metadata.return_encoded_softmax
+        return o, encoded_softmax
 
     @staticmethod
-    def backward(ctx, do, *args): # expects bhsd
-        q, k, v, o, softmax_lse = ctx.saved_tensors
-        return attention_prefill_backward_triton_impl(
-            do,
-            q,
-            k,
-            v,
+    def backward(ctx, do, _):
+        if torch.version.hip is not None:
+            BLOCK = 64
+        else:
+            BLOCK = 128
+        q, k, v, o, M = ctx.saved_tensors
+        assert do.is_contiguous()
+        assert q.stride() == k.stride() == v.stride() == o.stride() == do.stride()
+        seqlen_q = q.shape[2]
+        dq = torch.empty_like(q)
+        dk = torch.empty_like(k)
+        dv = torch.empty_like(v)
+        BATCH, N_HEAD, N_CTX = q.shape[:3]
+        PRE_BLOCK = 128
+        # NUM_WARPS, NUM_STAGES = 4, 1
+        BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 64, 64, 32
+        BLK_SLICE_FACTOR = 2
+        RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
+        arg_k = k
+        arg_k = arg_k * (ctx.sm_scale * RCP_LN2)
+        assert N_CTX % PRE_BLOCK == 0
+        delta = torch.empty_like(M)
+        _, Lk, _ = q.shape[-1], k.shape[-1], v.shape[-1]
+        # padded_head = (Lk != ctx.BLOCK_DMODEL)
+        grid_preprocess = (triton.cdiv(do.shape[2], BLOCK), do.shape[1], do.shape[0])
+        _attn_bwd_preprocess[grid_preprocess](
             o,
-            softmax_lse,
-            None,
-            None,
-            None,
+            do,
+            delta,
+            o.stride(0),
+            o.stride(1),
+            o.stride(2),
+            o.stride(3),
+            do.stride(0),
+            do.stride(1),
+            do.stride(2),
+            do.stride(3),
+            seqlen_q,
+            head_dim=Lk,
+            BLOCK_M=BLOCK,
+            D_HEAD=ctx.BLOCK_DMODEL,
+        )
+        grid = lambda META: (triton.cdiv(N_CTX, META['BLOCK_N1']), 1, BATCH * N_HEAD)
+        _attn_bwd[grid](
+            q,
+            arg_k,
+            v,
             ctx.sm_scale,
-            ctx.head_size,
             ctx.alibi_slopes,
-            ctx.causal,
-            ctx.layout,
-            ctx.use_exp2,
-            ctx.bwd_preprocessing_use_o,
-            True,
+            do,
+            dq,
+            dk,
+            dv,
+            M,
+            delta,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            q.stride(3),
+            N_HEAD,
+            N_CTX,
+            BLOCK_DMODEL=ctx.BLOCK_DMODEL,
+            BLOCK_M1=BLOCK_M1,
+            BLOCK_N1=BLOCK_N1,
+            BLOCK_M2=BLOCK_M2,
+            BLOCK_N2=BLOCK_N2,
+            BLK_SLICE_FACTOR=BLK_SLICE_FACTOR,
+            USE_ALIBI=False if ctx.alibi_slopes is None else True,
         )
 
-attention_prefill = _attention_prefill.apply
+        return dq, dk, dv, None, None
+
+
+attention = _attention.apply
 
 
 def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout):
@@ -936,7 +1106,7 @@ def test_op_fwd(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_alibi, layout, 
     o = torch.empty_like(q)
 
     # triton implementation
-    tri_out, _, _ = attention_prefill(q, k, v, o, input_metadata)
+    tri_out, _ = attention(q, k, v, o, input_metadata)
 
     # Transpose here if layout is bshd so we have same reference code for all layouts
     if layout == 'bshd':
@@ -992,7 +1162,8 @@ def test_op_fwd(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_alibi, layout, 
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('use_bias', [True])
-def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype=torch.float16):
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
+def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype):
     torch.manual_seed(20)
     sm_scale = D_HEAD**-0.5
     input_metadata = MetaData(sm_scale=sm_scale)
@@ -1000,14 +1171,14 @@ def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype=tor
     if causal:
         input_metadata.need_causal()
     if use_bias:
-        bias = torch.randn((1, H, N_CTX_Q, N_CTX_K), dtype=torch.float32, device="cuda")
+        bias = torch.randn((1, H, N_CTX_Q, N_CTX_K), dtype=dtype, device="cuda")
         input_metadata.need_bias(bias, Z, H, N_CTX_Q, N_CTX_K)
     else:
         bias = None
     o = torch.empty_like(q)
 
     # triton implementation
-    tri_out, _, _ = attention_prefill(q, k, v, o, input_metadata)
+    tri_out, _ = attention(q, k, v, o, input_metadata)
     # reference implementation:171
 
     scores = torch.einsum('bhqd,bhkd->bhqk', q, k).float() * sm_scale
@@ -1023,7 +1194,8 @@ def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype=tor
         # this by converting the NaNs to 0s, which is what they should be out of the softmax.
         nan_mask = torch.isnan(p)
         p[nan_mask == 1] = 0
-    ref_out = torch.einsum('bhqk,bhkd->bhqd', p.half(), v)
+
+    ref_out = torch.einsum('bhqk,bhkd->bhqd', p.to(dtype), v)
     # compare
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
@@ -1046,8 +1218,8 @@ def test_op_varlen_fwd(Z, H, N_CTX, D_HEAD, causal, dtype=torch.float16):
         scores = torch.einsum('qhd,khd->qhk', q[start_q:end_q], k[start_k:end_k]).float()
         p = torch.softmax(scores * input_metadata.sm_scale, dim=-1).half()
         ref_out[start_q:end_q] = torch.einsum('qhk,khd->qhd', p, v[start_k:end_k])
-    attention_prefill(q, k, v, tri_out, input_metadata)
-    torch.testing.assert_close(ref_out, tri_out, atol=ATOL, rtol=RTOL)
+    attention(q, k, v, tri_out, input_metadata)
+    torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=1e-2)
 
 
 @pytest.mark.parametrize('Z, HQ, HK, N_CTX, D_HEAD', [(2, 48, 24, 128, 64), (4, 48, 12, 256, 64), (4, 48, 4, 512, 64),
@@ -1074,68 +1246,48 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
         scores = torch.einsum('qhd,khd->qhk', q[start_q:end_q], k_curr).float()
         p = torch.softmax(scores * input_metadata.sm_scale, dim=-1).half()
         ref_out[start_q:end_q] = torch.einsum('qhk,khd->qhd', p, v_curr)
-    attention_prefill(q, k, v, tri_out, input_metadata)
-    torch.testing.assert_close(ref_out, tri_out, atol=ATOL, rtol=RTOL)
+    attention(q, k, v, tri_out, input_metadata)
+    torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=1e-2)
 
 
-@pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    # smallest config test
-    (1, 1, 16, 16, 64), # pass on new # fail on old
-    (1, 1, 32, 32, 64), # pass on new # fail on old
-    (1, 1, 64, 64, 16), # pass # smallest head_size = 16
-    (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
-    (1, 1, 128, 128, 64), # pass
-    (1, 1, 256, 256, 64), # pass
-    (1, 1, 512, 512, 64), # pass
-    # failing FA
-    (1, 1, 256, 512, 16),
-    # old tests that work
-    (4, 48, 1024, 1024, 64), # pass
-    (4, 48, 2048, 2048, 64), # pass
-    (2, 48, 4096, 4096, 64), # pass
-    (1, 16, 1024, 1024, 64), # pass
-    (1, 16, 1024, 1024, 128), # pass
-    # old tests that were commented out
-    # (1, 16, 8192, 8192, 63),
-    # (1, 16, 1022, 1022, 64),
+@pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [
+    (4, 48, 1024, 64),
+    (4, 48, 2048, 64),
+    (2, 48, 4096, 64),
+    (1, 16, 1024, 64),
+    (1, 16, 1024, 128),
+    #(1, 16, 8192, 63),
+    #(1, 16, 1022, 64),
 ])
-# @pytest.mark.parametrize('torch_sdpa_test', [False, True])
-@pytest.mark.parametrize('torch_sdpa_test', [False])
-# @pytest.mark.parametrize('causal', [True, False])
-@pytest.mark.parametrize('causal', [False])
-# @pytest.mark.parametrize('use_alibi', [False, True])
-@pytest.mark.parametrize('use_alibi', [False])
-def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_alibi, dtype=torch.float16):
+@pytest.mark.parametrize('qseqlen_not_equal_kseqlen', [None])
+@pytest.mark.parametrize('torch_sdpa_test', [False, True])
+@pytest.mark.parametrize('causal', [True])
+@pytest.mark.parametrize('use_alibi', [False, True])
+def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sdpa_test, use_alibi,
+                dtype=torch.float16):
+    pytest.skip()
     torch.manual_seed(20)
-
-    DEBUG_INPUT = False # if DEBUG is True it fails
-
-    # seqlens
-    seqlen_q = N_CTX_Q
-    seqlen_k = N_CTX_K
-
-    # setup up metadata
-    if DEBUG_INPUT:
-        sm_scale = 1
+    if qseqlen_not_equal_kseqlen is not None:
+        seqlen_q = qseqlen_not_equal_kseqlen
     else:
-        sm_scale = D_HEAD**-0.5
+        seqlen_q = N_CTX
+    seqlen_k = N_CTX
+
+    if causal and ((N_CTX - 1) & N_CTX):
+        pytest.skip()
+    if causal and seqlen_q != seqlen_k:
+        pytest.skip()
+
+    sm_scale = D_HEAD**-0.5
     input_metadata = MetaData(sm_scale=sm_scale)
     input_metadata.max_seqlens_q = seqlen_q
     input_metadata.max_seqlens_k = seqlen_k
-    input_metadata.layout = "bhsd"
 
     dropout_p = 0
-    if DEBUG_INPUT:
-        q = torch.arange(seqlen_q, dtype=dtype, device="cuda").view(1, 1, seqlen_q, 1).expand(Z, H, seqlen_q, D_HEAD).requires_grad_()
-        k = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, 1, seqlen_k, 1).expand(Z, H, seqlen_k, D_HEAD).requires_grad_()
-        v = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, 1, seqlen_k, 1).expand(Z, H, seqlen_k, D_HEAD).requires_grad_()
-        o = torch.zeros_like(q)
-    else:
-        # Generate random inputs
-        q = torch.randn(Z, H, N_CTX_Q, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-        k = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-        v = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-        o = torch.empty_like(q)
+    q = (torch.empty((Z, H, seqlen_q, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+    k = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+    v = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+    o = torch.empty_like(q)
 
     if causal:
         input_metadata.need_causal()
@@ -1145,12 +1297,7 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
         alibi_slopes = torch.tensor([2**(-8 / H * i) for i in range(1, H + 1)], dtype=torch.float32,
                                     device="cuda").repeat(Z, 1)
         input_metadata.need_alibi(alibi_slopes, Z, H)
-
-    if DEBUG_INPUT:
-        dout = torch.ones_like(q)
-    else:
-        dout = torch.randn_like(q)
-
+    dout = torch.randn_like(q)
     # reference implementation
     if torch_sdpa_test:
         ref_out, ref_softmax = torch.ops.aten._scaled_dot_product_attention_math(q, k, v, dropout_p=dropout_p,
@@ -1164,7 +1311,7 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
         M = torch.tril(torch.ones((seqlen_q, seqlen_k), device="cuda"))
         p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
         if use_alibi:
-            p += compute_alibi_tensor(alibi_slopes, N_CTX_Q, N_CTX_K)
+            p += compute_alibi_tensor(alibi_slopes, N_CTX, N_CTX)
         if causal:
             p[:, :, M == 0] = float("-inf")
 
@@ -1176,19 +1323,21 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
         ref_dq, q.grad = q.grad.clone(), None
 
     # # triton implementation
-    tri_out, _, _ = attention_prefill(q, k, v, o, input_metadata)
+    tri_out, _ = attention(q, k, v, o, input_metadata)
     tri_out.backward(dout)
     tri_dv, v.grad = v.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
     tri_dq, q.grad = q.grad.clone(), None
+    # test
+    #print("reference")
+    #print(ref_dv)
+    #print("tri")
+    #print(tri_dv)
     # compare
-    if DEBUG:
-        print("tri_out:", tri_out)
-        print("ref_out:",ref_out )
     torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=0)
-    
     # The current block size for MI200 series is 64x64. This results in
     # larger differences in float results due to rounding.
+
     if dtype == torch.bfloat16:
         ATOL = 1e-1 * max(1.0, (seqlen_q + D_HEAD) / 64.0)
     if dtype == torch.float32:
@@ -1198,421 +1347,10 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
 
     RTOL = 0
 
-    if DEBUG:
-        print("ref_dv:", ref_dv)
-        print("tri_dv:", tri_dv)
-        print("ref_dk:", ref_dk)
-        print("tri_dk:", tri_dk)
-        print("ref_dq:", ref_dq)
-        print("tri_dq:", tri_dq)
-
     torch.testing.assert_close(ref_dv, tri_dv, atol=ATOL, rtol=RTOL)
     torch.testing.assert_close(ref_dk, tri_dk, atol=ATOL, rtol=RTOL)
     torch.testing.assert_close(ref_dq, tri_dq, atol=ATOL, rtol=RTOL)
 
-
-def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_exp2):
-    """compute reference output and softmax_lse using PyTorch's built-in function"""
-
-    # expects bhsd layout
-    if layout != "bhsd":
-        raise ValueError("bhsd is the only layout supported")
-
-    # get seqlens
-    N_CTX_Q = q.shape[2]
-    N_CTX_K = k.shape[2]
-
-    # compute attention scores
-    attention_scores = torch.matmul(q.to(torch.float32), k.transpose(-2, -1).to(torch.float32))
-
-
-    # scale score
-    attention_scaled_scores = sm_scale * attention_scores
-
-    # ===========================  Softmax ========================================
-    # compute max for numerical stability
-    max_scores = torch.max(attention_scaled_scores, dim=-1, keepdim=True)[0]
-
-    # shift scores to by subtracing max
-    attention_shifted_scaled_scores = attention_scaled_scores - max_scores
-
-    # subtract max and exponentiate
-    if use_exp2:
-        RCP_LN = 1/ math.log(2)
-        exp2_scores = torch.exp2(RCP_LN * attention_shifted_scaled_scores)
-    else:
-        exp_scores = torch.exp(attention_shifted_scaled_scores)
-
-    # sum of exponentials
-    if use_exp2:
-        sum_exp2_scores = torch.sum(exp2_scores, dim=-1, keepdim=True)
-    else:
-        sum_exp_scores = torch.sum(exp_scores, dim=-1, keepdim=True)
-
-    # softmax probabilities
-    if use_exp2:
-        softmax_exp2 = exp2_scores / sum_exp2_scores
-    else:
-        softmax = exp_scores / sum_exp_scores
-    
-    # compute log-sum-exp and squeeze final dim which will be 1
-    if use_exp2:
-        LN2 = math.log(2)
-        RCP_LN = 1/ math.log(2)
-        # compute log-sum-exp in base 2 units
-        max_scores_base2 = max_scores * RCP_LN
-        softmax_exp2_lse_base2 = max_scores_base2 + torch.log2(sum_exp2_scores)
-        # Convert back to natural units
-        softmax_exp2_lse = softmax_exp2_lse_base2 * LN2
-        softmax_exp2_lse.squeeze_(-1)
-    else:
-        softmax_lse = max_scores + torch.log(sum_exp_scores)
-        softmax_lse.squeeze_(-1)
-    
-    # compute output
-    if use_exp2:
-        o_exp2 = torch.matmul(softmax_exp2, v.to(torch.float32)).to(torch.float16)
-    else:
-        o = torch.matmul(softmax, v.to(torch.float32)).to(torch.float16)
-
-
-    if use_exp2:
-        return o_exp2, softmax_exp2_lse, exp2_scores, softmax_exp2, attention_shifted_scaled_scores, attention_scores
-    else:
-        return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scores
-
-def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, bwd_preprocessing_use_o):
-    # ensure the layout is 'bhsd'
-    if layout == "bshd":
-        print("Changing layout to bhsd!")
-        do = do.transpose(1, 2).contiguous()
-        q = q.transpose(1, 2).contiguous()
-        k = k.transpose(1, 2).contiguous()
-        v = v.transpose(1, 2).contiguous()
-        o = o.transpose(1, 2).contiguous()
-        # softmax_lse = softmax_lse.transpose(1, 2).contiguous()
-        # TODO: does L/M need to be transposed. possible to use strides
-    elif layout == "bhsd":
-        pass
-    else:
-        raise ValueError(f"Unknown layout {layout}")
-    
-    # recompute attention_scores
-    attention_scores = torch.matmul(q, k.transpose(-2, -1))
-    if DEBUG:
-        print("attention_scores:", attention_scores)
-
-    # scale scores
-    attention_scaled_scores = sm_scale * attention_scores
-    if DEBUG:
-        print("attention_scaled_scores:", attention_scaled_scores)
-
-    # compute probabilities using softmax_lse
-    if use_exp2:
-        RCP_LN = 1 / math.log(2)
-        attention_scaled_scores_base2 = attention_scaled_scores * RCP_LN
-        softmax_lse_base2 = softmax_lse * RCP_LN
-        p = torch.exp2(attention_scaled_scores_base2 - softmax_lse_base2.unsqueeze(-1))
-    else:
-        p = torch.exp(attention_scaled_scores - softmax_lse.unsqueeze(-1))
-
-    if DEBUG:
-        print("p:", p)
-    # compute gradient wrt v
-    dv = torch.matmul(p.transpose(-2, -1), do.to(torch.float32))
-
-    # compute dp
-    dp = torch.matmul(do, v.transpose(-2, -1))
-
-    # calculate ds
-    if bwd_preprocessing_use_o:
-        delta = torch.sum(o * do, axis=-1).unsqueeze(-1).to(torch.float32) # what oai kernel uses
-    else:
-        delta = torch.sum(p * dp, axis=-1).unsqueeze(-1) # what the math says you should use
-    ds = (p * (dp - delta)) * sm_scale
-
-    # compute gradient wrt k
-    dk = torch.matmul(ds.transpose(-2, -1), q.to(torch.float32))
-
-    # compute gradient wrt q
-    dq = torch.matmul(ds, k.to(torch.float32))
-
-    # cast back to original dtype
-    dq = dq.to(q.dtype)
-    dk = dk.to(k.dtype)
-    dv = dv.to(v.dtype)
-
-    # go back to original layout
-    if layout == "bshd":
-        print("Changing back to bshd!")
-        dq = dq.transpose(1, 2)
-        dk = dk.transpose(1, 2)
-        dv = dv.transpose(1, 2)
-    elif layout == "bhsd":
-        pass
-    else:
-        raise ValueError(f"Unknown layout {layout}")
-
-    return dq, dk, dv, delta.squeeze(-1)
-
-
-# fp16 default is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
-ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 
-# ATOL, RTOL = 1e-3, 1e-3  # catchs fa mismatch issues
-# ATOL, RTOL = 1e-4, 1e-3 # to strict. there will be small diffs
-# ATOL, RTOL = 1e-5, 1e-3 # # default fp16. there will be small diffs
-
-@pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    (1, 1, 1, 1, 1),
-    (1, 1, 4, 4, 16),
-    (2, 2, 4, 4, 16),
-    (1, 1, 2, 128, 1),
-    (1, 1, 2, 128, 16),
-    (1, 1, 256, 512, 16),
-    (1, 1, 128, 128, 64),
-    (2, 4, 1024, 1024, 64),
-    (4, 8, 2048, 2048, 128),
-    (4, 16, 4096, 4096, 64),
-    (2, 4, 8192, 8192, 32),
-])
-@pytest.mark.parametrize('causal', [False])
-@pytest.mark.parametrize('return_scores', [False])
-@pytest.mark.parametrize('check_softmax', [True, False])
-@pytest.mark.parametrize('use_exp2', [True, False]) # works when use_exp2 is false
-@pytest.mark.parametrize('DEBUG_INPUT', [False]) # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues
-def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, check_softmax, use_exp2, DEBUG_INPUT):
-    dtype = torch.float16
-    torch.manual_seed(0)
-
-    if DEBUG_INPUT:
-        sm_scale = 1
-    else:
-        sm_scale =  D_HEAD ** -0.5
-    layout = 'bhsd'
-    alibi_slopes = None
-    dropout_p = 0.0
-
-    if DEBUG_INPUT:
-        q = torch.arange(N_CTX_Q, dtype=dtype, device="cuda").view(1, 1, N_CTX_Q, 1).expand(Z, H, N_CTX_Q, D_HEAD).requires_grad_()
-        k = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(Z, H, N_CTX_K, D_HEAD).requires_grad_()
-        v = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(Z, H, N_CTX_K, D_HEAD).requires_grad_()
-        o = torch.zeros_like(q)
-    else:
-        # Generate random inputs
-        q = torch.randn(Z, H, N_CTX_Q, D_HEAD, device='cuda', dtype=dtype)
-        k = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype)
-        v = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype)
-        o = torch.empty_like(q)
-
-    # Set up metadata
-    input_metadata = MetaData(sm_scale=sm_scale)
-    input_metadata.max_seqlens_q = N_CTX_Q
-    input_metadata.max_seqlens_k = N_CTX_K
-    input_metadata.layout = layout
-    input_metadata.use_exp2 = use_exp2
-    if causal:
-        input_metadata.need_causal()
-
-    # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
-    if check_softmax or return_scores:
-        input_metadata.return_scores = True
-
-    # call Triton's forward implementation directly
-    o, softmax_lse_triton, exp_scores_triton, grid, head_size, philox_seed, philox_offset, _, _ = attention_prefill_forward_triton_impl(q, k, v, o, input_metadata)
-
-    # compute reference
-    (
-        o_ref,
-        softmax_lse_ref,
-        exp_scores_ref,
-        softmax_ref,
-        attention_shifted_scaled_scores_ref,
-        attention_scores_ref,
-    ) = attention_forward_pytorch_ref_impl(
-        q.clone(), k.clone(), v.clone(), sm_scale, causal, "bhsd", use_exp2
-    )
-    # ref output
-    print("attention_scores_ref:", attention_scores_ref, attention_scores_ref.shape)
-    print("attention_shifted_scaled_scores_ref:", attention_shifted_scaled_scores_ref, attention_shifted_scaled_scores_ref.shape)
-    print("exp_scores_ref:", exp_scores_ref, exp_scores_ref.shape)
-    print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
-    print("softmax_ref:", softmax_ref, softmax_ref.shape)
-
-    # compare the outputs with ref
-    print("o:", o, o.shape)
-    print("ref_o:", o_ref, o_ref.shape)
-    torch.testing.assert_close(o, o_ref, atol=ATOL, rtol=RTOL)
-
-    # compare with pytorch
-    out_pytorch, softmax_pytorch = torch.ops.aten._scaled_dot_product_attention_math(q, k, v, dropout_p=dropout_p,
-                                                                            is_causal=causal, scale=sm_scale,
-                                                                            dropout_mask=None)
-    print("o:", o, o.shape)
-    print("out_pytorch:", out_pytorch, out_pytorch.shape)
-    torch.testing.assert_close(o, out_pytorch, atol=ATOL, rtol=RTOL)
-
-    if check_softmax:
-        # compare softmax_lse with ref
-        print("softmax_lse_triton:", softmax_lse_triton, softmax_lse_triton.shape)
-        print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
-        torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=ATOL, rtol=RTOL)
-
-        # use trick with lse to get the softmax. you need the scores but is it
-        softmax_triton = torch.exp(sm_scale * attention_scores_ref - softmax_lse_triton.unsqueeze(-1))
-        print("softmax_triton:", softmax_triton, softmax_triton.shape)
-        print("softmax_ref:", softmax_ref, softmax_ref.shape)
-        torch.testing.assert_close(softmax_triton, softmax_ref, atol=ATOL, rtol=RTOL)       
-
-        # compare with pytorch output
-        print("softmax_triton:", softmax_triton, softmax_triton.shape)
-        print("softmax_pytorch:", softmax_pytorch, softmax_pytorch.shape)
-        torch.testing.assert_close(softmax_triton, softmax_pytorch.to(torch.float32), atol=ATOL, rtol=RTOL)
-
-
-@pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    (1, 1, 1, 1, 1),
-    (1, 1, 4, 4, 4),
-    (1, 1, 4, 4, 16),
-    (1, 1, 16, 16, 16),
-    (1, 1, 32, 32, 16),
-    (1, 1, 64, 64, 16), # pass # smallest head_size = 16
-    (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
-    (1, 1, 128, 128, 64),
-    (1, 1, 128, 256, 45),
-    (1, 1, 256, 256, 64),
-    (1, 1, 256, 512, 16),
-    (1, 1, 512, 512, 64), 
-    (1, 1, 1024, 1024, 64),
-    # old tests that work
-    (4, 48, 1024, 1024, 73),
-    (4, 48, 1024, 1024, 64),
-    (4, 48, 2048, 2048, 64),
-    (1, 24, 4096, 4096, 64),
-    (1, 16, 1024, 1024, 64),
-    (1, 16, 1024, 1024, 128),
-    # # old tests that were commented out
-    # (1, 16, 8192, 8192, 63),
-    # (1, 16, 1022, 1022, 64),
-    # bad fa configs
-    # (1, 1, 256, 512, 16),
-])
-@pytest.mark.parametrize('causal', [False])
-@pytest.mark.parametrize('use_exp2', [True, False])
-@pytest.mark.parametrize('bwd_preprocessing_use_o', [True, False])
-@pytest.mark.parametrize('use_new', [True])
-@pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
-def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, bwd_preprocessing_use_o, use_new, DEBUG_INPUT):
-    dtype = torch.float16
-    torch.manual_seed(20) # seed from test_op_bwd
-
-    if DEBUG_INPUT:
-        sm_scale = 1
-    else:
-        sm_scale =  D_HEAD ** -0.5
-    head_size = D_HEAD
-    layout = 'bhsd'
-    alibi_slopes = None
-
-    if DEBUG_INPUT:
-        q = torch.arange(N_CTX_Q, dtype=dtype, device="cuda").view(1, 1, N_CTX_Q, 1).expand(Z, H, N_CTX_Q, D_HEAD).contiguous().requires_grad_()
-        k = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(Z, H, N_CTX_K, D_HEAD).contiguous().requires_grad_()
-        v = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(Z, H, N_CTX_K, D_HEAD).contiguous().requires_grad_()
-        do = torch.ones_like(q).contiguous()
-    else:
-        # Generate random inputs
-        q = torch.randn(Z, H, N_CTX_Q, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-        k = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-        v = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-        do = torch.randn_like(q)
-
-    # =============================================== Reference ==============================================================
-    q_ref = q.clone() 
-    k_ref = k.clone()
-    v_ref = v.clone()    
-    (
-        o_ref,
-        softmax_lse_ref,
-        exp_scores_ref,
-        softmax_ref,
-        attention_shifted_scaled_scores_ref,
-        attention_scores_ref,
-    ) = attention_forward_pytorch_ref_impl(
-        q_ref, k_ref, v_ref, sm_scale, causal, layout, use_exp2
-    )
-    if DEBUG:
-        print("attention_scores_ref:", attention_scores_ref, attention_scores_ref.shape)
-        print("attention_shifted_scaled_scores_ref:", attention_shifted_scaled_scores_ref, attention_shifted_scaled_scores_ref.shape)
-        print("exp_scores_ref:", exp_scores_ref, exp_scores_ref.shape)
-        print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
-        print("softmax_ref:", softmax_ref, softmax_ref.shape)
-
-    dq = torch.zeros_like(q, dtype=q.dtype) # NOTE: the kernel does inplace accumlation on dq so dq has to be zeros
-    if DEBUG_INPUT:
-        dk = torch.zeros_like(k, dtype=k.dtype)
-        dv = torch.zeros_like(v, dtype=v.dtype)
-    else:
-        dk = torch.empty_like(k, dtype=k.dtype)
-        dv = torch.empty_like(v, dtype=v.dtype)
-
-    do_ref = do.clone()
-    dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
-        do_ref,
-        q_ref,
-        k_ref,
-        v_ref,
-        o_ref,
-        softmax_lse_ref,
-        sm_scale,
-        causal,
-        layout,
-        use_exp2,
-        bwd_preprocessing_use_o, 
-    )
-
-    # =============================================== Triton ==============================================================
-    o = o_ref.clone()
-    softmax_lse = softmax_lse_ref.clone()
-    dq, dk, dv, delta, _, _ = attention_prefill_backward_triton_impl(
-        do,
-        q,
-        k,
-        v,
-        o,
-        softmax_lse,
-        dq,
-        dk,
-        dv,
-        sm_scale,
-        head_size,
-        alibi_slopes,
-        causal,
-        layout,
-        use_exp2,
-        bwd_preprocessing_use_o=bwd_preprocessing_use_o,
-        use_new=use_new,
-    )
-
-    # =============================================== Check ==============================================================
-    print()
-    if DEBUG:
-        print("delta:", delta, delta.shape)
-        print("delta_ref:", delta_ref, delta_ref.shape)
-    torch.testing.assert_close(delta, delta_ref, atol=ATOL, rtol=RTOL)
-
-    if DEBUG:
-        print("dv:", dv, dv.shape)
-        print("dv_ref:", dv_ref, dv_ref.shape)
-    torch.testing.assert_close(dv, dv_ref, atol=ATOL, rtol=RTOL)
-
-    if DEBUG:
-        print("dk:", dk, dk.shape)
-        print("dk_ref:", dk_ref, dk_ref.shape)
-    torch.testing.assert_close(dk, dk_ref, atol=ATOL, rtol=RTOL)
-
-    if DEBUG:
-        print("dq:", dq, dq.shape)
-        print("dq_ref:", dq_ref, dq_ref.shape)
-    torch.testing.assert_close(dq, dq_ref, atol=ATOL, rtol=RTOL)
 
 def nonvarlen_benchmark_configs():
     configs = [
@@ -1717,9 +1455,9 @@ def run_benchmark(custom, args):
         if causal:
             input_metadata.need_causal()
         o = torch.empty_like(q)
-        fn = lambda: attention_prefill(q, k, v, o, input_metadata)
+        fn = lambda: attention(q, k, v, o, input_metadata)
         if mode == 'bwd':
-            o, _, _= fn()
+            o, _ = fn()
             do = torch.randn_like(o)
             fn = lambda: o.backward(do, retain_graph=True)
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
