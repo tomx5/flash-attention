@@ -40,6 +40,9 @@ class MetaData():
     num_contexts = 0
     varlen = False
     layout = None
+    rotary_cos = None,
+    rotary_sin = None,
+    rotary_interleaved = False,
     cache_seqlens = None
     cache_batch_idx = None
     new_kv = False
@@ -61,6 +64,9 @@ class MetaData():
                 f"  num_contexts={self.num_contexts},\n"
                 f"  varlen={self.varlen},\n"
                 f"  layout={self.layout},\n"
+                f"  rotary_cos={self.rotary_cos},\n"
+                f"  rotary_sin={self.rotary_sin},\n"
+                f"  rotary_interleaved={self.rotary_interleaved},\n"
                 f"  cache_seqlens={self.cache_seqlens},\n"
                 f"  cache_batch_idx={self.cache_batch_idx},\n"
                 f"  new_kv={self.new_kv},\n"
@@ -100,6 +106,16 @@ class MetaData():
         assert alibi_slopes.shape[0] == batch
         assert alibi_slopes.shape[1] == nheads
         self.alibi_slopes = alibi_slopes
+
+    def need_rotary(self, rotary_cos, rotary_sin, rotary_interleaved):
+        assert rotary_cos.is_cuda
+        assert rotary_sin.is_cuda
+        assert rotary_cos.shape() == rotary_sin.shape(), "rotary_sin and rotary_cos shapes must match"
+        assert rotary_cos.dim() == 2 and rotary_sin.dim() == 2
+        assert rotary_interleaved is not None
+        self.rotary_cos = rotary_cos
+        self.rotary_sin = rotary_sin
+        self.rotary_interleaved = rotary_interleaved
 
     def need_causal(self):
         self.causal = True
