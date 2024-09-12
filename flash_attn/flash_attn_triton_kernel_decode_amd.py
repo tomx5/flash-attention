@@ -1,5 +1,6 @@
 import math
 from typing import Optional
+from einops import rearrange, repeat
 import pytest
 import torch
 import sys
@@ -16,7 +17,6 @@ def _strides(x: torch.Tensor, *stride_names: str):
     assert x.ndim == len(stride_names)
     return {f"stride_{s}": x.stride(i) for i, s in enumerate(stride_names)}
 
-
 @triton.jit
 def _fwd_kernel_splitK(
     Q,
@@ -30,6 +30,8 @@ def _fwd_kernel_splitK(
     Cache_seqlens,
     Cache_batch_idx,
     Alibi_slopes,
+    Rotary_cos,
+    Rotary_sin,
     stride_qz,
     stride_qm,
     stride_qg,
@@ -84,6 +86,8 @@ def _fwd_kernel_splitK(
     IS_GQA: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     USE_ALIBI: tl.constexpr,
+    USE_ROTARY: tl.constexpr,
+    ROTARY_INTERLEAVED: tl.constexpr
 ):
     # Padding
     PADDED_HEAD: tl.constexpr = (ACTUAL_BLOCK_DMODEL != BLOCK_DMODEL)
@@ -92,8 +96,8 @@ def _fwd_kernel_splitK(
 
     start_m = tl.program_id(0)
     off_zhg = tl.program_id(1)
-    off_z = off_zhg // (H_q * G_q)
-    off_h_q = (off_zhg // G_q) % H_q
+    off_z = off_zhg // (H_q * G_q)      # batch
+    off_h_q = (off_zhg // G_q) % H_q    # head
     off_g_q = off_zhg % G_q
     splitk_idx = tl.program_id(2)
 
@@ -197,6 +201,7 @@ def _fwd_kernel_splitK(
         order=(1, 0),
     )
 
+    # K transposed
     K_block_ptr = tl.make_block_ptr(
         base=k_base,
         shape=(ACTUAL_BLOCK_DMODEL, hi),
@@ -252,6 +257,10 @@ def _fwd_kernel_splitK(
             k = tl.where(d_mask[:, None], k, 0.0)
             v = tl.where(d_mask[None, :], v, 0.0)
 
+        if USE_ROTARY:
+            # rotate q and k before dot product
+            pass
+
         # -- compute qk ---
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk += tl.dot(q, k)  # noqa: F821
@@ -297,16 +306,16 @@ def _fwd_kernel_splitK(
         else:
             qk = qk - m_i_new[:, None] 
         
-        p = tl.math.exp2(qk)
+        p = tl.math.exp2(qk) # p = e^(qk^T)
 
-        # -- update m_i and l_i --
+        # -- update m_i (current max) and l_i --
         l_i = l_i * alpha + tl.sum(p, 1)
         m_i = m_i_new
         p = p.to(Q.dtype.element_ty)
 
         # -- scale and update acc --
         acc *= alpha[:, None]
-        acc += tl.dot(p.to(v.dtype), v)
+        acc += tl.dot(p.to(v.dtype), v) # acc += p
         
         # update pointers
         K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
@@ -660,6 +669,50 @@ class _attention(torch.autograd.Function):
         split_size = (seqlen_k + split_k - 1) // split_k
         use_cache_seqlens = cache_seqlens is not None
 
+        # if input_metadata.IS_ROTARY:
+        #     # Rotary Embedding Implementation
+        #     def apply_rotary_embedding(x, input_metadata):
+        #         """Forward pass that applies a rotary positional encoding into a Q or K tensor.
+
+        #         Args:
+        #             x: Tensor being rotated (either Q or K). Has shape [b, n_ctx, n_h, h_d] where
+        #                 - b: batch size
+        #                 - n_ctx: max sequence length
+        #                 - n_h: num of attention heads
+        #                 - h_d: dimensionality of an attention head (embedding space)
+        #         """
+        #         n_ctx = x.size(1)
+
+        #         # cos/sin Tensor shape is [n_ctx, rot_dim]
+        #         cos = input_metadata.rotary_cos[:n_ctx]
+        #         sin = input_metadata.rotary_sin[:n_ctx]
+
+        #         # rearranges x to have elements in the correct order for the sin tensor multiplication
+        #         def half_rotate(x: torch.Tensor, interleaved: Optional[bool] = False) -> torch.Tensor:
+        #             if interleaved:
+        #                 x_even, x_odd = x[..., ::2], x[..., 1::2]
+        #                 x_rearranged = torch.stack((-x_odd, x_even), dim=-1)
+        #                 x_rearranged = rearrange(x_rearranged, "... d pair -> ... (d pair)")
+        #                 return x_rearranged
+        #             else:
+        #                 x1, x2 = x.chunk(2, dim=-1)
+        #                 return torch.cat((-x2, x1), dim=-1)
+                
+
+        #         # Get rot_dim and check that rot_dim <= head_dim of x
+        #         rot_dim = cos.shape[-1]
+        #         assert rot_dim <= x.shape[-1], "rot_dim > head_dim. rot_dim must be <= head_dim | rot_dim: " + str(rot_dim) + ", head_dim: " + str(x.shape[-1])
+                
+        #         # The "left" part of x is rotated according to rot_dim, the "right" is unaffected.
+        #         x_left = x[..., :rot_dim] * cos + half_rotate(x[..., :rot_dim], input_metadata.rotary_interleaved) * sin
+        #         x_right = x[..., rot_dim:]
+
+        #         return torch.cat((x_left, x_right), dim=-1)
+            
+        #     # Apply Rotary to Q and K before computing attention
+        #     q = apply_rotary_embedding(q, input_metadata)
+        #     k = apply_rotary_embedding(k, input_metadata)
+
         # TODO: enable quantization
         _fwd_kernel_splitK[grid](
             Q=q,
@@ -673,6 +726,8 @@ class _attention(torch.autograd.Function):
             Cache_seqlens=cache_seqlens,
             Cache_batch_idx=input_metadata.cache_batch_idx,
             Alibi_slopes=input_metadata.alibi_slopes,
+            Rotary_cos = input_metadata.rotary_cos,
+            Rotary_sin = input_metadata.rotary_sin,
             **_strides(q, "qz", "qm", "qg", "qh", "qd"),
             **_strides(k, "kz", "kn", "kg", "kh", "kd"),
             **_strides(v, "vz", "vn", "vg", "vh", "vd"),
@@ -700,6 +755,8 @@ class _attention(torch.autograd.Function):
             IS_GQA=input_metadata.is_gqa,
             IS_CAUSAL=input_metadata.causal,
             USE_ALIBI=False if input_metadata.alibi_slopes is None else True,
+            USE_ROTARY=False if input_metadata.rotary_cos is None or input_metadata.rotary_sin is None else True,
+            ROTARY_INTERLEAVED = True if input_metadata.rotary_interleaved else False,
             num_warps=num_warps,
             num_stages=1,
         )

@@ -198,6 +198,10 @@ def fwd_kvcache(
         batch, _ , nheads_q, _= q.shape
         input_metadata.need_alibi(alibi_slopes, batch, nheads_q)
 
+    assert not (rotary_cos is None ^ rotary_sin is None), "rotary_sin and rotary_cos must either both be None or both be Tensors"
+    if rotary_cos and rotary_sin:
+        input_metadata.need_rotary(rotary_cos, rotary_sin, rotary_interleaved)
+
     # launch kernel
     tri_out, softmax_lse = attention_decode(q, k_cache, v_cache, input_metadata)
     return tri_out, softmax_lse
