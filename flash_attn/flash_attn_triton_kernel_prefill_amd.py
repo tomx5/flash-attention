@@ -40,9 +40,9 @@ class MetaData():
     num_contexts = 0
     varlen = False
     layout = None
-    rotary_cos = None,
-    rotary_sin = None,
-    rotary_interleaved = False,
+    rotary_cos = None
+    rotary_sin = None
+    rotary_interleaved = False
     cache_seqlens = None
     cache_batch_idx = None
     new_kv = False
