@@ -1,7 +1,7 @@
 import math
 from typing import Optional, Union
 from einops import rearrange, repeat
-from layers.rotary import apply_rotary_emb
+from flash_attn.layers.rotary import apply_rotary_emb
 import pytest
 import torch
 import sys
@@ -630,7 +630,7 @@ class _attention(torch.autograd.Function):
             # print("k ours", k, k.shape)
             # print("k ours apply_rotary args", input_metadata.rotary_cos, input_metadata.rotary_sin, cache_seqlens, input_metadata.rotary_interleaved)
             k_ro = apply_rotary_emb(
-                k,
+                input_metadata.k_new,
                 input_metadata.rotary_cos,
                 input_metadata.rotary_sin,
                 seqlen_offsets=input_metadata.cache_seqlens,
@@ -638,7 +638,7 @@ class _attention(torch.autograd.Function):
             )
             # print("k_ro ours", k_ro, k_ro.shape)
 
-            q, k = q_ro, k_ro
+            q, input_metadata.k_new = q_ro, k_ro
 
             # breakpoint()
 
