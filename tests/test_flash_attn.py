@@ -1974,7 +1974,7 @@ def test_flash_attn_splitkv(
 # @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
 @pytest.mark.parametrize("mha_type", ["mha"])
 # @pytest.mark.parametrize("new_kv", [False, True])
-@pytest.mark.parametrize("new_kv", [False])
+@pytest.mark.parametrize("new_kv", [True])
 # @pytest.mark.parametrize("alibi", [False, True])
 @pytest.mark.parametrize("alibi", [False])
 # @pytest.mark.parametrize("local", [False, True])
@@ -1983,36 +1983,38 @@ def test_flash_attn_splitkv(
 @pytest.mark.parametrize("causal", [False])
 # @pytest.mark.parametrize("seqlen_new_eq_seqlen_q", [True, False])
 @pytest.mark.parametrize("seqlen_new_eq_seqlen_q", [True])
-@pytest.mark.parametrize("rotary_interleaved", [False, True])
-# @pytest.mark.parametrize("rotary_interleaved", [False])
-@pytest.mark.parametrize("rotary_fraction", [0.0, 0.5, 1.0])
-# @pytest.mark.parametrize("rotary_fraction", [0.0])
-@pytest.mark.parametrize("paged_kv_block_size", [None, 256])
+# @pytest.mark.parametrize("rotary_interleaved", [False, True])
+@pytest.mark.parametrize("rotary_interleaved", [False])
+# @pytest.mark.parametrize("rotary_fraction", [0.0, 0.5, 1.0])
+# @pytest.mark.parametrize("rotary_fraction", [0.5, 1.0])
+@pytest.mark.parametrize("rotary_fraction", [1.0])
+# @pytest.mark.parametrize("paged_kv_block_size", [None, 256])
 # @pytest.mark.parametrize("paged_kv_block_size", [256, 512])
-# @pytest.mark.parametrize("paged_kv_block_size", [None])
-@pytest.mark.parametrize("has_leftpad", [False, True])
-# @pytest.mark.parametrize("has_leftpad", [True])
+@pytest.mark.parametrize("paged_kv_block_size", [None])
+# @pytest.mark.parametrize("has_leftpad", [False, True])
+@pytest.mark.parametrize("has_leftpad", [False])
 # @pytest.mark.parametrize("has_batch_idx", [False, True])
 @pytest.mark.parametrize("has_batch_idx", [False])
 # @pytest.mark.parametrize("d", [32, 59, 64, 80, 128, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
-@pytest.mark.parametrize("d", [128])
+@pytest.mark.parametrize("d", [16])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
-        (1, 128),
-        (1, 339),
-        (3, 1024),
-        (64, 800),
-        (64, 256),
-        (3, 799),
-        (64, 2048),
-        (16, 20000),
-        (1, 128 * 1024),
-        (16, 128 * 1024),
-        (128, 128),
+        (1, 2),
+        # (1, 128),
+        # (1, 339),
+        # (3, 1024),
+        # (64, 800),
+        # (64, 256),
+        # (3, 799),
+        # (64, 2048),
+        # (16, 20000),
+        # (1, 128 * 1024),
+        # (16, 128 * 1024),
+        # (128, 128),
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
@@ -2047,8 +2049,8 @@ def test_flash_attn_kvcache(
         if has_leftpad == True:
             pytest.skip("cache_leftpad not supported on AMD's Triton Backend yet")
 
-        if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
-            pytest.skip("Skipping configuration due to limited test time")
+        # if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
+        #     pytest.skip("Skipping configuration due to limited test time")
 
     if seqlen_q > seqlen_k and new_kv:
         pytest.skip()
@@ -2061,9 +2063,9 @@ def test_flash_attn_kvcache(
     device = "cuda"
     # set seed
     torch.random.manual_seed(0)
-    batch_size = 2
+    batch_size = 1
     batch_size_cache = batch_size if not has_batch_idx else batch_size * 2
-    nheads = 6
+    nheads = 1
     # rotary_dim must be a multiple of 16, and must be <= d
     rotary_dim = math.floor(int(rotary_fraction * d) / 16) * 16
     nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 3)
@@ -2140,6 +2142,7 @@ def test_flash_attn_kvcache(
             * 2
             * math.pi
         )
+
         cos = torch.cos(angle).to(dtype=dtype)
         sin = torch.sin(angle).to(dtype=dtype)
         if causal or local:
@@ -2158,10 +2161,16 @@ def test_flash_attn_kvcache(
                 "b 1 (s h) d -> b s h d",
                 s=seqlen_q,
             )
+        print("K_RO DEBUG")
+        print("k thiers", k, k.shape)
+        print("k theirs apply_rotary_emb args", cos, sin, cache_seqlens, rotary_interleaved)
         # q_ro = q
         k_ro = apply_rotary_emb(
             k, cos, sin, seqlen_offsets=cache_seqlens, interleaved=rotary_interleaved
         )
+        print("k thiers AFTER", k, k.shape)
+        print("k cache??", k_cache)
+        print("k_ro theirs", k_ro, k_ro.shape)
     else:
         cos, sin = None, None
         q_ro, k_ro = q, k
@@ -2181,20 +2190,25 @@ def test_flash_attn_kvcache(
     k_cache_rep = repeat(k_cache_ref, "b s h d -> b s (h g) d", g=nheads // nheads_k)
     v_cache_rep = repeat(v_cache_ref, "b s h d -> b s (h g) d", g=nheads // nheads_k)
     out = flash_attn_with_kvcache(
-        q,
+        q, # use the rotated vector
         k_cache if paged_kv_block_size is None else k_cache_paged,
         v_cache if paged_kv_block_size is None else v_cache_paged,
         k,
         v,
         rotary_cos=cos,
         rotary_sin=sin,
-        cache_seqlens=cache_seqlens,
+        rotary_cos_k=None,
+        rotary_sin_k=None,
+        rotary_interleaved=rotary_interleaved,
+        rotary_inplace=False,
+        rotary_conjugate=False,
+        cache_seqlens=cache_seqlens,               # why do we call it cache_seqlens?
         cache_batch_idx=cache_batch_idx,
         cache_leftpad=cache_leftpad,
         block_table=block_table,
         causal=causal,
+        local=local,
         window_size=window_size,
-        rotary_interleaved=rotary_interleaved,
         alibi_slopes=alibi_slopes,
         num_splits=num_splits,
     )
@@ -2208,6 +2222,8 @@ def test_flash_attn_kvcache(
     # o1 = torch.einsum('bhst,bthd->bshd', s_tmp, v_cache_ref)
     # lse_ref = torch.logsumexp(qk / math.sqrt(d), -1)
     # probs = torch.softmax(qk, dim=-1)
+    # print("q_ro_theirs", q_ro)
+    # print("k_ro_theirs", k_ro)
     out_ref, _ = attention_ref(
         q_ro,
         k_cache_rep,

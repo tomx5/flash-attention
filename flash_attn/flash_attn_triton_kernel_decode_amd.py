@@ -1,6 +1,7 @@
 import math
-from typing import Optional
+from typing import Optional, Union
 from einops import rearrange, repeat
+from layers.rotary import apply_rotary_emb
 import pytest
 import torch
 import sys
@@ -587,8 +588,87 @@ class _attention(torch.autograd.Function):
     NAME = "triton_splitKF"
 
     @staticmethod
-    def forward(cls, q, k, v, input_metadata):
+    def forward(cls, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, input_metadata: MetaData):
         original_layout = input_metadata.layout
+
+        # print("k.shape", k.shape)
+
+        # Rotary Embedding Implementation
+        if torch.is_tensor(input_metadata.rotary_cos) and torch.is_tensor(input_metadata.rotary_sin):
+            if input_metadata.causal or input_metadata.local:
+                q_ro = apply_rotary_emb(
+                    q,
+                    input_metadata.rotary_cos,
+                    input_metadata.rotary_sin,
+                    seqlen_offsets=input_metadata.cache_seqlens,
+                    interleaved=input_metadata.rotary_interleaved,
+                )
+                # q_ro = apply_rotary(
+                #     x=q,
+                #     cos=input_metadata.rotary_cos,
+                #     sin=input_metadata.rotary_sin,
+                #     seqlen_offsets=input_metadata.cache_seqlens,
+                #     cu_seqlens=input_metadata.cu_seqlens_q,
+                #     max_seqlen=input_metadata.max_seqlens_q,
+                #     inplace=input_metadata.rotary_inplace,
+                #     conjugate=input_metadata.rotary_conjugate,
+                #     interleaved=input_metadata.rotary_interleaved,
+                # )
+            else:
+                q_ro = rearrange(
+                    apply_rotary_emb(
+                        rearrange(q, "b s h d -> b 1 (s h) d"),
+                        input_metadata.rotary_cos,
+                        input_metadata.rotary_sin,
+                        seqlen_offsets=input_metadata.cache_seqlens,
+                        interleaved=input_metadata.rotary_interleaved,
+                    ),
+                    "b 1 (s h) d -> b s h d",
+                    s=input_metadata.max_seqlens_q,
+                )
+            # q_ro = q
+            # print("k ours", k, k.shape)
+            # print("k ours apply_rotary args", input_metadata.rotary_cos, input_metadata.rotary_sin, cache_seqlens, input_metadata.rotary_interleaved)
+            k_ro = apply_rotary_emb(
+                k,
+                input_metadata.rotary_cos,
+                input_metadata.rotary_sin,
+                seqlen_offsets=input_metadata.cache_seqlens,
+                interleaved=input_metadata.rotary_interleaved,
+            )
+            # print("k_ro ours", k_ro, k_ro.shape)
+
+            q, k = q_ro, k_ro
+
+            # breakpoint()
+
+        print("q_ro ours", q)
+        print("k_ro ours", k)
+        print("v ours", v)
+        print(input_metadata)
+
+            ## Save for BWD pass
+            # if isinstance(seqlen_offsets, int):
+            #     ctx.save_for_backward(cos, sin, cu_seqlens)  # Can't save int with save_for_backward
+            #     ctx.seqlen_offsets = seqlen_offsets
+            # else:
+            #     ctx.save_for_backward(cos, sin, cu_seqlens, seqlen_offsets)
+            #     ctx.seqlen_offsets = None
+            # ctx.interleaved = interleaved
+            # ctx.inplace = inplace
+            # ctx.max_seqlen = max_seqlen
+            
+            ## Save for bwd pass
+            # ctx.save_for_backward(cos, sin, cos_k, sin_k)
+        
+            # if isinstance(input_metadata.seqlen_offsets, int):
+            #     ctx.save_for_backward(cos, sin, cos_k, sin_k)
+            #     ctx.seqlen_offsets = seqlen_offsets
+            # else:
+            #     ctx.save_for_backward(cos, sin, cos_k, sin_k, seqlen_offsets)
+            #     ctx.seqlen_offsets = None
+            # ctx.interleaved = interleaved
+            
 
         # kernels expects "bsghd"
         if input_metadata.layout == "bshd":
@@ -668,55 +748,6 @@ class _attention(torch.autograd.Function):
         num_warps = 1
         split_size = (seqlen_k + split_k - 1) // split_k
         use_cache_seqlens = cache_seqlens is not None
-
-        breakpoint()
-
-        # if rotary is provided
-        if input_metadata.rotary_cos and input_metadata.rotary_sin:
-            # Rotary Embedding Implementation
-            def apply_rotary_embedding(x, input_metadata):
-                """Forward pass that applies a rotary positional encoding into a Q or K tensor.
-
-                Args:
-                    x: Tensor being rotated (either Q or K). Has shape [b, n_ctx, n_h, h_d] where
-                        - b: batch size
-                        - n_ctx: max sequence length
-                        - n_h: num of attention heads
-                        - h_d: dimensionality of an attention head (embedding space)
-                """
-                n_ctx = x.size(1)
-
-                # cos/sin Tensor shape is [n_ctx, rot_dim]
-                cos = input_metadata.rotary_cos[:n_ctx]
-                sin = input_metadata.rotary_sin[:n_ctx]
-
-                # rearranges x to have elements in the correct order for the sin tensor multiplication
-                def half_rotate(x: torch.Tensor, interleaved: Optional[bool] = False) -> torch.Tensor:
-                    if interleaved:
-                        x_even, x_odd = x[..., ::2], x[..., 1::2]
-                        x_rearranged = torch.stack((-x_odd, x_even), dim=-1)
-                        x_rearranged = rearrange(x_rearranged, "... d pair -> ... (d pair)")
-                        return x_rearranged
-                    else:
-                        x1, x2 = x.chunk(2, dim=-1)
-                        return torch.cat((-x2, x1), dim=-1)
-                
-
-                # Get rot_dim and check that rot_dim <= head_dim of x
-                rot_dim = cos.shape[-1]
-                assert rot_dim <= x.shape[-1], "rot_dim > head_dim. rot_dim must be <= head_dim | rot_dim: " + str(rot_dim) + ", head_dim: " + str(x.shape[-1])
-                
-                # The "left" part of x is rotated according to rot_dim, the "right" is unaffected.
-                x_left = x[..., :rot_dim] * cos + half_rotate(x[..., :rot_dim], input_metadata.rotary_interleaved) * sin
-                x_right = x[..., rot_dim:]
-
-                return torch.cat((x_left, x_right), dim=-1)
-            
-            # Apply Rotary to Q and K before computing attention
-            q = apply_rotary_embedding(q, input_metadata)
-            k = apply_rotary_embedding(k, input_metadata)
-
-        breakpoint()
 
         # TODO: enable quantization
         _fwd_kernel_splitK[grid](
