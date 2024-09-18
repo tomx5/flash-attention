@@ -1985,8 +1985,8 @@ def test_flash_attn_splitkv(
 @pytest.mark.parametrize("seqlen_new_eq_seqlen_q", [True])
 @pytest.mark.parametrize("rotary_interleaved", [False, True])
 # @pytest.mark.parametrize("rotary_interleaved", [False])
-# @pytest.mark.parametrize("rotary_fraction", [0.0, 0.5, 1.0])
-@pytest.mark.parametrize("rotary_fraction", [0.0])
+@pytest.mark.parametrize("rotary_fraction", [0.0, 0.5, 1.0])
+# @pytest.mark.parametrize("rotary_fraction", [0.0])
 # @pytest.mark.parametrize("paged_kv_block_size", [None, 256])
 # @pytest.mark.parametrize("paged_kv_block_size", [256, 512])
 @pytest.mark.parametrize("paged_kv_block_size", [None])
@@ -1994,11 +1994,11 @@ def test_flash_attn_splitkv(
 # @pytest.mark.parametrize("has_leftpad", [True])
 # @pytest.mark.parametrize("has_batch_idx", [False, True])
 @pytest.mark.parametrize("has_batch_idx", [False])
-# @pytest.mark.parametrize("d", [32, 59, 64, 80, 128, 256])
+@pytest.mark.parametrize("d", [32, 59, 64, 80, 128, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
-@pytest.mark.parametrize("d", [128])
+# @pytest.mark.parametrize("d", [128])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
@@ -2059,16 +2059,22 @@ def test_flash_attn_kvcache(
         pytest.skip()
     if has_leftpad and paged_kv_block_size is not None:
         pytest.skip()
+
     device = "cuda"
     # set seed
     torch.random.manual_seed(0)
-    batch_size = 2
+    batch_size = 1
     batch_size_cache = batch_size if not has_batch_idx else batch_size * 2
-    nheads = 6
+    nheads = 1
     # rotary_dim must be a multiple of 16, and must be <= d
     rotary_dim = math.floor(int(rotary_fraction * d) / 16) * 16
     nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 3)
-    assert nheads % nheads_k == 0
+
+    # in case of GCA and nhead is < 3
+    if mha_type == "gqa" and nheads < 3:
+        pytest.skip()
+
+    assert nheads % nheads_k == 0, "num heads cannot be evenly split into groups"
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
     q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype)
     seqlen_new = seqlen_q if seqlen_new_eq_seqlen_q else torch.randint(1, seqlen_q + 1, (1,)).item()
