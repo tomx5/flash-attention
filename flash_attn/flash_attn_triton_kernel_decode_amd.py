@@ -239,7 +239,7 @@ def _fwd_kernel_splitK(
         tl.advance(Q_block_ptr, (0, 0)), boundary_check=(0, ))
     # print("q_b4_scake", q)
     # print("qk_scale", qk_scale)
-    q = (q * qk_scale).to(q.dtype)
+    # q = (q * qk_scale).to(q.dtype)
     # print("q_after_scake", q)
     if PADDED_HEAD:
         q = tl.where(d_mask[None, :], q, 0.0)
@@ -273,7 +273,7 @@ def _fwd_kernel_splitK(
         
         qk += tl.dot(q, k)  # noqa: F821
         # print("qk_trition+=", qk)
-        # qk = (qk * qk_scale).to(qk.dtype)
+        qk = (qk * qk_scale).to(qk.dtype)
         # print("qk_trition_scaled+=", qk)
 
         if USE_ALIBI:
