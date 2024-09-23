@@ -236,7 +236,9 @@ def _fwd_kernel_splitK(
     qk_scale = sm_scale * 1.44269504
     # load q: it will stay in SRAM throughout
     q = tl.load(  # noqa: F821
-        tl.advance(Q_block_ptr, (0, 0)), boundary_check=(0, ))
+        tl.advance(Q_block_ptr, (0, 0)),
+        boundary_check=(0, )
+    )
     # print("q_b4_scake", q)
     # print("qk_scale", qk_scale)
     # q = (q * qk_scale).to(q.dtype)
@@ -268,11 +270,12 @@ def _fwd_kernel_splitK(
 
         # -- compute qk ---
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        print("q_trition", q)
-        print("k_trition", k)
+        # print("q_trition", q)
+        # print("k_trition", k)
         
         qk += tl.dot(q, k)  # noqa: F821
-        # print("qk_trition+=", qk)
+        print("qk_trition+=", qk)
+        print("qk_trition_sm_scale+=", qk*sm_scale)
         qk = (qk * qk_scale).to(qk.dtype)
         # print("qk_trition_scaled+=", qk)
 
@@ -328,7 +331,7 @@ def _fwd_kernel_splitK(
         m_i = m_i_new
         p = p.to(Q.dtype.element_ty)
         
-        # print("p.to(Q.dtype.element_ty)", p)
+        print("p.to(Q.dtype.element_ty)", p)
 
         # -- scale and update acc --
         acc *= alpha[:, None]
@@ -340,6 +343,8 @@ def _fwd_kernel_splitK(
         # update pointers
         K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
         V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
+    
+    print("score?", acc)
 
     # write back O
     O_block_ptr = tl.make_block_ptr(
@@ -823,6 +828,8 @@ class _attention(torch.autograd.Function):
 
         out = torch.empty((batch_size, seqlen_q, n_group_q, heads_per_group_q, dim_padded), device=q.device, dtype=q.dtype)
 
+        print("\n\n\n")
+        print("\n\n\n")
         print("triton_out_splitk", out_splitk)
 
         # Merge together

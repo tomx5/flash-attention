@@ -20,7 +20,7 @@ from flash_attn.flash_attn_interface import _get_block_size_n
 from flash_attn.layers.rotary import apply_rotary_emb
 
 # Enable Debug flags
-DEBUG_ENABLED = True
+DEBUG_ENABLED = False
 
 # Test ROCM Triton Backend
 USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_USE_TRITON_ROCM", "FALSE") == "TRUE"
@@ -309,7 +309,15 @@ def attention_ref(
         scores.masked_fill_(local_mask, float("-inf"))
     if attn_bias is not None:
         scores = scores + attn_bias
+    print("scores dtype", scores.dtype)
     attention = torch.softmax(scores, dim=-1).to(v.dtype)
+    print("scores", scores)
+    print("exp scores", torch.exp(scores))
+    print("sum", torch.sum(torch.exp(scores), dim=-1, keepdim=True))
+    print("attention", attention)
+    print("attention * sum", attention * torch.sum(torch.exp(scores), dim=-1, keepdim=True))
+    print("torch_v", v)
+    print("matmul", torch.einsum("bhts,bshd->bthd", torch.exp(scores), v))
     if DEBUG_ENABLED:
         print("attention", attention)
         print("torch_v", v)
@@ -2027,10 +2035,10 @@ def test_flash_attn_splitkv(
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
-        # (1, 1),
-        # (1, 2),
+        (1, 1),
+        (1, 2),
         (2, 2),
-        # (4, 4),
+        (4, 4),
         # (1, 4),
         # (1, 128),
         # (1, 339),
