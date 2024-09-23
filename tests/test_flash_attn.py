@@ -19,6 +19,8 @@ from flash_attn.bert_padding import pad_input, unpad_input
 from flash_attn.flash_attn_interface import _get_block_size_n
 from flash_attn.layers.rotary import apply_rotary_emb
 
+# Enable Debug flags
+DEBUG_ENABLED = True
 
 # Test ROCM Triton Backend
 USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_USE_TRITON_ROCM", "FALSE") == "TRUE"
@@ -275,12 +277,23 @@ def attention_ref(
     d = q.shape[-1]
     if not reorder_ops:
         scores = torch.einsum("bthd,bshd->bhts", q / math.sqrt(d), k)
+        if DEBUG_ENABLED:
+            print("torch_q_/_sqrt(d)", q / math.sqrt(d))
+            print("torch_k", k)
     else:
         scores = torch.einsum("bthd,bshd->bhts", q, k / math.sqrt(d))
+        if DEBUG_ENABLED:
+            print("torch_q", q)
+            print("torch_k_/_sqrt(d)", k / math.sqrt(d))
+    if DEBUG_ENABLED:
+        print("torch_scores", scores)
+        print("torch_softcap", softcap)
     if softcap > 0:
         scores = scores / softcap
         scores = scores.tanh()
         scores = scores * softcap
+        if DEBUG_ENABLED:
+            print("torch_scores_after", scores)
     if key_padding_mask is not None:
         scores.masked_fill_(rearrange(~key_padding_mask, "b s -> b 1 1 s"), float("-inf"))
     if window_size[0] >= 0 or window_size[1] >= 0:
@@ -297,6 +310,9 @@ def attention_ref(
     if attn_bias is not None:
         scores = scores + attn_bias
     attention = torch.softmax(scores, dim=-1).to(v.dtype)
+    if DEBUG_ENABLED:
+        print("attention", attention)
+        print("torch_v", v)
     # Some rows might be completely masked out so we fill them with zero instead of NaN
     if window_size[0] >= 0 or window_size[1] >= 0:
         attention = attention.masked_fill(torch.all(local_mask, dim=-1, keepdim=True), 0.0)
@@ -312,6 +328,10 @@ def attention_ref(
     else:
         attention_drop = attention
     output = torch.einsum("bhts,bshd->bthd", attention_drop, v * dropout_scaling)
+    if DEBUG_ENABLED:
+        print("attention_drop", attention_drop)
+        print("dropout_scaling", dropout_scaling)
+        print("output", output)
     if query_padding_mask is not None:
         output.masked_fill_(rearrange(~query_padding_mask, "b s -> b s 1 1"), 0.0)
     return output.to(dtype=dtype_og), attention.to(dtype=dtype_og)
@@ -1969,40 +1989,49 @@ def test_flash_attn_splitkv(
 
 # @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
 @pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("num_splits", [1, 0])
-# @pytest.mark.parametrize("num_splits", [1])
-@pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
-# @pytest.mark.parametrize("mha_type", ["mha"])
-@pytest.mark.parametrize("new_kv", [False, True])
+# @pytest.mark.parametrize("num_splits", [1, 0])
+@pytest.mark.parametrize("num_splits", [0])
+# @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
+@pytest.mark.parametrize("mha_type", ["mha"])
+# @pytest.mark.parametrize("new_kv", [False, True])
 # @pytest.mark.parametrize("new_kv", [False])
-@pytest.mark.parametrize("alibi", [False, True])
-# @pytest.mark.parametrize("alibi", [False])
-@pytest.mark.parametrize("local", [False, True])
-# @pytest.mark.parametrize("local", [False])
-@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("new_kv", [True])
+# @pytest.mark.parametrize("alibi", [False, True])
+@pytest.mark.parametrize("alibi", [False])
+# @pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("local", [False])
+@pytest.mark.parametrize("causal", [False])
 # @pytest.mark.parametrize("causal", [False])
 # @pytest.mark.parametrize("seqlen_new_eq_seqlen_q", [True, False])
 @pytest.mark.parametrize("seqlen_new_eq_seqlen_q", [True])
-@pytest.mark.parametrize("rotary_interleaved", [False, True])
-# @pytest.mark.parametrize("rotary_interleaved", [False])
-@pytest.mark.parametrize("rotary_fraction", [0.0, 0.5, 1.0])
-# @pytest.mark.parametrize("rotary_fraction", [0.0])
+# @pytest.mark.parametrize("rotary_interleaved", [False, True])
+@pytest.mark.parametrize("rotary_interleaved", [False])
+# @pytest.mark.parametrize("rotary_fraction", [0.0, 0.5, 1.0])
+# @pytest.mark.parametrize("rotary_fraction", [0.5, 1.0])
+@pytest.mark.parametrize("rotary_fraction", [1.0])
 # @pytest.mark.parametrize("paged_kv_block_size", [None, 256])
 # @pytest.mark.parametrize("paged_kv_block_size", [256, 512])
 @pytest.mark.parametrize("paged_kv_block_size", [None])
-@pytest.mark.parametrize("has_leftpad", [False, True])
+# @pytest.mark.parametrize("has_leftpad", [False, True])
 # @pytest.mark.parametrize("has_leftpad", [True])
+@pytest.mark.parametrize("has_leftpad", [False])
 # @pytest.mark.parametrize("has_batch_idx", [False, True])
-@pytest.mark.parametrize("has_batch_idx", [False])
-@pytest.mark.parametrize("d", [32, 59, 64, 80, 128, 256])
+# @pytest.mark.parametrize("has_batch_idx", [False])
+@pytest.mark.parametrize("has_batch_idx", [True])
+@pytest.mark.parametrize("d", [2, 8, 16, 32, 59, 64, 80, 128, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
-# @pytest.mark.parametrize("d", [128])
+# @pytest.mark.parametrize("d", [16]) # 16 fails
+# @pytest.mark.parametrize("d", [2])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
-        (1, 2),
+        # (1, 1),
+        # (1, 2),
+        # (2, 2),
+        (4, 4),
+        # (1, 4),
         # (1, 128),
         # (1, 339),
         # (3, 1024),
@@ -2035,6 +2064,8 @@ def test_flash_attn_kvcache(
     num_splits,
     dtype,
 ):
+    # torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
+
     if USE_TRITON_ROCM:
         if paged_kv_block_size is not None:
             pytest.skip("paged attention not supported on AMD's Triton Backend yet")
@@ -2076,16 +2107,34 @@ def test_flash_attn_kvcache(
 
     assert nheads % nheads_k == 0, "num heads cannot be evenly split into groups"
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
-    q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype)
+
+    if DEBUG_ENABLED:
+        q = torch.arange(seqlen_q, dtype=dtype, device="cuda").view(1, seqlen_q, 1, 1).expand(batch_size, seqlen_q, nheads, d).requires_grad_().contiguous()
+        print("q_debug", q, q.shape)
+    else:
+        q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype)
+
     seqlen_new = seqlen_q if seqlen_new_eq_seqlen_q else torch.randint(1, seqlen_q + 1, (1,)).item()
     if new_kv:
-        k = torch.randn(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
-        v = torch.randn(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
+        if DEBUG_ENABLED:
+            k = torch.arange(seqlen_new, dtype=dtype, device="cuda").view(1, seqlen_new, 1, 1).expand(batch_size, seqlen_new, nheads_k, d).requires_grad_().contiguous()
+            print("k_debug", k, k.shape)
+            v = torch.arange(seqlen_new, dtype=dtype, device="cuda").view(1, seqlen_new, 1, 1).expand(batch_size, seqlen_new, nheads_k, d).requires_grad_().contiguous()
+            print("v_debug", v, v.shape)
+        else:
+            k = torch.randn(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
+            v = torch.randn(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
     else:
         k, v = None, None
     if paged_kv_block_size is None:
-        k_cache = torch.randn(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
-        v_cache = torch.randn(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
+        if DEBUG_ENABLED:
+            k_cache = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, seqlen_k, 1, 1).expand(batch_size_cache, seqlen_k, nheads_k, d).requires_grad_().contiguous()
+            print("k_cache_debug", k_cache, k_cache.shape)
+            v_cache = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, seqlen_k, 1, 1).expand(batch_size_cache, seqlen_k, nheads_k, d).requires_grad_().contiguous()
+            print("v_cache_debug", v_cache, v_cache.shape)
+        else:
+            k_cache = torch.randn(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
+            v_cache = torch.randn(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
         block_table = None
     else:
         (
@@ -2166,16 +2215,26 @@ def test_flash_attn_kvcache(
                 "b 1 (s h) d -> b s h d",
                 s=seqlen_q,
             )
-        print("K_RO DEBUG")
-        print("k thiers", k, k.shape)
-        print("k theirs apply_rotary_emb args", cos, sin, cache_seqlens, rotary_interleaved)
+        # print("K_RO DEBUG")
+        # print("k thiers", k, k.shape)
+        # print("k theirs apply_rotary_emb args", cos, sin, cache_seqlens, rotary_interleaved)
         # q_ro = q
         k_ro = apply_rotary_emb(
             k, cos, sin, seqlen_offsets=cache_seqlens, interleaved=rotary_interleaved
         )
-        print("k thiers AFTER", k, k.shape)
-        print("k cache??", k_cache)
-        print("k_ro theirs", k_ro, k_ro.shape)
+        # print("k thiers AFTER", k, k.shape)
+        # print("k cache??", k_cache)
+        # print("k_ro theirs", k_ro, k_ro.shape)
+        if DEBUG_ENABLED:
+            print("angle", angle)
+            print("cos", cos)
+            print("sin", sin)
+
+        # print("q", q)
+        # print("k", k)
+        if DEBUG_ENABLED:        
+            print("q_ro", q_ro)
+            print("k_ro", k_ro)
     else:
         cos, sin = None, None
         q_ro, k_ro = q, k
@@ -2194,6 +2253,11 @@ def test_flash_attn_kvcache(
         v_cache_ref[update_mask] = rearrange(v, "b s ... -> (b s) ...")
     k_cache_rep = repeat(k_cache_ref, "b s h d -> b s (h g) d", g=nheads // nheads_k)
     v_cache_rep = repeat(v_cache_ref, "b s h d -> b s (h g) d", g=nheads // nheads_k)
+    
+    if DEBUG_ENABLED:
+        print("cache_seqlens:", cache_seqlens)
+        print("cache_batch_idx:", cache_batch_idx)
+
     out = flash_attn_with_kvcache(
         q, # use the rotated vector
         k_cache if paged_kv_block_size is None else k_cache_paged,
@@ -2217,6 +2281,8 @@ def test_flash_attn_kvcache(
         alibi_slopes=alibi_slopes,
         num_splits=num_splits,
     )
+    if DEBUG_ENABLED:
+        print("out", out)
     # out = flash_attn_with_kvcache(
     #     q, k_cache, v_cache, cache_seqlens=cache_seqlens, causal=causal, window_size=window_size
     # )
@@ -2257,6 +2323,7 @@ def test_flash_attn_kvcache(
         reorder_ops=True,
         key_leftpad=cache_leftpad,
     )
+    print("out_ref", out_ref)
     print(f"Output max diff: {(out - out_ref).abs().max().item()}")
     print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
     print(f"Pytorch max diff: {(out_pt - out_ref).abs().max().item()}")
@@ -2286,6 +2353,11 @@ def test_flash_attn_kvcache(
         assert torch.allclose(k_cache_select, k_cache_ref, rtol=1e-3, atol=1e-3)
         assert torch.equal(v_cache_select, v_cache_ref)
     mult = 3 if not alibi else 5
+
+    if DEBUG_ENABLED:
+        print("triton_diff", (out - out_ref).abs())
+        print("torch_diff", (out_pt - out_ref).abs())
+
     assert (out - out_ref).abs().max().item() <= mult * (out_pt - out_ref).abs().max().item() + 1e-5
 
 
