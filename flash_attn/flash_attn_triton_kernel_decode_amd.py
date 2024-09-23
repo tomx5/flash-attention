@@ -6,10 +6,11 @@ import pytest
 import torch
 import sys
 
+import pdb
+
 import triton
 import triton.language as tl
 from flash_attn.flash_attn_triton_kernel_prefill_amd import MetaData
-
 
 def _strides(x: torch.Tensor, *stride_names: str):
     if x is None:
@@ -236,7 +237,10 @@ def _fwd_kernel_splitK(
     # load q: it will stay in SRAM throughout
     q = tl.load(  # noqa: F821
         tl.advance(Q_block_ptr, (0, 0)), boundary_check=(0, ))
-    q = (q * qk_scale).to(q.dtype)
+    print("q_b4_scake", q)
+    print("qk_scale", qk_scale)
+    # q = (q * qk_scale).to(q.dtype)
+    print("q_after_scake", q)
     if PADDED_HEAD:
         q = tl.where(d_mask[None, :], q, 0.0)
 
@@ -264,7 +268,13 @@ def _fwd_kernel_splitK(
 
         # -- compute qk ---
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+        print("q_trition", q)
+        print("k_trition", k)
+        
         qk += tl.dot(q, k)  # noqa: F821
+        print("qk_trition+=", qk)
+        qk = (qk * qk_scale).to(qk.dtype)
+        print("qk_trition_scaled+=", qk)
 
         if USE_ALIBI:
             row_idx = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -307,16 +317,25 @@ def _fwd_kernel_splitK(
         else:
             qk = qk - m_i_new[:, None] 
         
+        print("m_i_new", m_i_new)
+        print("qk_after", qk)
         p = tl.math.exp2(qk) # p = e^(qk^T)
+        print("p", p)
+        print("v", v)
 
-        # -- update m_i (current max) and l_i --
+        # -- update m_i (current max) and l_i (sum of elements) --
         l_i = l_i * alpha + tl.sum(p, 1)
         m_i = m_i_new
         p = p.to(Q.dtype.element_ty)
+        
+        print("p.to(Q.dtype.element_ty)", p)
 
         # -- scale and update acc --
         acc *= alpha[:, None]
+        print("alpha", alpha[:, None])
         acc += tl.dot(p.to(v.dtype), v) # acc += p
+        print("tl.dot(p.to(v.dtype), v)", tl.dot(p.to(v.dtype), v))
+        print("acc+=", acc)
         
         # update pointers
         K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
@@ -331,6 +350,7 @@ def _fwd_kernel_splitK(
         block_shape=(BLOCK_M, BLOCK_DMODEL),
         order=(1, 0),
     )
+    print("acc_end_splitk", acc)
     tl.store(
         tl.advance(O_block_ptr, (0, 0)),
         acc,
@@ -473,15 +493,20 @@ def _splitK_reduce(
 
     # read sum
     l_sum *= alpha
+    print("l_sum", l_sum)
     g_sum = tl.sum(l_sum, axis=0)
     acc = acc * alpha[:, None]
 
+    # print("acc: ", acc)
+    print("tl.sum(acc, axis=0): ", tl.sum(acc, axis=0))
     if IS_CAUSAL:
         # Avoid division by zero
         g_sum_safe = tl.where(g_sum > 0, g_sum, 1.0)
         acc_out = tl.sum(acc, axis=0) / g_sum_safe
     else:
         acc_out = tl.sum(acc, axis=0) / g_sum
+    print("g_sum: ", g_sum)
+    print("acc_out: ", acc_out)
 
     # Store output
     Out_ptr = (Out + stride_oz * off_z + stride_oh * off_h + stride_og * off_g + stride_om * off_m +
@@ -636,16 +661,8 @@ class _attention(torch.autograd.Function):
                 seqlen_offsets=input_metadata.cache_seqlens,
                 interleaved=input_metadata.rotary_interleaved,
             )
-            # print("k_ro ours", k_ro, k_ro.shape)
 
-            q, input_metadata.k_new = q_ro, k_ro
-
-            # breakpoint()
-
-        print("q_ro ours", q)
-        print("k_ro ours", k)
-        print("v ours", v)
-        print(input_metadata)
+            q, input_metadata.k_new = q_ro.to(q.dtype), k_ro.to(q.dtype)
 
             ## Save for BWD pass
             # if isinstance(seqlen_offsets, int):
@@ -668,6 +685,11 @@ class _attention(torch.autograd.Function):
             #     ctx.save_for_backward(cos, sin, cos_k, sin_k, seqlen_offsets)
             #     ctx.seqlen_offsets = None
             # ctx.interleaved = interleaved
+        
+        
+        # print("after inner rotation")
+        # print("q", q)
+        # print("input_metadata.k_new", input_metadata.k_new)
             
 
         # kernels expects "bsghd"
@@ -749,6 +771,8 @@ class _attention(torch.autograd.Function):
         split_size = (seqlen_k + split_k - 1) // split_k
         use_cache_seqlens = cache_seqlens is not None
 
+        print("sm_scale: ", input_metadata.sm_scale)
+
         # TODO: enable quantization
         _fwd_kernel_splitK[grid](
             Q=q,
@@ -798,6 +822,8 @@ class _attention(torch.autograd.Function):
         )
 
         out = torch.empty((batch_size, seqlen_q, n_group_q, heads_per_group_q, dim_padded), device=q.device, dtype=q.dtype)
+
+        print("triton_out_splitk", out_splitk)
 
         # Merge together
         splitK_pow2 = triton.next_power_of_2(split_k)
