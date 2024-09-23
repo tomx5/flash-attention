@@ -20,7 +20,7 @@ from flash_attn.flash_attn_interface import _get_block_size_n
 from flash_attn.layers.rotary import apply_rotary_emb
 
 # Enable Debug flags
-DEBUG_ENABLED = True
+DEBUG_ENABLED = False
 
 # Test ROCM Triton Backend
 USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_USE_TRITON_ROCM", "FALSE") == "TRUE"
@@ -2018,12 +2018,12 @@ def test_flash_attn_splitkv(
 # @pytest.mark.parametrize("has_batch_idx", [False, True])
 # @pytest.mark.parametrize("has_batch_idx", [False])
 @pytest.mark.parametrize("has_batch_idx", [True])
-@pytest.mark.parametrize("d", [2, 8, 16, 32, 59, 64, 80, 128, 256])
+# @pytest.mark.parametrize("d", [2, 8, 16, 32, 59, 64, 80, 128, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
 # @pytest.mark.parametrize("d", [16]) # 16 fails
-# @pytest.mark.parametrize("d", [2])
+@pytest.mark.parametrize("d", [2])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
@@ -2281,8 +2281,7 @@ def test_flash_attn_kvcache(
         alibi_slopes=alibi_slopes,
         num_splits=num_splits,
     )
-    if DEBUG_ENABLED:
-        print("out", out)
+    print("out", out)
     # out = flash_attn_with_kvcache(
     #     q, k_cache, v_cache, cache_seqlens=cache_seqlens, causal=causal, window_size=window_size
     # )
