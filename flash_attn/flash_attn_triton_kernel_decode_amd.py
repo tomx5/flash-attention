@@ -343,6 +343,8 @@ def _fwd_kernel_splitK(
         # update pointers
         K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
         V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
+
+    print("l_i", l_i)
     
     print("score?", acc)
 
