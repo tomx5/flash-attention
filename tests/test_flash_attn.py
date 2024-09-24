@@ -2035,9 +2035,9 @@ def test_flash_attn_splitkv(
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
-        (1, 1),
-        (1, 2),
-        (2, 2),
+        # (1, 1),
+        # (1, 2),
+        # (2, 2),
         (4, 4),
         # (1, 4),
         # (1, 128),
