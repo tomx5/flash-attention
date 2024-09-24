@@ -505,15 +505,15 @@ def _splitK_reduce(
     acc = acc * alpha[:, None]
 
     # print("acc: ", acc)
-    # print("tl.sum(acc, axis=0): ", tl.sum(acc, axis=0))
+    print("tl.sum(acc, axis=0): ", tl.sum(acc, axis=0))
     if IS_CAUSAL:
         # Avoid division by zero
         g_sum_safe = tl.where(g_sum > 0, g_sum, 1.0)
         acc_out = tl.sum(acc, axis=0) / g_sum_safe
     else:
         acc_out = tl.sum(acc, axis=0) / g_sum
-    # print("g_sum: ", g_sum)
-    # print("acc_out: ", acc_out)
+    print("g_sum: ", g_sum)
+    print("acc_out: ", acc_out)
 
     # Store output
     Out_ptr = (Out + stride_oz * off_z + stride_oh * off_h + stride_og * off_g + stride_om * off_m +
@@ -832,6 +832,7 @@ class _attention(torch.autograd.Function):
 
         print("\n\n\n")
         print("\n\n\n")
+        print("triton_out_splitk.dtype", out_splitk.dtype)
         print("triton_out_splitk", out_splitk)
 
         # Merge together
@@ -864,6 +865,8 @@ class _attention(torch.autograd.Function):
             use_mask=use_mask,
             IS_CAUSAL=input_metadata.causal,
             num_warps=4)
+        
+        print("OUT OUT", out)
 
         lse = lse.reshape([batch_size, n_group_q, heads_per_group_q, seqlen_q])
         if q.ndim == 4:
@@ -873,7 +876,10 @@ class _attention(torch.autograd.Function):
             lse = lse[:, 0]
         if seqlen_k == 0:
             out.zero_()
+
+        print("out_b4_reshape", out)
         out = out.reshape(batch_size, heads_per_group_q * n_group_q, -1, dim_padded).contiguous()
+        print("out_aftR_reshape", out)
 
         # output is batch_size, heads_per_group_q * group_q, seqlen_q, dim_q
         if original_layout == "bshd":
