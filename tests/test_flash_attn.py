@@ -2117,7 +2117,7 @@ def test_flash_attn_kvcache(
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
 
     if DEBUG_ENABLED:
-        q = torch.arange(seqlen_q, dtype=dtype, device="cuda").view(1, seqlen_q, 1, 1).expand(batch_size, seqlen_q, nheads, d).requires_grad_().contiguous()
+        q = torch.arange(seqlen_q, dtype=dtype, device="cuda").view(1, seqlen_q, 1, 1).expand(batch_size, seqlen_q, nheads, d).requires_grad_().contiguous().to(dtype=dtype)
         print("q_debug", q, q.shape)
     else:
         q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype)
@@ -2125,9 +2125,9 @@ def test_flash_attn_kvcache(
     seqlen_new = seqlen_q if seqlen_new_eq_seqlen_q else torch.randint(1, seqlen_q + 1, (1,)).item()
     if new_kv:
         if DEBUG_ENABLED or True:
-            k = torch.arange(seqlen_new, dtype=dtype, device="cuda").view(1, seqlen_new, 1, 1).expand(batch_size, seqlen_new, nheads_k, d).requires_grad_().contiguous()
+            k = torch.arange(seqlen_new, dtype=dtype, device="cuda").view(1, seqlen_new, 1, 1).expand(batch_size, seqlen_new, nheads_k, d).requires_grad_().contiguous().to(dtype=dtype)
             print("k_debug", k, k.shape)
-            v = torch.arange(seqlen_new, dtype=dtype, device="cuda").view(1, seqlen_new, 1, 1).expand(batch_size, seqlen_new, nheads_k, d).requires_grad_().contiguous()
+            v = torch.arange(seqlen_new, dtype=dtype, device="cuda").view(1, seqlen_new, 1, 1).expand(batch_size, seqlen_new, nheads_k, d).requires_grad_().contiguous().to(dtype=dtype)
             print("v_debug", v, v.shape)
         else:
             k = torch.randn(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
@@ -2210,7 +2210,7 @@ def test_flash_attn_kvcache(
         if causal or local:
             q_ro = apply_rotary_emb(
                 q, cos, sin, seqlen_offsets=cache_seqlens, interleaved=rotary_interleaved
-            )
+            ).to(dtype=dtype)
         else:
             q_ro = rearrange(
                 apply_rotary_emb(
@@ -2222,14 +2222,14 @@ def test_flash_attn_kvcache(
                 ),
                 "b 1 (s h) d -> b s h d",
                 s=seqlen_q,
-            )
+            ).to(dtype=dtype)
         # print("K_RO DEBUG")
         # print("k thiers", k, k.shape)
         # print("k theirs apply_rotary_emb args", cos, sin, cache_seqlens, rotary_interleaved)
         # q_ro = q
         k_ro = apply_rotary_emb(
             k, cos, sin, seqlen_offsets=cache_seqlens, interleaved=rotary_interleaved
-        )
+        ).to(dtype=dtype)
         # print("k thiers AFTER", k, k.shape)
         # print("k cache??", k_cache)
         # print("k_ro theirs", k_ro, k_ro.shape)
