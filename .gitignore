@@ -29,5 +29,3 @@ venv
 .venv
 scripts
 log
-csrc/
-csrc/composable_kernel
