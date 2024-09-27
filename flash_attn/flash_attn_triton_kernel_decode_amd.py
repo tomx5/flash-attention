@@ -91,8 +91,6 @@ def _fwd_kernel_splitK(
     USE_ROTARY: tl.constexpr,
     ROTARY_INTERLEAVED: tl.constexpr
 ):
-    DTYPE = tl.float16
-
     # Padding
     PADDED_HEAD: tl.constexpr = (ACTUAL_BLOCK_DMODEL != BLOCK_DMODEL)
     if PADDED_HEAD:
@@ -102,7 +100,7 @@ def _fwd_kernel_splitK(
     off_zhg = tl.program_id(1)
     off_z = off_zhg // (H_q * G_q)      # batch
     off_h_q = (off_zhg // G_q) % H_q    # head
-    off_g_q = off_zhg % G_q
+    off_g_q = off_zhg % G_q             # group (gca / mqa)
     splitk_idx = tl.program_id(2)
 
     # pick batch index
@@ -205,7 +203,6 @@ def _fwd_kernel_splitK(
         order=(1, 0),
     )
 
-    # K transposed
     K_block_ptr = tl.make_block_ptr(
         base=k_base,
         shape=(ACTUAL_BLOCK_DMODEL, hi),
@@ -232,30 +229,20 @@ def _fwd_kernel_splitK(
 
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float16)  # noqa: F821
 
-    USE_EXP2 = True
     # scale sm_scale by log_2(e) and use
     # 2^x instead of exp in the loop because CSE and LICM
     # don't work as expected with `exp` in the loop
     log2_e = 1.44269504
+    qk_scale = sm_scale * log2_e
 
-    if USE_EXP2:
-        qk_scale = sm_scale * log2_e
-    else:
-        qk_scale = sm_scale
     # load q: it will stay in SRAM throughout
     q = tl.load(  # noqa: F821
         tl.advance(Q_block_ptr, (0, 0)),
         boundary_check=(0, )
     )
-    # print("q_b4_scake", q)
-    # print("qk_scale", qk_scale)
-    # q = (q * qk_scale).to(q.dtype)
-    # print("q_after_scake", q)
+    q = (q * qk_scale)
     if PADDED_HEAD:
         q = tl.where(d_mask[None, :], q, 0.0)
-
-    # print("Q dtype", Q.dtype.element_ty)
-    q = q.to(tl.float16)
 
     # loop over k, v and update accumulator
     for start_n in range(lo, hi, BLOCK_N):
@@ -275,25 +262,13 @@ def _fwd_kernel_splitK(
             k = tl.where(d_mask[:, None], k, 0.0)
             v = tl.where(d_mask[None, :], v, 0.0)
 
-        k = k.to(tl.float16)
-        v = v.to(tl.float16)
-
-        pdb.set_trace()
-
         if USE_ROTARY:
             # rotate q and k before dot product
             pass
 
         # -- compute qk ---
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float16)
-        # print("q_trition", q)
-        # print("k_trition", k)
-        
-        qk += tl.dot(q, k, out_dtype=tl.float16)  # noqa: F821
-        print("qk_trition+=", qk)
-        print("qk_trition_sm_scale+=", qk*sm_scale)
-        qk = (qk * qk_scale).to(qk.dtype)
-        # print("qk_trition_scaled+=", qk)
+        qk += tl.dot(q, k)
 
         if USE_ALIBI:
             row_idx = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -305,10 +280,7 @@ def _fwd_kernel_splitK(
             
             # Compute ALiBi bias
             alibi_bias = -1 * alibi_slope * relative_pos
-            if USE_EXP2:
-                qk += (alibi_bias * log2_e).to(qk.dtype)
-            else:
-                qk += alibi_bias.to(qk.dtype)
+            qk += (alibi_bias * log2_e)
 
         # Apply causal mask if IS_CAUSAL is True
         if IS_CAUSAL:
@@ -320,67 +292,39 @@ def _fwd_kernel_splitK(
             causal_mask = row_idx[:, None] >= (col_offset + col_idx[None, :])
 
             # Apply the mask
-            qk = tl.where(causal_mask, qk, float("-inf")).to(qk.dtype)
+            qk = tl.where(causal_mask, qk, float("-inf"))
 
         # TODO: This is slow, and only needed at the last iteration.
         # Maybe we can unroll the last iteration instead?
         if BOUNDS_CHECKS_N:
-            qk = tl.where(tl.arange(0, BLOCK_N) < hi - start_n, qk, float("-inf")).to(qk.dtype)
+            qk = tl.where(tl.arange(0, BLOCK_N) < hi - start_n, qk, float("-inf"))
 
         # -- compute scaling constant ---
-        m_i_new = tl.maximum(m_i, tl.max(qk, 1)).to(m_i.dtype)
-        print("m_i_new D", m_i_new.dtype)
+        m_i_new = tl.maximum(m_i, tl.max(qk, 1))
         if IS_CAUSAL:
-            if USE_EXP2:
-                alpha = tl.math.exp2(tl.where(m_i > float("-inf"), m_i - m_i_new, float("-inf"))).to(qk.dtype)
-            else:
-                alpha = tl.math.exp(tl.where(m_i > float("-inf"), m_i - m_i_new, float("-inf"))).to(qk.dtype)
+            alpha = tl.math.exp2(tl.where(m_i > float("-inf"), m_i - m_i_new, float("-inf")))
         else:
-            if USE_EXP2:
-                alpha = tl.math.exp2(m_i - m_i_new + 0.0).to(qk.dtype)
-            else:
-                alpha = tl.math.exp(m_i - m_i_new + 0.0).to(qk.dtype)
-
+            alpha = tl.math.exp2(m_i - m_i_new)
         # cause of nan because subtracting infs
         if IS_CAUSAL:
-            qk = tl.where(qk > float("-inf"), qk - m_i_new[:, None], float("-inf")).to(qk.dtype)
+            qk = tl.where(qk > float("-inf"), qk - m_i_new[:, None], float("-inf"))
         else:
-            qk = (qk - m_i_new[:, None]).to(qk.dtype) 
+            qk = qk - m_i_new[:, None]
         
-        # print("m_i_new", m_i_new)
-        # print("qk_after", qk)
-        if USE_EXP2:
-            p = tl.math.exp2(qk + 0.0).to(qk.dtype) # p = e^(qk^T)
-        else:
-            p = tl.math.exp(qk + 0.0).to(qk.dtype)
-        # print("p", p)
-        # print("v", v)
-
-        # print("p dtype", p.dtype.element_ty)
-        # print("alpha dtype", alpha.dtype.element_ty)
-        # print("m_i_new dtype", m_i_new.dtype.element_ty)
+        p = tl.math.exp2(qk) # p = e^(qk^T)
 
         # -- update m_i (current max) and l_i (sum of elements) --
-        l_i = l_i * alpha + tl.sum(p, 1).to(l_i.dtype)
+        l_i = l_i * alpha + tl.sum(p, 1)
         m_i = m_i_new
-        p = p.to(qk.dtype)
-        
-        print("p.to(Q.dtype.element_ty)", p)
+        p = p.to(Q.dtype.element_ty)
 
         # -- scale and update acc --
         acc *= alpha[:, None]
-        # print("alpha", alpha[:, None])
-        acc += tl.dot(p.to(v.dtype), v).to(acc.dtype) # acc += p
-        # print("tl.dot(p.to(v.dtype), v)", tl.dot(p.to(v.dtype), v))
-        # print("acc+=", acc)
+        acc += tl.dot(p.to(v.dtype), v)
         
         # update pointers
         K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
         V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
-
-    print("l_i", l_i)
-    
-    print("score?", acc)
 
     # write back O
     O_block_ptr = tl.make_block_ptr(
@@ -391,15 +335,11 @@ def _fwd_kernel_splitK(
         block_shape=(BLOCK_M, BLOCK_DMODEL),
         order=(1, 0),
     )
-    print("before")
-    # print("acc_end_splitk", acc)
-    pdb.set_trace()
     tl.store(
         tl.advance(O_block_ptr, (0, 0)),
         acc,
         boundary_check=(0, ),
     )
-    print("after")
     # Write metadata for split-K reduction
     Metadata_ptr = (Metadata + off_zhg * stride_mzhg + splitk_idx * stride_ms + start_m * BLOCK_M +
                     tl.arange(0, BLOCK_M))
@@ -515,9 +455,6 @@ def _splitK_reduce(
 
     o_ptr = (Out_splitK + off_zhg * stride_osk_zhg + stride_osk_m * off_m + off_k * BLOCK_SIZE +
              stride_osk_s * spk_idx[:, None] + kidx[None, :] * stride_osk_k)
-    
-    USE_EXP2 = False
-    log2_e = 1.44269504
 
     # read max values of each splitK
     if use_mask:
@@ -534,55 +471,36 @@ def _splitK_reduce(
     
     if IS_CAUSAL:
         l_m_offset = l_m - g_m
-        if USE_EXP2:
-            alpha = tl.where(l_m_offset > float("-inf"), tl.math.exp2(l_m_offset), 0.0)
-        else:
-            alpha = tl.where(l_m_offset > float("-inf"), tl.math.exp(l_m_offset), 0.0)
-
+        alpha = tl.where(l_m_offset > float("-inf"), tl.math.exp2(l_m_offset), 0.0)
     else:
-        if USE_EXP2:
-            alpha = tl.math.exp2(l_m - g_m)
-        else:
-            alpha = tl.math.exp(l_m - g_m)
+        alpha = tl.math.exp2(l_m - g_m)
     # read sum
     l_sum *= alpha
-    # print("l_sum", l_sum)
     g_sum = tl.sum(l_sum, axis=0)
     acc = acc * alpha[:, None]
 
-    # print("acc: ", acc)
-    print("tl.sum(acc, axis=0): ", tl.sum(acc, axis=0))
     if IS_CAUSAL:
         # Avoid division by zero
         g_sum_safe = tl.where(g_sum > 0, g_sum, 1.0)
         acc_out = tl.sum(acc, axis=0) / g_sum_safe
     else:
         acc_out = tl.sum(acc, axis=0) / g_sum
-    print("g_sum: ", g_sum)
-    print("acc_out: ", acc_out)
-
-    acc_out_cast = tl.cast(acc_out, dtype=tl.float16, fp_downcast_rounding="rtz")
-    print("acc_out_cast: ", acc_out_cast)
 
     # Store output
     Out_ptr = (Out + stride_oz * off_z + stride_oh * off_h + stride_og * off_g + stride_om * off_m +
                off_k * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE))
-    tl.store(Out_ptr, acc_out_cast)
+    tl.store(Out_ptr, acc_out)
+
+    # log constant
+    log2_e = 1.44269504
 
     # Store lse
     l_ptrs = LSE + off_zhg * stride_lse_zhg + off_m
     if IS_CAUSAL:
-        if USE_EXP2:
-            lse = tl.where(g_sum > 0, (g_m + tl.math.log2(g_sum)) / log2_e, g_m)
-        else:
-            lse = tl.where(g_sum > 0, (g_m + tl.math.log(g_sum)), g_m)
+        lse = tl.where(g_sum > 0, (g_m + tl.math.log2(g_sum)) / log2_e, g_m)
         tl.store(l_ptrs, lse)
     else:
-        if USE_EXP2:
-            tl.store(l_ptrs, (g_m + tl.math.log2(g_sum)) / log2_e)
-        else:
-            tl.store(l_ptrs, (g_m + tl.math.log(g_sum)))
-
+        tl.store(l_ptrs, (g_m + tl.math.log2(g_sum)) / log2_e)
 
 
 def quantize_kv_int4(k: torch.Tensor, num_groups: int = 1) -> torch.Tensor:
@@ -679,8 +597,6 @@ class _attention(torch.autograd.Function):
     def forward(cls, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, input_metadata: MetaData):
         original_layout = input_metadata.layout
 
-        # print("k.shape", k.shape)
-
         # Rotary Embedding Implementation
         if torch.is_tensor(input_metadata.rotary_cos) and torch.is_tensor(input_metadata.rotary_sin):
             if input_metadata.causal or input_metadata.local:
@@ -691,17 +607,6 @@ class _attention(torch.autograd.Function):
                     seqlen_offsets=input_metadata.cache_seqlens,
                     interleaved=input_metadata.rotary_interleaved,
                 )
-                # q_ro = apply_rotary(
-                #     x=q,
-                #     cos=input_metadata.rotary_cos,
-                #     sin=input_metadata.rotary_sin,
-                #     seqlen_offsets=input_metadata.cache_seqlens,
-                #     cu_seqlens=input_metadata.cu_seqlens_q,
-                #     max_seqlen=input_metadata.max_seqlens_q,
-                #     inplace=input_metadata.rotary_inplace,
-                #     conjugate=input_metadata.rotary_conjugate,
-                #     interleaved=input_metadata.rotary_interleaved,
-                # )
             else:
                 q_ro = rearrange(
                     apply_rotary_emb(
@@ -714,9 +619,6 @@ class _attention(torch.autograd.Function):
                     "b 1 (s h) d -> b s h d",
                     s=input_metadata.max_seqlens_q,
                 )
-            # q_ro = q
-            # print("k ours", k, k.shape)
-            # print("k ours apply_rotary args", input_metadata.rotary_cos, input_metadata.rotary_sin, cache_seqlens, input_metadata.rotary_interleaved)
             k_ro = apply_rotary_emb(
                 input_metadata.k_new,
                 input_metadata.rotary_cos,
@@ -726,34 +628,6 @@ class _attention(torch.autograd.Function):
             )
 
             q, input_metadata.k_new = q_ro.to(q.dtype), k_ro.to(q.dtype)
-
-            ## Save for BWD pass
-            # if isinstance(seqlen_offsets, int):
-            #     ctx.save_for_backward(cos, sin, cu_seqlens)  # Can't save int with save_for_backward
-            #     ctx.seqlen_offsets = seqlen_offsets
-            # else:
-            #     ctx.save_for_backward(cos, sin, cu_seqlens, seqlen_offsets)
-            #     ctx.seqlen_offsets = None
-            # ctx.interleaved = interleaved
-            # ctx.inplace = inplace
-            # ctx.max_seqlen = max_seqlen
-            
-            ## Save for bwd pass
-            # ctx.save_for_backward(cos, sin, cos_k, sin_k)
-        
-            # if isinstance(input_metadata.seqlen_offsets, int):
-            #     ctx.save_for_backward(cos, sin, cos_k, sin_k)
-            #     ctx.seqlen_offsets = seqlen_offsets
-            # else:
-            #     ctx.save_for_backward(cos, sin, cos_k, sin_k, seqlen_offsets)
-            #     ctx.seqlen_offsets = None
-            # ctx.interleaved = interleaved
-        
-        
-        # print("after inner rotation")
-        # print("q", q)
-        # print("input_metadata.k_new", input_metadata.k_new)
-            
 
         # kernels expects "bsghd"
         if input_metadata.layout == "bshd":
@@ -834,8 +708,6 @@ class _attention(torch.autograd.Function):
         split_size = (seqlen_k + split_k - 1) // split_k
         use_cache_seqlens = cache_seqlens is not None
 
-        print("sm_scale: ", input_metadata.sm_scale)
-
         # TODO: enable quantization
         _fwd_kernel_splitK[grid](
             Q=q,
@@ -886,11 +758,6 @@ class _attention(torch.autograd.Function):
 
         out = torch.empty((batch_size, seqlen_q, n_group_q, heads_per_group_q, dim_padded), device=q.device, dtype=q.dtype)
 
-        print("\n\n\n")
-        print("\n\n\n")
-        print("triton_out_splitk.dtype", out_splitk.dtype)
-        print("triton_out_splitk", out_splitk)
-
         # Merge together
         splitK_pow2 = triton.next_power_of_2(split_k)
         use_mask = splitK_pow2 > split_k
@@ -921,8 +788,6 @@ class _attention(torch.autograd.Function):
             use_mask=use_mask,
             IS_CAUSAL=input_metadata.causal,
             num_warps=4)
-        
-        print("OUT OUT", out)
 
         lse = lse.reshape([batch_size, n_group_q, heads_per_group_q, seqlen_q])
         if q.ndim == 4:
@@ -932,10 +797,7 @@ class _attention(torch.autograd.Function):
             lse = lse[:, 0]
         if seqlen_k == 0:
             out.zero_()
-
-        print("out_b4_reshape", out)
         out = out.reshape(batch_size, heads_per_group_q * n_group_q, -1, dim_padded).contiguous()
-        print("out_aftR_reshape", out)
 
         # output is batch_size, heads_per_group_q * group_q, seqlen_q, dim_q
         if original_layout == "bshd":
