@@ -598,36 +598,36 @@ class _attention(torch.autograd.Function):
         original_layout = input_metadata.layout
 
         # Rotary Embedding Implementation
-        if torch.is_tensor(input_metadata.rotary_cos) and torch.is_tensor(input_metadata.rotary_sin):
-            if input_metadata.causal or input_metadata.local:
-                q_ro = apply_rotary_emb(
-                    q,
-                    input_metadata.rotary_cos,
-                    input_metadata.rotary_sin,
-                    seqlen_offsets=input_metadata.cache_seqlens,
-                    interleaved=input_metadata.rotary_interleaved,
-                )
-            else:
-                q_ro = rearrange(
-                    apply_rotary_emb(
-                        rearrange(q, "b s h d -> b 1 (s h) d"),
-                        input_metadata.rotary_cos,
-                        input_metadata.rotary_sin,
-                        seqlen_offsets=input_metadata.cache_seqlens,
-                        interleaved=input_metadata.rotary_interleaved,
-                    ),
-                    "b 1 (s h) d -> b s h d",
-                    s=input_metadata.max_seqlens_q,
-                )
-            k_ro = apply_rotary_emb(
-                input_metadata.k_new,
-                input_metadata.rotary_cos,
-                input_metadata.rotary_sin,
-                seqlen_offsets=input_metadata.cache_seqlens,
-                interleaved=input_metadata.rotary_interleaved,
-            )
+        # if torch.is_tensor(input_metadata.rotary_cos) and torch.is_tensor(input_metadata.rotary_sin):
+        #     if input_metadata.causal or input_metadata.local:
+        #         q_ro = apply_rotary_emb(
+        #             q,
+        #             input_metadata.rotary_cos,
+        #             input_metadata.rotary_sin,
+        #             seqlen_offsets=input_metadata.cache_seqlens,
+        #             interleaved=input_metadata.rotary_interleaved,
+        #         )
+        #     else:
+        #         q_ro = rearrange(
+        #             apply_rotary_emb(
+        #                 rearrange(q, "b s h d -> b 1 (s h) d"),
+        #                 input_metadata.rotary_cos,
+        #                 input_metadata.rotary_sin,
+        #                 seqlen_offsets=input_metadata.cache_seqlens,
+        #                 interleaved=input_metadata.rotary_interleaved,
+        #             ),
+        #             "b 1 (s h) d -> b s h d",
+        #             s=input_metadata.max_seqlens_q,
+        #         )
+        #     k_ro = apply_rotary_emb(
+        #         input_metadata.k_new,
+        #         input_metadata.rotary_cos,
+        #         input_metadata.rotary_sin,
+        #         seqlen_offsets=input_metadata.cache_seqlens,
+        #         interleaved=input_metadata.rotary_interleaved,
+        #     )
 
-            q, input_metadata.k_new = q_ro.to(q.dtype), k_ro.to(q.dtype)
+        #     q, input_metadata.k_new = q_ro.to(q.dtype), k_ro.to(q.dtype)
 
         # kernels expects "bsghd"
         if input_metadata.layout == "bshd":
