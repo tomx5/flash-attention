@@ -20,6 +20,143 @@ def _strides(x: torch.Tensor, *stride_names: str):
     return {f"stride_{s}": x.stride(i) for i, s in enumerate(stride_names)}
 
 @triton.jit
+def rotary_kernel(
+    OUT,  # Pointers to matrices
+    X,
+    COS,
+    SIN,
+    CU_SEQLENS,
+    SEQLEN_OFFSETS,  # this could be int or a pointer
+    # Matrix dimensions
+    seqlen,
+    rotary_dim,
+    seqlen_ro,
+    # pid offsets
+    start_m,
+    off_batch,   # batch
+    off_head,    # head
+    off_group,   # group (gca / mqa)
+    splitk_idx,
+    # strides
+    stride_out_batch,
+    stride_out_seqlen,
+    stride_out_group,
+    stride_out_nheads,
+    stride_out_headdim,
+    stride_x_batch,
+    stride_x_seqlen,
+    stride_x_group,
+    stride_x_nheads,
+    stride_x_headdim,
+    # Meta-parameters
+    BLOCK_K: tl.constexpr,
+    IS_SEQLEN_OFFSETS_TENSOR: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    INTERLEAVED: tl.constexpr,
+    CONJUGATE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+):
+    pid_m = start_m
+    pid_batch = off_batch
+    pid_group = off_group
+    pid_head = off_head
+    pid_splitk = splitk_idx
+    
+    rotary_dim_half = rotary_dim // 2
+
+    if not IS_VARLEN:
+        X = X + pid_batch * stride_x_batch + pid_head * stride_x_nheads
+        OUT = OUT + pid_batch * stride_out_batch + pid_head * stride_out_nheads
+    else:
+        start_idx = tl.load(CU_SEQLENS + pid_batch)
+        seqlen = tl.load(CU_SEQLENS + pid_batch + 1) - start_idx
+        X = X + start_idx * stride_x_seqlen + pid_head * stride_x_nheads
+        OUT = OUT + start_idx * stride_out_seqlen + pid_head * stride_out_nheads
+
+    if pid_m * BLOCK_M >= seqlen:
+        return
+    rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    if not IS_SEQLEN_OFFSETS_TENSOR:
+        rm_cs = rm + SEQLEN_OFFSETS
+    else:
+        rm_cs = rm + tl.load(SEQLEN_OFFSETS + pid_batch)
+    rk = tl.arange(0, BLOCK_K)
+    rk_half = tl.arange(0, BLOCK_K // 2)
+
+    if not INTERLEAVED:
+        # Load the 1st and 2nd halves of X, do calculation, then store to 1st and 2nd halves of OUT
+        X = X + (rm[:, None] * stride_x_seqlen + rk_half[None, :] * stride_x_headdim)
+        COS = COS + (rm_cs[:, None] * rotary_dim_half + rk_half[None, :])
+        SIN = SIN + (rm_cs[:, None] * rotary_dim_half + rk_half[None, :])
+        cos = tl.load(
+            COS, mask=(rm_cs[:, None] < seqlen_ro) & (rk_half[None, :] < rotary_dim_half), other=1.0
+        ).to(tl.float32)
+        sin = tl.load(
+            SIN, mask=(rm_cs[:, None] < seqlen_ro) & (rk_half[None, :] < rotary_dim_half), other=0.0
+        ).to(tl.float32)
+        # first half of x
+        x0 = tl.load(
+            X, mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half), other=0.0
+        ).to(tl.float32)
+        # second half of x
+        x1 = tl.load(
+            X + rotary_dim_half * stride_x_headdim,
+            mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half),
+            other=0.0,
+        ).to(tl.float32)
+        if CONJUGATE:
+            sin = -sin
+        o0 = x0 * cos - x1 * sin
+        o1 = x0 * sin + x1 * cos
+        # write back result
+        # OUT = OUT + (rm[:, None] * stride_out_seqlen + rk_half[None, :] * stride_out_headdim)
+        # tl.store(OUT, o0, mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half))
+        # tl.store(
+        #     OUT + rotary_dim_half * stride_out_headdim,
+        #     o1,
+        #     mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half),
+        # )
+        out = tl.cat(o0, o1)
+        OUT = OUT + (rm[:, None] * stride_out_seqlen + rk[None, :] * stride_out_headdim)
+        tl.store(OUT, out,  mask=(rm[:, None] < seqlen) & (rk[None, :] < rotary_dim))
+    else:
+        # We don't want to load X[0, 2, 4, ...] and X[1, 3, 5, ...] separately since both are slow.
+        # Instead, we load x0 = X[0, 1, 2, 3, ...] and x1 = X[1, 0, 3, 2, ...].
+        # Loading x0 will be fast but x1 will be slow.
+        # Then we load cos = COS[0, 0, 1, 1, ...] and sin = SIN[0, 0, 1, 1, ...].
+        # Then we do the calculation and use tl.where to pick put the right outputs for the even
+        # and for the odd indices.
+        rk_swap = rk + ((rk + 1) % 2) * 2 - 1  # 1, 0, 3, 2, 5, 4, ...
+        rk_repeat = tl.arange(0, BLOCK_K) // 2
+        X0 = X + (rm[:, None] * stride_x_seqlen + rk[None, :] * stride_x_headdim)
+        X1 = X + (rm[:, None] * stride_x_seqlen + rk_swap[None, :] * stride_x_headdim)
+        COS = COS + (rm_cs[:, None] * rotary_dim_half + rk_repeat[None, :])
+        SIN = SIN + (rm_cs[:, None] * rotary_dim_half + rk_repeat[None, :])
+        cos = tl.load(
+            COS,
+            mask=(rm_cs[:, None] < seqlen_ro) & (rk_repeat[None, :] < rotary_dim_half),
+            other=1.0,
+        ).to(tl.float32)
+        sin = tl.load(
+            SIN,
+            mask=(rm_cs[:, None] < seqlen_ro) & (rk_repeat[None, :] < rotary_dim_half),
+            other=0.0,
+        ).to(tl.float32)
+        x0 = tl.load(X0, mask=(rm[:, None] < seqlen) & (rk[None, :] < rotary_dim), other=0.0).to(
+            tl.float32
+        )
+        x1 = tl.load(
+            X1, mask=(rm[:, None] < seqlen) & (rk_swap[None, :] < rotary_dim), other=0.0
+        ).to(tl.float32)
+        if CONJUGATE:
+            sin = -sin
+        x0_cos = x0 * cos
+        x1_sin = x1 * sin
+        out = tl.where(rk[None, :] % 2 == 0, x0_cos - x1_sin, x0_cos + x1_sin)
+        OUT = OUT + (rm[:, None] * stride_out_seqlen + rk[None, :] * stride_out_headdim)
+        tl.store(OUT, out, mask=(rm[:, None] < seqlen) & (rk[None, :] < rotary_dim))
+
+@triton.jit
 def _fwd_kernel_splitK(
     Q,
     K,
@@ -82,7 +219,7 @@ def _fwd_kernel_splitK(
     ACTUAL_BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BOUNDS_CHECKS_N: tl.constexpr,
-    USE_CACHE_SEQLENs: tl.constexpr,
+    USE_CACHE_SEQLENS: tl.constexpr,
     USE_CACHE_BATCH_IDX: tl.constexpr,
     NEW_KV: tl.constexpr,
     IS_GQA: tl.constexpr,
@@ -91,6 +228,12 @@ def _fwd_kernel_splitK(
     USE_ROTARY: tl.constexpr,
     ROTARY_INTERLEAVED: tl.constexpr
 ):
+    # Apply Rotary Positional Embedding to q
+    if USE_ROTARY:
+        # rotate q and k before dot product
+        pass
+
+
     # Padding
     PADDED_HEAD: tl.constexpr = (ACTUAL_BLOCK_DMODEL != BLOCK_DMODEL)
     if PADDED_HEAD:
@@ -117,7 +260,7 @@ def _fwd_kernel_splitK(
         alibi_slope = None
 
     lo = splitk_idx * BLOCK_N_PER_SPLIT
-    if USE_CACHE_SEQLENs:
+    if USE_CACHE_SEQLENS:
         cache_seqlen_last_idx = tl.load(Cache_seqlens + off_z)
         if NEW_KV:
             kv_len = cache_seqlen_last_idx + N_CTX_NEW
@@ -144,7 +287,7 @@ def _fwd_kernel_splitK(
         knew_base = K_new + k_head_idx * stride_kn_h + off_z * stride_kn_z + off_g_q * stride_kn_g
         
         # Determine the starting position for new data in the cache
-        if USE_CACHE_SEQLENs:
+        if USE_CACHE_SEQLENS:
             start_idx = tl.load(Cache_seqlens + off_z)
         else:
             start_idx = N_CTX_K - N_CTX_NEW
@@ -160,6 +303,10 @@ def _fwd_kernel_splitK(
                      (tl.arange(0, BLOCK_DMODEL)[:, None] < ACTUAL_BLOCK_DMODEL),
                 other=0
             )
+
+            # apply rotary to k here
+            if USE_ROTARY:
+
             
             # Store to K
             tl.store(
@@ -261,10 +408,6 @@ def _fwd_kernel_splitK(
         if PADDED_HEAD:
             k = tl.where(d_mask[:, None], k, 0.0)
             v = tl.where(d_mask[None, :], v, 0.0)
-
-        if USE_ROTARY:
-            # rotate q and k before dot product
-            pass
 
         # -- compute qk ---
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float16)
@@ -744,7 +887,7 @@ class _attention(torch.autograd.Function):
             BLOCK_DMODEL=dim_padded,
             ACTUAL_BLOCK_DMODEL=dim_k,
             BOUNDS_CHECKS_N=(split_size % BLOCK_N) > 0 or use_cache_seqlens,
-            USE_CACHE_SEQLENs=use_cache_seqlens,
+            USE_CACHE_SEQLENS=use_cache_seqlens,
             USE_CACHE_BATCH_IDX= input_metadata.cache_batch_idx is not None,
             NEW_KV=input_metadata.new_kv,
             IS_GQA=input_metadata.is_gqa,

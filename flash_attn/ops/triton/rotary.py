@@ -72,9 +72,11 @@ def rotary_kernel(
         sin = tl.load(
             SIN, mask=(rm_cs[:, None] < seqlen_ro) & (rk_half[None, :] < rotary_dim_half), other=0.0
         ).to(tl.float32)
+        # first half of x
         x0 = tl.load(
             X, mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half), other=0.0
         ).to(tl.float32)
+        # second half of x
         x1 = tl.load(
             X + rotary_dim_half * stride_x_headdim,
             mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half),
@@ -85,13 +87,16 @@ def rotary_kernel(
         o0 = x0 * cos - x1 * sin
         o1 = x0 * sin + x1 * cos
         # write back result
-        OUT = OUT + (rm[:, None] * stride_out_seqlen + rk_half[None, :] * stride_out_headdim)
-        tl.store(OUT, o0, mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half))
-        tl.store(
-            OUT + rotary_dim_half * stride_out_headdim,
-            o1,
-            mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half),
-        )
+        # OUT = OUT + (rm[:, None] * stride_out_seqlen + rk_half[None, :] * stride_out_headdim)
+        # tl.store(OUT, o0, mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half))
+        # tl.store(
+        #     OUT + rotary_dim_half * stride_out_headdim,
+        #     o1,
+        #     mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half),
+        # )
+        out = tl.cat(o0, o1)
+        OUT = OUT + (rm[:, None] * stride_out_seqlen + rk[None, :] * stride_out_headdim)
+        tl.store(OUT, out,  mask=(rm[:, None] < seqlen) & (rk[None, :] < rotary_dim))
     else:
         # We don't want to load X[0, 2, 4, ...] and X[1, 3, 5, ...] separately since both are slow.
         # Instead, we load x0 = X[0, 1, 2, 3, ...] and x1 = X[1, 0, 3, 2, ...].
