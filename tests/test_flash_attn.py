@@ -2086,6 +2086,8 @@ def test_flash_attn_kvcache(
     assert nheads % nheads_k == 0, "num heads cannot be evenly split into groups"
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
 
+    DEBUG_ENABLED = True
+
     if DEBUG_ENABLED:
         q = torch.arange(seqlen_q, dtype=dtype, device="cuda").view(1, seqlen_q, 1, 1).expand(batch_size, seqlen_q, nheads, d).requires_grad_().contiguous().to(dtype=dtype)
     else:
