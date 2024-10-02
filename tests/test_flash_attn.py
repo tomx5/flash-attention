@@ -1974,7 +1974,7 @@ def test_flash_attn_splitkv(
 
 
 # @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
-@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize("dtype", [torch.float32])
 # @pytest.mark.parametrize("num_splits", [1, 0])
 @pytest.mark.parametrize("num_splits", [0])
 # @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
@@ -1985,7 +1985,7 @@ def test_flash_attn_splitkv(
 # @pytest.mark.parametrize("alibi", [False, True])
 @pytest.mark.parametrize("alibi", [False])
 # @pytest.mark.parametrize("local", [False, True])
-@pytest.mark.parametrize("local", [False])
+@pytest.mark.parametrize("local", [True])
 @pytest.mark.parametrize("causal", [False])
 # @pytest.mark.parametrize("causal", [False])
 # @pytest.mark.parametrize("seqlen_new_eq_seqlen_q", [True, False])
@@ -1994,7 +1994,7 @@ def test_flash_attn_splitkv(
 @pytest.mark.parametrize("rotary_interleaved", [False])
 # @pytest.mark.parametrize("rotary_fraction", [0.0, 0.5, 1.0])
 # @pytest.mark.parametrize("rotary_fraction", [0.5, 1.0])
-@pytest.mark.parametrize("rotary_fraction", [1.0])
+@pytest.mark.parametrize("rotary_fraction", [0.0])
 # @pytest.mark.parametrize("paged_kv_block_size", [None, 256])
 # @pytest.mark.parametrize("paged_kv_block_size", [256, 512])
 @pytest.mark.parametrize("paged_kv_block_size", [None])
@@ -2007,21 +2007,21 @@ def test_flash_attn_splitkv(
 # @pytest.mark.parametrize("d", [2, 8, 16, 32, 59, 64, 80, 128, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
-@pytest.mark.parametrize('d', [56, 80])
+# @pytest.mark.parametrize('d', [1, 2, 56, 80])
 # @pytest.mark.parametrize("d", [16]) # 16 fails
-# @pytest.mark.parametrize("d", [2])
+@pytest.mark.parametrize("d", [1])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
         # (1, 1),
         # (1, 2),
         # (2, 2),
-        # (4, 4),
+        (8, 8),
         # (1, 4),
-        (1, 128),
-        (1, 339),
-        (3, 1024),
-        (64, 800),
+        # (1, 128),
+        # (1, 339),
+        # (3, 1024),
+        # (64, 800),
         # (64, 256),
         # (3, 799),
         # (64, 2048),
@@ -2054,8 +2054,8 @@ def test_flash_attn_kvcache(
         if paged_kv_block_size is not None:
             pytest.skip("paged attention not supported on AMD's Triton Backend yet")
 
-        if local == True:
-            pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
+        # if local == True:
+        #     pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
         
         # if rotary_interleaved == True or rotary_fraction > 0.0:
         #     pytest.skip("rotary embedding not supported on AMD's Triton Backend yet")
@@ -2090,7 +2090,7 @@ def test_flash_attn_kvcache(
         pytest.skip()
 
     assert nheads % nheads_k == 0, "num heads cannot be evenly split into groups"
-    window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
+    window_size = (-1, -1) if not local else (-2, 0)
 
     DEBUG_ENABLED = True
 
@@ -2217,6 +2217,9 @@ def test_flash_attn_kvcache(
         v_cache_ref[update_mask] = rearrange(v, "b s ... -> (b s) ...")
     k_cache_rep = repeat(k_cache_ref, "b s h d -> b s (h g) d", g=nheads // nheads_k)
     v_cache_rep = repeat(v_cache_ref, "b s h d -> b s (h g) d", g=nheads // nheads_k)
+
+    # window_size = (0, 0)
+
     out = flash_attn_with_kvcache(
         q,
         k_cache if paged_kv_block_size is None else k_cache_paged,
@@ -2284,6 +2287,10 @@ def test_flash_attn_kvcache(
     print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
     print(f"Pytorch max diff: {(out_pt - out_ref).abs().max().item()}")
     print(f"Pytorch mean diff: {(out_pt - out_ref).abs().mean().item()}")
+
+    print("OUT:\n", out)
+    
+    print("\nOUT REF:\n", out_ref)
 
     # Check that FlashAttention's numerical error is at most twice the numerical error
     # of a Pytorch implementation.

@@ -87,6 +87,9 @@ def _fwd_kernel_splitK(
     NEW_KV: tl.constexpr,
     IS_GQA: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
+    IS_LOCAL: tl.constexpr,
+    WINDOW_SIZE_LEFT: tl.constexpr,
+    WINDOW_SIZE_RIGHT: tl.constexpr,
     USE_ALIBI: tl.constexpr,
     USE_ROTARY: tl.constexpr,
     ROTARY_INTERLEAVED: tl.constexpr
@@ -282,17 +285,27 @@ def _fwd_kernel_splitK(
             alibi_bias = -1 * alibi_slope * relative_pos
             qk += (alibi_bias * log2_e)
 
-        # Apply causal mask if IS_CAUSAL is True
-        if IS_CAUSAL:
+        # Apply causal and/or local (sliding window) mask if IS_CAUSAL or IS_LOCAL is True
+        if IS_CAUSAL or IS_LOCAL:
             row_idx = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
             col_idx = start_n + tl.arange(0, BLOCK_N)
-            
-            # create a N_CTX_Q x kv_len causal mask
-            col_offset = N_CTX_Q - kv_len
-            causal_mask = row_idx[:, None] >= (col_offset + col_idx[None, :])
 
-            # Apply the mask
-            qk = tl.where(causal_mask, qk, float("-inf"))
+            mask = tl.full((BLOCK_M, BLOCK_N), 1, tl.float32)
+
+            col_offset = N_CTX_Q - kv_len
+
+            if IS_LOCAL:
+                local_mask = (WINDOW_SIZE_LEFT <= (col_idx[None, :] + col_offset - row_idx[:, None])) & \
+                             ((col_idx[None, :] + col_offset - row_idx[:, None]) <= WINDOW_SIZE_RIGHT)
+                mask = mask * local_mask # apply local mask to mask
+                
+            if IS_CAUSAL:
+                # create a N_CTX_Q x kv_len causal mask
+                causal_mask = row_idx[:, None] >= (col_offset + col_idx[None, :])
+                mask = mask * causal_mask # apply causal mask to mask
+
+            # Apply the combined mask
+            qk = tl.where(mask, qk, float("-inf"))
 
         # TODO: This is slow, and only needed at the last iteration.
         # Maybe we can unroll the last iteration instead?
@@ -301,12 +314,12 @@ def _fwd_kernel_splitK(
 
         # -- compute scaling constant ---
         m_i_new = tl.maximum(m_i, tl.max(qk, 1))
-        if IS_CAUSAL:
+        if IS_CAUSAL or IS_LOCAL:
             alpha = tl.math.exp2(tl.where(m_i > float("-inf"), m_i - m_i_new, float("-inf")))
         else:
             alpha = tl.math.exp2(m_i - m_i_new)
         # cause of nan because subtracting infs
-        if IS_CAUSAL:
+        if IS_CAUSAL or IS_LOCAL:
             qk = tl.where(qk > float("-inf"), qk - m_i_new[:, None], float("-inf"))
         else:
             qk = qk - m_i_new[:, None]
@@ -469,7 +482,7 @@ def _splitK_reduce(
 
     g_m = tl.max(l_m, axis=0)
     
-    if IS_CAUSAL:
+    if IS_CAUSAL or True:   # TODO: add IS_LOCAL
         l_m_offset = l_m - g_m
         alpha = tl.where(l_m_offset > float("-inf"), tl.math.exp2(l_m_offset), 0.0)
     else:
@@ -479,7 +492,7 @@ def _splitK_reduce(
     g_sum = tl.sum(l_sum, axis=0)
     acc = acc * alpha[:, None]
 
-    if IS_CAUSAL:
+    if IS_CAUSAL or True:   # TODO: add IS_LOCAL
         # Avoid division by zero
         g_sum_safe = tl.where(g_sum > 0, g_sum, 1.0)
         acc_out = tl.sum(acc, axis=0) / g_sum_safe
@@ -496,7 +509,7 @@ def _splitK_reduce(
 
     # Store lse
     l_ptrs = LSE + off_zhg * stride_lse_zhg + off_m
-    if IS_CAUSAL:
+    if IS_CAUSAL or True:   # TODO: add IS_LOCAL
         lse = tl.where(g_sum > 0, (g_m + tl.math.log2(g_sum)) / log2_e, g_m)
         tl.store(l_ptrs, lse)
     else:
@@ -749,6 +762,9 @@ class _attention(torch.autograd.Function):
             NEW_KV=input_metadata.new_kv,
             IS_GQA=input_metadata.is_gqa,
             IS_CAUSAL=input_metadata.causal,
+            IS_LOCAL=input_metadata.local,
+            WINDOW_SIZE_LEFT=input_metadata.window_size_left,
+            WINDOW_SIZE_RIGHT=input_metadata.window_size_right,
             USE_ALIBI=False if input_metadata.alibi_slopes is None else True,
             USE_ROTARY=False if input_metadata.rotary_cos is None or input_metadata.rotary_sin is None else True,
             ROTARY_INTERLEAVED = True if input_metadata.rotary_interleaved else False,

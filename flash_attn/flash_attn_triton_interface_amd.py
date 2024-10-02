@@ -201,7 +201,7 @@ def fwd_kvcache(
         input_metadata.need_causal()
 
     if local:
-        input_metadata.need_local()
+        input_metadata.need_local(window_size_left=window_size_left, window_size_right=window_size_right)
 
     if alibi_slopes is not None:
         batch, _ , nheads_q, _= q.shape
@@ -209,6 +209,8 @@ def fwd_kvcache(
 
     if torch.is_tensor(rotary_cos) and torch.is_tensor(rotary_sin):
         input_metadata.need_rotary(rotary_cos, rotary_sin, rotary_cos_k, rotary_sin_k, rotary_interleaved, rotary_seqlen_offsets, rotary_inplace=rotary_inplace, rotary_conjugate=rotary_conjugate)
+
+    print(input_metadata)
 
     # launch kernel
     tri_out, softmax_lse = attention_decode(q, k_cache, v_cache, input_metadata)

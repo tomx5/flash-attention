@@ -38,6 +38,8 @@ class MetaData():
     alibi_slopes = None
     causal = False
     local = False
+    window_size_left = -1
+    window_size_right = -1
     num_contexts = 0
     varlen = False
     layout = None
@@ -68,6 +70,8 @@ class MetaData():
                 f"  alibi_slopes={self.alibi_slopes},\n"
                 f"  causal={self.causal},\n"
                 f"  local={self.local},\n"
+                f"  window_size_left={self.window_size_left},\n"
+                f"  window_size_right={self.window_size_right},\n"
                 f"  num_contexts={self.num_contexts},\n"
                 f"  varlen={self.varlen},\n"
                 f"  layout={self.layout},\n"
@@ -138,8 +142,10 @@ class MetaData():
     def need_causal(self):
         self.causal = True
 
-    def need_local(self):
+    def need_local(self, window_size_left, window_size_right):
         self.local = True
+        self.window_size_left = window_size_left
+        self.window_size_right = window_size_right
 
     def need_dropout(self, dropout_p, return_encoded_softmax):
         self.dropout_p = dropout_p
@@ -273,7 +279,8 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                     IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
                     OFFS_M: tl.constexpr, OFFS_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, MASK_STEPS: tl.constexpr,
                     ENABLE_DROPOUT: tl.constexpr, RETURN_ENCODED_SOFTMAX: tl.constexpr, PADDED_HEAD: tl.constexpr,
-                    ACTUAL_BLOCK_DMODEL: tl.constexpr):
+                    ACTUAL_BLOCK_DMODEL: tl.constexpr, IS_LOCAL: tl.constexpr, WINDOW_SIZE_LEFT: tl.constexpr,
+                    WINDOW_SIZE_RIGHT: tl.constexpr):
     # loop over k, v, and update accumulator
     for start_n in range(block_min, block_max, BLOCK_N):
         # For padded blocks, we will overrun the tensor size if
@@ -396,7 +403,8 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm, s
              HK: tl.constexpr, ACTUAL_BLOCK_DMODEL: tl.constexpr, MAX_SEQLENS_Q: tl.constexpr,
              MAX_SEQLENS_K: tl.constexpr, VARLEN: tl.constexpr, IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr,
              BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, USE_BIAS: tl.constexpr,
-             ENABLE_DROPOUT: tl.constexpr, RETURN_ENCODED_SOFTMAX: tl.constexpr, USE_ALIBI: tl.constexpr):
+             ENABLE_DROPOUT: tl.constexpr, RETURN_ENCODED_SOFTMAX: tl.constexpr, USE_ALIBI: tl.constexpr,
+             IS_LOCAL: tl.constexpr, WINDOW_SIZE_LEFT: tl.constexpr, WINDOW_SIZE_RIGHT: tl.constexpr):
     start_m = tl.program_id(0)
     off_h_q = tl.program_id(1)
     off_z = tl.program_id(2)
@@ -570,7 +578,7 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm, s
                                         offs_n,
                                         # _, MASK_STEPS, ...
                                         PRE_LOAD_V, True, ENABLE_DROPOUT, RETURN_ENCODED_SOFTMAX, PADDED_HEAD,
-                                        ACTUAL_BLOCK_DMODEL)
+                                        ACTUAL_BLOCK_DMODEL, IS_LOCAL, WINDOW_SIZE_LEFT, WINDOW_SIZE_RIGHT)
     # epilogue
     acc = acc / l_i[:, None]
     if ENABLE_DROPOUT:
