@@ -21,7 +21,6 @@ def _strides(x: torch.Tensor, *stride_names: str):
 
 @triton.jit
 def rotary_kernel(
-    OUT,  # Pointers to matrices
     X,
     COS,
     SIN,
@@ -38,11 +37,6 @@ def rotary_kernel(
     off_group,   # group (gca / mqa)
     splitk_idx,
     # strides
-    stride_out_batch,
-    stride_out_seqlen,
-    stride_out_group,
-    stride_out_nheads,
-    stride_out_headdim,
     stride_x_batch,
     stride_x_seqlen,
     stride_x_group,
@@ -65,13 +59,11 @@ def rotary_kernel(
     rotary_dim_half = rotary_dim // 2
 
     if not IS_VARLEN:
-        X = X + pid_batch * stride_x_batch + pid_head * stride_x_nheads
-        OUT = OUT + pid_batch * stride_out_batch + pid_head * stride_out_nheads
+        X = X + pid_batch * stride_x_batch + pid_group * stride_x_group + pid_head * stride_x_nheads
     else:
         start_idx = tl.load(CU_SEQLENS + pid_batch)
         seqlen = tl.load(CU_SEQLENS + pid_batch + 1) - start_idx
-        X = X + start_idx * stride_x_seqlen + pid_head * stride_x_nheads
-        OUT = OUT + start_idx * stride_out_seqlen + pid_head * stride_out_nheads
+        X = X + start_idx * stride_x_seqlen + pid_group * stride_x_group + pid_head * stride_x_nheads
 
     if pid_m * BLOCK_M >= seqlen:
         return
@@ -80,6 +72,7 @@ def rotary_kernel(
         rm_cs = rm + SEQLEN_OFFSETS
     else:
         rm_cs = rm + tl.load(SEQLEN_OFFSETS + pid_batch)
+
     rk = tl.arange(0, BLOCK_K)
     rk_half = tl.arange(0, BLOCK_K // 2)
 
@@ -117,8 +110,7 @@ def rotary_kernel(
         #     mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half),
         # )
         out = tl.cat(o0, o1)
-        OUT = OUT + (rm[:, None] * stride_out_seqlen + rk[None, :] * stride_out_headdim)
-        tl.store(OUT, out,  mask=(rm[:, None] < seqlen) & (rk[None, :] < rotary_dim))
+        return out
     else:
         # We don't want to load X[0, 2, 4, ...] and X[1, 3, 5, ...] separately since both are slow.
         # Instead, we load x0 = X[0, 1, 2, 3, ...] and x1 = X[1, 0, 3, 2, ...].
@@ -153,8 +145,7 @@ def rotary_kernel(
         x0_cos = x0 * cos
         x1_sin = x1 * sin
         out = tl.where(rk[None, :] % 2 == 0, x0_cos - x1_sin, x0_cos + x1_sin)
-        OUT = OUT + (rm[:, None] * stride_out_seqlen + rk[None, :] * stride_out_headdim)
-        tl.store(OUT, out, mask=(rm[:, None] < seqlen) & (rk[None, :] < rotary_dim))
+        return out
 
 @triton.jit
 def _fwd_kernel_splitK(
@@ -169,8 +160,16 @@ def _fwd_kernel_splitK(
     Cache_seqlens,
     Cache_batch_idx,
     Alibi_slopes,
+    # Rotary
     Rotary_cos,
     Rotary_sin,
+    Rotary_dim,
+    Rotary_interleaved: tl.constexpr,
+    Rotary_conjugate: tl.constexpr,
+    seqlen_ro,
+    IS_SEQLEN_OFFSETS_TENSOR: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    # Strides
     stride_qz,
     stride_qm,
     stride_qg,
@@ -226,7 +225,6 @@ def _fwd_kernel_splitK(
     IS_CAUSAL: tl.constexpr,
     USE_ALIBI: tl.constexpr,
     USE_ROTARY: tl.constexpr,
-    ROTARY_INTERLEAVED: tl.constexpr
 ):
     # Apply Rotary Positional Embedding to q
     if USE_ROTARY:
@@ -306,7 +304,32 @@ def _fwd_kernel_splitK(
 
             # apply rotary to k here
             if USE_ROTARY:
-
+                k_new_block = rotary_kernel(
+                    X=k_new_block,
+                    COS=Rotary_cos,
+                    SIN=Rotary_sin,
+                    CU_SEQLENS=None,
+                    SEQLEN_OFFSETS=None,
+                    seqlen=N_CTX_K,
+                    rotary_dim=Rotary_dim,
+                    seqlen_ro=seqlen_ro,
+                    start_m=start_m,
+                    off_batch=off_z,
+                    off_head=off_h_q,
+                    off_group=off_g_q,
+                    splitk_idx=splitk_idx,
+                    stride_x_batch= ,
+                    stride_x_seqlen= ,
+                    stride_x_group= ,
+                    stride_x_nheads= ,
+                    stride_x_headdim= ,
+                    BLOCK_K= ,
+                    IS_SEQLEN_OFFSETS_TENSOR= ,
+                    IS_VARLEN= ,
+                    INTERLEAVED= ,
+                    CONJUGATE= ,
+                    BLOCK_M= 
+                )
             
             # Store to K
             tl.store(
@@ -866,6 +889,12 @@ class _attention(torch.autograd.Function):
             Alibi_slopes=input_metadata.alibi_slopes,
             Rotary_cos = input_metadata.rotary_cos,
             Rotary_sin = input_metadata.rotary_sin,
+            Rotary_dim = input_metadata.rotary_dim,
+            Rotary_interleaved = input_metadata.rotary_interleaved,
+            Rotary_conjugate = input_metadata.rotary_conjugate,
+            seqlen_ro = input_metadata.rotary_seqlen,
+            IS_SEQLEN_OFFSETS_TENSOR = ,
+            IS_VARLEN = ,
             **_strides(q, "qz", "qm", "qg", "qh", "qd"),
             **_strides(k, "kz", "kn", "kg", "kh", "kd"),
             **_strides(v, "vz", "vn", "vg", "vh", "vd"),
@@ -894,7 +923,6 @@ class _attention(torch.autograd.Function):
             IS_CAUSAL=input_metadata.causal,
             USE_ALIBI=False if input_metadata.alibi_slopes is None else True,
             USE_ROTARY=False if input_metadata.rotary_cos is None or input_metadata.rotary_sin is None else True,
-            ROTARY_INTERLEAVED = True if input_metadata.rotary_interleaved else False,
             num_warps=num_warps,
             num_stages=1,
         )

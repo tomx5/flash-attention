@@ -45,6 +45,7 @@ class MetaData():
     rotary_sin = None
     rotary_cos_k = None         # cos/sin_k is cos/sin meant specifically for vector k. It's when we want to deliberately rotate each vector independently?
     rotary_sin_k = None
+    rotary_seqlen = None
     rotary_interleaved = False
     rotary_seqlen_offsets = None
     rotary_inplace = False
@@ -73,8 +74,9 @@ class MetaData():
                 f"  layout={self.layout},\n"
                 f"  rotary_cos={self.rotary_cos},\n"
                 f"  rotary_sin={self.rotary_sin},\n"
-                f"  rotary_cos={self.rotary_cos_k},\n"
-                f"  rotary_sin={self.rotary_sin_k},\n"
+                f"  rotary_cos_k={self.rotary_cos_k},\n"
+                f"  rotary_sin_k={self.rotary_sin_k},\n"
+                f"  rotary_seqlen={self.rotary_seqlen},\n"
                 f"  rotary_interleaved={self.rotary_interleaved},\n"
                 f"  rotary_seqlen_offsets={self.rotary_seqlen_offsets},\n"
                 f"  rotary_inplace={self.rotary_inplace},\n"
