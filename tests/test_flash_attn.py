@@ -201,6 +201,9 @@ def construct_local_mask(
     device=None,
     key_leftpad=None,
 ):
+    """
+    Method for constructing a mask for local (aka sliding window) attention
+    """
     row_idx = rearrange(torch.arange(seqlen_q, device=device, dtype=torch.long), "s -> s 1")
     col_idx = torch.arange(seqlen_k, device=device, dtype=torch.long)
     if key_leftpad is not None:
@@ -237,6 +240,7 @@ def attention_ref(
     dropout_p=0.0,
     dropout_mask=None,
     causal=False,
+    local=False,
     window_size=(-1, -1),  # -1 means infinite window size
     softcap=0.0,
     upcast=True,
@@ -264,8 +268,10 @@ def attention_ref(
         output: (batch_size, seqlen_q, nheads, head_dim)
         attention: (batch_size, nheads, seqlen_q, seqlen_k), softmax after dropout
     """
-    if causal:
-        window_size = (window_size[0], 0)
+    if not local:   # makes it easier to test local even if we pass in a window size shape we can revert to no mask by making local false. Also enhances readability since we know when local is being used or not
+        window_size = (-1, -1)
+    if causal:  # if local is true then window_size[0] will have been specified in the argument
+        window_size = (window_size[0], 0)   # unbounded left, right is bounded to 0 (current token)
     dtype_og = q.dtype
     if upcast:
         q, k, v = q.float(), k.float(), v.float()
@@ -2001,21 +2007,21 @@ def test_flash_attn_splitkv(
 # @pytest.mark.parametrize("d", [2, 8, 16, 32, 59, 64, 80, 128, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
-# @pytest.mark.parametrize('d', [56, 80])
+@pytest.mark.parametrize('d', [56, 80])
 # @pytest.mark.parametrize("d", [16]) # 16 fails
-@pytest.mark.parametrize("d", [2])
+# @pytest.mark.parametrize("d", [2])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
         # (1, 1),
         # (1, 2),
         # (2, 2),
-        (4, 4),
+        # (4, 4),
         # (1, 4),
-        # (1, 128),
-        # (1, 339),
-        # (3, 1024),
-        # (64, 800),
+        (1, 128),
+        (1, 339),
+        (3, 1024),
+        (64, 800),
         # (64, 256),
         # (3, 799),
         # (64, 2048),
@@ -2254,6 +2260,7 @@ def test_flash_attn_kvcache(
         0.0,
         None,
         causal=causal,
+        local=local,
         window_size=window_size,
         key_leftpad=cache_leftpad,
     )
@@ -2267,6 +2274,7 @@ def test_flash_attn_kvcache(
         0.0,
         None,
         causal=causal,
+        local=local,
         window_size=window_size,
         upcast=False,
         reorder_ops=True,

@@ -224,10 +224,10 @@ def _fwd_kernel_splitK(
     V_scale_shift_block_ptr = None
 
     # initialize pointer to m and l
-    m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float16)
-    l_i = tl.zeros([BLOCK_M], dtype=tl.float16)
+    m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
 
-    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float16)  # noqa: F821
+    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)  # noqa: F821
 
     # scale sm_scale by log_2(e) and use
     # 2^x instead of exp in the loop because CSE and LICM
@@ -267,7 +267,7 @@ def _fwd_kernel_splitK(
             pass
 
         # -- compute qk ---
-        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float16)
+        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk += tl.dot(q, k)
 
         if USE_ALIBI:
@@ -598,36 +598,36 @@ class _attention(torch.autograd.Function):
         original_layout = input_metadata.layout
 
         # Rotary Embedding Implementation
-        # if torch.is_tensor(input_metadata.rotary_cos) and torch.is_tensor(input_metadata.rotary_sin):
-        #     if input_metadata.causal or input_metadata.local:
-        #         q_ro = apply_rotary_emb(
-        #             q,
-        #             input_metadata.rotary_cos,
-        #             input_metadata.rotary_sin,
-        #             seqlen_offsets=input_metadata.cache_seqlens,
-        #             interleaved=input_metadata.rotary_interleaved,
-        #         )
-        #     else:
-        #         q_ro = rearrange(
-        #             apply_rotary_emb(
-        #                 rearrange(q, "b s h d -> b 1 (s h) d"),
-        #                 input_metadata.rotary_cos,
-        #                 input_metadata.rotary_sin,
-        #                 seqlen_offsets=input_metadata.cache_seqlens,
-        #                 interleaved=input_metadata.rotary_interleaved,
-        #             ),
-        #             "b 1 (s h) d -> b s h d",
-        #             s=input_metadata.max_seqlens_q,
-        #         )
-        #     k_ro = apply_rotary_emb(
-        #         input_metadata.k_new,
-        #         input_metadata.rotary_cos,
-        #         input_metadata.rotary_sin,
-        #         seqlen_offsets=input_metadata.cache_seqlens,
-        #         interleaved=input_metadata.rotary_interleaved,
-        #     )
+        if torch.is_tensor(input_metadata.rotary_cos) and torch.is_tensor(input_metadata.rotary_sin):
+            if input_metadata.causal or input_metadata.local:
+                q_ro = apply_rotary_emb(
+                    q,
+                    input_metadata.rotary_cos,
+                    input_metadata.rotary_sin,
+                    seqlen_offsets=input_metadata.cache_seqlens,
+                    interleaved=input_metadata.rotary_interleaved,
+                )
+            else:
+                q_ro = rearrange(
+                    apply_rotary_emb(
+                        rearrange(q, "b s h d -> b 1 (s h) d"),
+                        input_metadata.rotary_cos,
+                        input_metadata.rotary_sin,
+                        seqlen_offsets=input_metadata.cache_seqlens,
+                        interleaved=input_metadata.rotary_interleaved,
+                    ),
+                    "b 1 (s h) d -> b s h d",
+                    s=input_metadata.max_seqlens_q,
+                )
+            k_ro = apply_rotary_emb(
+                input_metadata.k_new,
+                input_metadata.rotary_cos,
+                input_metadata.rotary_sin,
+                seqlen_offsets=input_metadata.cache_seqlens,
+                interleaved=input_metadata.rotary_interleaved,
+            )
 
-        #     q, input_metadata.k_new = q_ro.to(q.dtype), k_ro.to(q.dtype)
+            q, input_metadata.k_new = q_ro.to(q.dtype), k_ro.to(q.dtype)
 
         # kernels expects "bsghd"
         if input_metadata.layout == "bshd":
