@@ -2,27 +2,39 @@ import torch
 
 IS_LOCAL = True
 
+BLOCK_M = 4
+BLOCK_N = 4
+
 head_dim = 1
 N_CTX_Q = 8
 N_CTX_KV = 8
 
-qk = torch.randn(N_CTX_Q, N_CTX_KV) + 10
+window = (-2, 0)
+WINDOW_SIZE_LEFT = window[0]
+WINDOW_SIZE_RIGHT = window[1]
 
-col_idx = torch.arange(N_CTX_KV)
-row_idx = torch.arange(N_CTX_Q)
-
+qk = torch.randn(N_CTX_Q, N_CTX_KV) + 0
 print("QK:\n", qk)
-
-window = (-2, 2)
 print("WINDOW: ", window)
 
-if IS_LOCAL:
-    sliding_window_start = window[0]
-    sliding_window_end = window[1]
-    col_offset = N_CTX_Q - N_CTX_KV
-    mask =  (sliding_window_start <= (col_idx[None, :] + col_offset - row_idx[:, None])) & \
-            ((col_idx[None, :] + col_offset - row_idx[:, None]) <= sliding_window_end)
-    print("MASK:\n", mask)
-    qk = qk * mask
+for start_m in range(N_CTX_Q // BLOCK_M):
+    for start_n in range(N_CTX_KV // BLOCK_N):
 
-print("QK after MASK:\n", qk)
+        row_idx = start_m * BLOCK_M + torch.arange(0, BLOCK_M)
+        col_idx = start_n * BLOCK_N + torch.arange(0, BLOCK_N)
+
+        mask = torch.full((BLOCK_M, BLOCK_N), 1)
+
+        col_offset = N_CTX_Q - N_CTX_KV
+
+        if IS_LOCAL:
+            local_mask = (WINDOW_SIZE_LEFT <= (col_idx[None, :] + col_offset - row_idx[:, None])) & \
+                         ((col_idx[None, :] + col_offset - row_idx[:, None]) <= WINDOW_SIZE_RIGHT)
+            mask = mask * local_mask # apply local mask to mask
+            print("MASK:\n", mask)
+
+            qk[row_idx[:, None], col_idx] = qk[row_idx[:, None], col_idx] * mask
+            print("ROW: ", row_idx, "COL: ", col_idx)
+            print("MINI QK:\n", qk[row_idx[:, None], col_idx])
+    
+    print("QK after MASK:\n", qk)
