@@ -1,15 +1,16 @@
 import torch
+import math
 
 IS_LOCAL = True
 
-BLOCK_M = 4
-BLOCK_N = 4
+BLOCK_M = 16
+BLOCK_N = 64
 
 head_dim = 1
-N_CTX_Q = 4
-N_CTX_KV = 8
+N_CTX_Q = 1
+N_CTX_KV = 128
 
-window = (0, 0)
+window = (-5, 0)
 WINDOW_SIZE_LEFT = window[0]
 WINDOW_SIZE_RIGHT = window[1]
 
@@ -17,12 +18,12 @@ qk = torch.randint(1, 9, (N_CTX_Q, N_CTX_KV))
 print("QK:\n", qk)
 print("WINDOW: ", window)
 
-for start_m in range(N_CTX_Q // BLOCK_M):
+for start_m in range(math.ceil(N_CTX_Q / BLOCK_M)):
     for start_n in range(0, N_CTX_KV, BLOCK_N):
-        row_idx = start_m * BLOCK_M + torch.arange(0, BLOCK_M)
+        row_idx = start_m * BLOCK_M + torch.arange(0, BLOCK_M) if N_CTX_Q >= (start_m+1) * BLOCK_M else start_m * BLOCK_M + torch.arange(0, N_CTX_Q % BLOCK_M)
         col_idx = start_n + torch.arange(0, BLOCK_N)
 
-        mask = torch.full((BLOCK_M, BLOCK_N), 1)
+        mask = torch.full((BLOCK_M, BLOCK_N), 1) if N_CTX_Q >= (start_m+1) * BLOCK_M else torch.full((N_CTX_Q % BLOCK_M, BLOCK_N), 1)
 
         col_offset = N_CTX_Q - N_CTX_KV
 
