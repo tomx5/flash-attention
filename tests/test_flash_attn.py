@@ -2003,9 +2003,9 @@ def test_flash_attn_splitkv(
 @pytest.mark.parametrize("seqlen_new_eq_seqlen_q", [True])
 # @pytest.mark.parametrize("rotary_interleaved", [False, True])
 @pytest.mark.parametrize("rotary_interleaved", [False])
-# @pytest.mark.parametrize("rotary_fraction", [0.0, 0.5, 1.0])
+@pytest.mark.parametrize("rotary_fraction", [0.0, 0.5, 1.0])
 # @pytest.mark.parametrize("rotary_fraction", [0.5, 1.0])
-@pytest.mark.parametrize("rotary_fraction", [0.0])
+# @pytest.mark.parametrize("rotary_fraction", [0.0])
 # @pytest.mark.parametrize("paged_kv_block_size", [None, 256])
 # @pytest.mark.parametrize("paged_kv_block_size", [256, 512])
 @pytest.mark.parametrize("paged_kv_block_size", [None])
@@ -2037,10 +2037,10 @@ def test_flash_attn_splitkv(
         (64, 256),
         (3, 799),
         (64, 2048),
-        # (16, 20000),
-        # (1, 128 * 1024),
-        # (16, 128 * 1024),
-        # (128, 128),
+        (16, 20000),
+        (1, 128 * 1024),
+        (16, 128 * 1024),
+        (128, 128),
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
@@ -2300,9 +2300,9 @@ def test_flash_attn_kvcache(
     print(f"Pytorch max diff: {(out_pt - out_ref).abs().max().item()}")
     print(f"Pytorch mean diff: {(out_pt - out_ref).abs().mean().item()}")
 
-    print("OUT:\n", out)
+    # print("OUT:\n", out)
     
-    print("\nOUT REF:\n", out_ref)
+    # print("\nOUT REF:\n", out_ref)
 
     # Check that FlashAttention's numerical error is at most twice the numerical error
     # of a Pytorch implementation.

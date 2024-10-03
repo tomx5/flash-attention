@@ -307,13 +307,13 @@ def _fwd_kernel_splitK(
             # Apply the combined mask
             qk = tl.where(mask, qk, float("-inf"))
         
-        print("start_m: ", start_m)
-        print("start_n: ", start_n)
-        print("BLOCK_M: ", BLOCK_M)
-        print("BLOCK_N: ", BLOCK_N)
-        print("OFFSET ", (col_idx[None, :] + col_offset - row_idx[:, None]))
-        print("MASK: ", mask)
-        print("QK: ", qk)
+        # print("start_m: ", start_m)
+        # print("start_n: ", start_n)
+        # print("BLOCK_M: ", BLOCK_M)
+        # print("BLOCK_N: ", BLOCK_N)
+        # print("OFFSET ", (col_idx[None, :] + col_offset - row_idx[:, None]))
+        # print("MASK: ", mask)
+        # print("QK: ", qk)
 
         # TODO: This is slow, and only needed at the last iteration.
         # Maybe we can unroll the last iteration instead?
