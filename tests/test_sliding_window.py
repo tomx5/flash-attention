@@ -2,15 +2,22 @@ import torch
 import math
 
 IS_LOCAL = True
+IS_CASUAL = False
 
 BLOCK_M = 16
 BLOCK_N = 64
 
 head_dim = 1
 N_CTX_Q = 1
-N_CTX_KV = 57
+N_CTX_KV = 64
 
-window = (-5, 0)
+window = (float('-inf'), float('inf'))
+
+if IS_LOCAL:
+    window = (-2, 0)
+if IS_CASUAL:
+    window = (max(float('-inf'), window[0]), 0) # if local enabled will choose the mask that is smallest (the intersection of both masks)
+
 WINDOW_SIZE_LEFT = window[0]
 WINDOW_SIZE_RIGHT = window[1]
 
@@ -31,6 +38,7 @@ for start_m in range(math.ceil(N_CTX_Q / BLOCK_M)):
             local_mask = (WINDOW_SIZE_LEFT <= (col_idx[None, :] + col_offset - row_idx[:, None])) & \
                          ((col_idx[None, :] + col_offset - row_idx[:, None]) <= WINDOW_SIZE_RIGHT)
             mask = mask * local_mask # apply local mask to mask
+            print((col_idx[None, :] + col_offset - row_idx[:, None]))
             print("MASK:\n", mask)
 
             qk[row_idx[:, None], col_idx] = qk[row_idx[:, None], col_idx] * mask
