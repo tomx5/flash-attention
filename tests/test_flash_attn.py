@@ -220,6 +220,7 @@ def construct_local_mask(
         if query_padding_mask is None
         else rearrange(query_padding_mask.sum(-1), "b -> b 1 1 1")
     )
+    # sk - sq = col_offset
     if window_size[0] < 0:
         return col_idx > row_idx + sk - sq + window_size[1]
     else:
@@ -300,6 +301,7 @@ def attention_ref(
             key_leftpad=key_leftpad,
         )
         scores.masked_fill_(local_mask, float("-inf"))
+        print(scores)
     if attn_bias is not None:
         scores = scores + attn_bias
     attention = torch.softmax(scores, dim=-1).to(v.dtype)

@@ -307,6 +307,10 @@ def _fwd_kernel_splitK(
             # Apply the combined mask
             qk = tl.where(mask, qk, float("-inf"))
 
+        print((col_idx[None, :] + col_offset - row_idx[:, None]))
+        print(mask)
+        print(qk)
+
         # TODO: This is slow, and only needed at the last iteration.
         # Maybe we can unroll the last iteration instead?
         if BOUNDS_CHECKS_N:
