@@ -201,6 +201,11 @@ def construct_local_mask(
     device=None,
     key_leftpad=None,
 ):
+    print("seqlen_q", seqlen_q)
+    print("seqlen_k", seqlen_k)
+    print("query_padding_mask", query_padding_mask)
+    print("key_padding_mask", key_padding_mask)
+    print("key_leftpad", key_leftpad)
     """
     Method for constructing a mask for local (aka sliding window) attention
     """
@@ -220,8 +225,10 @@ def construct_local_mask(
         if query_padding_mask is None
         else rearrange(query_padding_mask.sum(-1), "b -> b 1 1 1")
     )
+    print("offset:\n", col_idx - (sq - sk) - row_idx)
     # sk - sq = col_offset
-    if window_size[0] < 0:
+    # return (col_idx - (sq - sk) - row_idx < window_size[0]) & (col_idx - (sq - sk) - row_idx > window_size[1])
+    if window_size[0] < 0: # wait what? this is just causal. i don't understand
         return col_idx > row_idx + sk - sq + window_size[1]
     else:
         sk = torch.full_like(col_idx, seqlen_k) if key_padding_mask is None else sk
@@ -300,8 +307,10 @@ def attention_ref(
             q.device,
             key_leftpad=key_leftpad,
         )
+        print("window_size: ", window_size)
+        print("local_mask:\n", local_mask)
         scores.masked_fill_(local_mask, float("-inf"))
-        print(scores)
+        print("scores:\n", scores)
     if attn_bias is not None:
         scores = scores + attn_bias
     attention = torch.softmax(scores, dim=-1).to(v.dtype)
@@ -2021,13 +2030,13 @@ def test_flash_attn_splitkv(
         # (8, 8),
         # (1, 4),
         (1, 64),
-        # (1, 128),
-        # (1, 339),
-        # (3, 1024),
-        # (64, 800),
-        # (64, 256),
-        # (3, 799),
-        # (64, 2048),
+        (1, 128),
+        (1, 339),
+        (3, 1024),
+        (64, 800),
+        (64, 256),
+        (3, 799),
+        (64, 2048),
         # (16, 20000),
         # (1, 128 * 1024),
         # (16, 128 * 1024),
@@ -2093,7 +2102,7 @@ def test_flash_attn_kvcache(
         pytest.skip()
 
     assert nheads % nheads_k == 0, "num heads cannot be evenly split into groups"
-    window_size = (-1, -1) if not local else (-2, 0)
+    window_size = (-1, -1) if not local else (2, 0)
 
     DEBUG_ENABLED = True
 

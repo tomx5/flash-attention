@@ -295,7 +295,7 @@ def _fwd_kernel_splitK(
             col_offset = N_CTX_Q - kv_len
 
             if IS_LOCAL:
-                local_mask = (WINDOW_SIZE_LEFT <= (col_idx[None, :] + col_offset - row_idx[:, None])) & \
+                local_mask = (-WINDOW_SIZE_LEFT <= (col_idx[None, :] + col_offset - row_idx[:, None])) & \
                              ((col_idx[None, :] + col_offset - row_idx[:, None]) <= WINDOW_SIZE_RIGHT)
                 mask = mask * local_mask # apply local mask to mask
                 
