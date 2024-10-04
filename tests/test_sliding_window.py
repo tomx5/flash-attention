@@ -5,11 +5,11 @@ IS_LOCAL = True
 IS_CASUAL = False
 
 BLOCK_M = 16
-BLOCK_N = 64
+BLOCK_N = 16
 
 head_dim = 1
-N_CTX_Q = 8
-N_CTX_KV = 16
+N_CTX_Q = 16
+N_CTX_KV = 32
 
 window = (float('inf'), float('inf'))
 

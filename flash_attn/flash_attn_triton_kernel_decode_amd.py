@@ -500,7 +500,7 @@ def _splitK_reduce(
     g_sum = tl.sum(l_sum, axis=0)
     acc = acc * alpha[:, None]
 
-    if IS_CAUSAL or True:   # TODO: add IS_LOCAL
+    if IS_CAUSAL or IS_LOCAL:   # TODO: add IS_LOCAL
         # Avoid division by zero
         g_sum_safe = tl.where(g_sum > 0, g_sum, 1.0)
         acc_out = tl.sum(acc, axis=0) / g_sum_safe
