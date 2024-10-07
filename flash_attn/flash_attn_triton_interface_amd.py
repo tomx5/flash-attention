@@ -163,6 +163,8 @@ def fwd_kvcache(
         rotary_sin,
         rotary_cos_k,
         rotary_sin_k,
+        rotary_dim,
+        rotary_seqlen,
         rotary_interleaved,
         rotary_inplace,
         rotary_conjugate,
@@ -208,7 +210,7 @@ def fwd_kvcache(
         input_metadata.need_alibi(alibi_slopes, batch, nheads_q)
 
     if torch.is_tensor(rotary_cos) and torch.is_tensor(rotary_sin):
-        input_metadata.need_rotary(rotary_cos, rotary_sin, rotary_cos_k, rotary_sin_k, rotary_interleaved, rotary_seqlen_offsets, rotary_inplace=rotary_inplace, rotary_conjugate=rotary_conjugate)
+        input_metadata.need_rotary(rotary_cos, rotary_sin, rotary_cos_k, rotary_sin_k, rotary_dim, rotary_seqlen, rotary_interleaved, rotary_seqlen_offsets, rotary_inplace=rotary_inplace, rotary_conjugate=rotary_conjugate)
 
     # launch kernel
     tri_out, softmax_lse = attention_decode(q, k_cache, v_cache, input_metadata)

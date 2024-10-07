@@ -66,6 +66,8 @@ def rotary_kernel(
         seqlen = tl.load(CU_SEQLENS + pid_batch + 1) - start_idx
         X = X + start_idx * stride_x_seqlen + pid_group * stride_x_group + pid_head * stride_x_nheads + pid_splitk * stride_x_splitk
 
+    pdb.set_trace()
+
     if pid_m * BLOCK_M >= seqlen:
         return
     rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -113,7 +115,7 @@ def rotary_kernel(
         #     o1,
         #     mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half),
         # )
-        out = tl.cat(o0, o1)
+        out = tl.cat(o0, o1) # both need to be 1D?
         return out
     else:
         # We don't want to load X[0, 2, 4, ...] and X[1, 3, 5, ...] separately since both are slow.
@@ -316,22 +318,22 @@ def _fwd_kernel_splitK(
                     X=k_new_block,
                     COS=Rotary_cos,
                     SIN=Rotary_sin,
-                    CU_SEQLENS=None,
-                    SEQLEN_OFFSETS=None,
-                    seqlen=N_CTX_K,
+                    CU_SEQLENS=Cache_seqlens,
+                    SEQLEN_OFFSETS=0,
+                    seqlen=N_CTX_NEW,
                     rotary_dim=Rotary_dim,
-                    seqlen_ro=seqlen_ro,
+                    seqlen_ro=N_CTX_NEW,
                     start_m=start_m,
                     off_batch=off_z,
                     off_head=off_h_q,
                     off_group=off_g_q,
                     splitk_idx=splitk_idx,
-                    stride_x_batch= (k.stride(0) if not IS_VARLEN else 0),  # batch_strides if not varlen else 0
-                    stride_x_seqlen=k.stride(-5),
-                    stride_x_group=k.stride(-4),
-                    stride_x_nheads=k.stride(-3),
-                    stride_x_splitk=k.stride(-2),
-                    stride_x_headdim=k.stride(-1),
+                    stride_x_batch= (stride_kz if not IS_VARLEN else 0),  # batch_strides if not varlen else 0
+                    stride_x_seqlen=stride_kn,
+                    stride_x_group=stride_kg,
+                    stride_x_nheads=stride_kh,
+                    stride_x_splitk=BLOCK_N_PER_SPLIT,
+                    stride_x_headdim=stride_kd,
                     BLOCK_K=BLOCK_K,
                     IS_SEQLEN_OFFSETS_TENSOR=IS_SEQLEN_OFFSETS_TENSOR,
                     IS_VARLEN=IS_VARLEN,
@@ -339,6 +341,7 @@ def _fwd_kernel_splitK(
                     CONJUGATE=Rotary_conjugate,
                     BLOCK_M=BLOCK_M
                 )
+                pdb.set_trace()
             
             # Store to K
             tl.store(

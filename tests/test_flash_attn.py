@@ -2221,6 +2221,8 @@ def test_flash_attn_kvcache(
         rotary_sin=sin,
         rotary_cos_k=None,
         rotary_sin_k=None,
+        rotary_dim=rotary_dim,
+        rotary_seqlen=seqlen_q,
         rotary_interleaved=rotary_interleaved,
         rotary_inplace=False,
         rotary_conjugate=False,

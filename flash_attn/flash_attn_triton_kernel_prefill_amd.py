@@ -45,9 +45,11 @@ class MetaData():
     rotary_sin = None
     rotary_cos_k = None         # cos/sin_k is cos/sin meant specifically for vector k. It's when we want to deliberately rotate each vector independently?
     rotary_sin_k = None
-    rotary_seqlen = None
+    rotary_dim = 0
+    rotary_seqlen = 0
     rotary_interleaved = False
     rotary_seqlen_offsets = None
+    rotary_is_varlen = None
     rotary_inplace = False
     rotary_conjugate = False
     cache_seqlens = None
@@ -76,6 +78,7 @@ class MetaData():
                 f"  rotary_sin={self.rotary_sin},\n"
                 f"  rotary_cos_k={self.rotary_cos_k},\n"
                 f"  rotary_sin_k={self.rotary_sin_k},\n"
+                f"  rotary_dim={self.rotary_dim},\n"
                 f"  rotary_seqlen={self.rotary_seqlen},\n"
                 f"  rotary_interleaved={self.rotary_interleaved},\n"
                 f"  rotary_seqlen_offsets={self.rotary_seqlen_offsets},\n"
@@ -121,16 +124,19 @@ class MetaData():
         assert alibi_slopes.shape[1] == nheads
         self.alibi_slopes = alibi_slopes
 
-    def need_rotary(self, rotary_cos, rotary_sin, rotary_cos_k, rotary_sin_k, rotary_interleaved, rotary_seqlen_offsets, rotary_inplace, rotary_conjugate):
+    def need_rotary(self, rotary_cos, rotary_sin, rotary_cos_k, rotary_sin_k, rotary_dim, rotary_seqlen, rotary_interleaved, rotary_seqlen_offsets, rotary_inplace, rotary_conjugate):
         assert rotary_cos.is_cuda
         assert rotary_sin.is_cuda
         assert rotary_cos.shape == rotary_sin.shape, "rotary_sin and rotary_cos shapes must match"
         assert rotary_cos.dim() == 2 and rotary_sin.dim() == 2
         assert rotary_interleaved is not None
+
         self.rotary_cos = rotary_cos
         self.rotary_sin = rotary_sin
         self.rotary_cos_k = rotary_cos_k
         self.rotary_sin_k = rotary_sin_k
+        self.rotary_dim = rotary_dim
+        self.rotary_seqlen = rotary_seqlen
         self.rotary_interleaved = rotary_interleaved
         self.rotary_seqlen_offsets = rotary_seqlen_offsets
         self.rotary_inplace = rotary_inplace

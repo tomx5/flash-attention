@@ -1156,6 +1156,8 @@ def flash_attn_with_kvcache(
     rotary_sin=None,
     rotary_cos_k=None,
     rotary_sin_k=None,
+    rotary_dim=0,
+    rotary_seqlen=0,
     rotary_interleaved=True,
     rotary_inplace=False,
     rotary_conjugate=False,
@@ -1283,6 +1285,8 @@ def flash_attn_with_kvcache(
         rotary_sin,
         rotary_cos_k,
         rotary_sin_k,
+        rotary_dim,
+        rotary_seqlen,
         rotary_interleaved,
         rotary_inplace,
         rotary_conjugate,
@@ -1300,4 +1304,5 @@ def flash_attn_with_kvcache(
         softcap,
         num_splits,
     )
+    print(out)
     return (out, softmax_lse) if return_softmax_lse else out
