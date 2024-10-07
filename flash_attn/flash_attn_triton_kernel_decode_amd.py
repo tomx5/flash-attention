@@ -460,6 +460,7 @@ def _splitK_reduce(
     splitK_pow2: tl.constexpr,
     use_mask: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
+    IS_LOCAL: tl.constexpr,
 ):
     off_zhg = tl.program_id(0)
     off_z = off_zhg // (H * G)
@@ -490,7 +491,7 @@ def _splitK_reduce(
 
     g_m = tl.max(l_m, axis=0)
     
-    if IS_CAUSAL or True:   # TODO: add IS_LOCAL
+    if IS_CAUSAL or IS_LOCAL:   # TODO: add IS_LOCAL
         l_m_offset = l_m - g_m
         alpha = tl.where(l_m_offset > float("-inf"), tl.math.exp2(l_m_offset), 0.0)
     else:
@@ -517,7 +518,7 @@ def _splitK_reduce(
 
     # Store lse
     l_ptrs = LSE + off_zhg * stride_lse_zhg + off_m
-    if IS_CAUSAL or True:   # TODO: add IS_LOCAL
+    if IS_CAUSAL or IS_LOCAL:   # TODO: add IS_LOCAL
         lse = tl.where(g_sum > 0, (g_m + tl.math.log2(g_sum)) / log2_e, g_m)
         tl.store(l_ptrs, lse)
     else:
@@ -811,6 +812,7 @@ class _attention(torch.autograd.Function):
             splitK_pow2=splitK_pow2, 
             use_mask=use_mask,
             IS_CAUSAL=input_metadata.causal,
+            IS_LOCAL=input_metadata.local,
             num_warps=4)
 
         lse = lse.reshape([batch_size, n_group_q, heads_per_group_q, seqlen_q])

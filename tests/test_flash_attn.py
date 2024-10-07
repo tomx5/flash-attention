@@ -1996,8 +1996,8 @@ def test_flash_attn_splitkv(
 # @pytest.mark.parametrize("alibi", [False, True])
 @pytest.mark.parametrize("alibi", [False])
 # @pytest.mark.parametrize("local", [False, True])
-@pytest.mark.parametrize("local", [False])
-@pytest.mark.parametrize("causal", [True])
+@pytest.mark.parametrize("local", [True])
+@pytest.mark.parametrize("causal", [False])
 # @pytest.mark.parametrize("causal", [False])
 # @pytest.mark.parametrize("seqlen_new_eq_seqlen_q", [True, False])
 @pytest.mark.parametrize("seqlen_new_eq_seqlen_q", [True])
@@ -2102,9 +2102,9 @@ def test_flash_attn_kvcache(
         pytest.skip()
 
     assert nheads % nheads_k == 0, "num heads cannot be evenly split into groups"
-    window_size = (-1, -1) if not local else (2, 0)
+    window_size = (-1, -1) if not local else (5, 0)
 
-    DEBUG_ENABLED = True
+    DEBUG_ENABLED = False
 
     if DEBUG_ENABLED:
         q = torch.arange(seqlen_q, dtype=dtype, device="cuda").view(1, seqlen_q, 1, 1).expand(batch_size, seqlen_q, nheads, d).requires_grad_().contiguous().to(dtype=dtype)
@@ -2113,7 +2113,7 @@ def test_flash_attn_kvcache(
 
     seqlen_new = seqlen_q if seqlen_new_eq_seqlen_q else torch.randint(1, seqlen_q + 1, (1,)).item()
     if new_kv:
-        if DEBUG_ENABLED or True:
+        if DEBUG_ENABLED:
             k = torch.arange(seqlen_new, dtype=dtype, device="cuda").view(1, seqlen_new, 1, 1).expand(batch_size, seqlen_new, nheads_k, d).requires_grad_().contiguous().to(dtype=dtype)
             v = torch.arange(seqlen_new, dtype=dtype, device="cuda").view(1, seqlen_new, 1, 1).expand(batch_size, seqlen_new, nheads_k, d).requires_grad_().contiguous().to(dtype=dtype)
         else:
