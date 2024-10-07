@@ -312,7 +312,16 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         
         # -- compute qk ----
         qk += tl.dot(q, k)
+        
 
+        if IS_LOCAL:
+            """ causal_boundary is effectively the column index offset by the difference between (seqlen_q - seqlen_k).
+            IS_LOCAL is a more general case of IS_CASUAL.
+            """
+            causal_boundary = start_n + offs_n_causal
+            local_mask = -WINDOW_SIZE_LEFT <= (causal_boundary[None, :] - OFFS_M[:, None]) & \
+                          WINDOW_SIZE_RIGHT >= (causal_boundary[None, :] - OFFS_M[:, None])
+            qk = tl.where(local_mask, qk, float("-inf"))
         if IS_CAUSAL:
             causal_boundary = start_n + offs_n_causal
             causal_mask = OFFS_M[:, None] >= causal_boundary[None, :]
@@ -528,23 +537,30 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm, s
     # Here we compute how many full and masked blocks we have.
     padded_block_k = n_extra_tokens != 0
     is_modulo_mn = not padded_block_k and (seqlen_q % BLOCK_M == 0)
-    if IS_CAUSAL:
+    if IS_CAUSAL or IS_LOCAL:
         # There are always at least BLOCK_M // BLOCK_N masked blocks.
         # Additionally there might be one more due to dissimilar seqlens.
-        masked_blocks = BLOCK_M // BLOCK_N + (not is_modulo_mn)
+        if IS_CAUSAL:
+            start_masked_blocks = (seqlen_k - WINDOW_SIZE_LEFT) // BLOCK_N
+            end_masked_blocks = BLOCK_M // BLOCK_N + (not is_modulo_mn)
+        if IS_LOCAL:
+            start_masked_blocks = 0
+            end_masked_blocks = (WINDOW_SIZE_LEFT + 1 + WINDOW_SIZE_RIGHT) // BLOCK_N
     else:
         # Padding on Q does not need to be masked in the FA loop.
-        masked_blocks = padded_block_k
+        end_masked_blocks = padded_block_k
+    
     # if IS_CAUSAL, not is_modulo_mn does not always result in an additional block.
     # In this case we might exceed n_blocks so pick the min.
-    masked_blocks = min(masked_blocks, n_blocks)
-    n_full_blocks = n_blocks - masked_blocks
+    end_masked_blocks = min(end_masked_blocks, n_blocks)
+    n_full_blocks = n_blocks - end_masked_blocks - start_masked_blocks
     block_min = 0
     block_max = n_blocks * BLOCK_N
+
     # Compute for full blocks. Here we set causal to false regardless of its actual
     # value because there is no masking. Similarly we do not need padding.
     if n_full_blocks > 0:
-        block_max = (n_blocks - masked_blocks) * BLOCK_N
+        block_max = (n_blocks - end_masked_blocks) * BLOCK_N
         acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk, stride_bn,
                                         start_m, seqlen_k, seqlen_q, dropout_p, philox_seed, batch_philox_offset,
                                         encoded_sm_ptrs,
@@ -560,7 +576,7 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm, s
 
     tl.debug_barrier()
     # Remaining blocks, if any, are full / not masked.
-    if (masked_blocks > 0):
+    if (end_masked_blocks > 0):
         if IS_CAUSAL:
             offs_n_causal = offs_n + (seqlen_q - seqlen_k)
         else:
@@ -573,7 +589,7 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm, s
             encoded_sm_ptrs += n_full_blocks * BLOCK_N
         acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk, stride_bn,
                                         start_m, seqlen_k, seqlen_q, dropout_p, philox_seed, batch_philox_offset,
-                                        encoded_sm_ptrs, block_min, block_max, offs_n_causal, masked_blocks,
+                                        encoded_sm_ptrs, block_min, block_max, offs_n_causal, end_masked_blocks,
                                         n_extra_tokens, alibi_slope, IS_CAUSAL, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m,
                                         offs_n,
                                         # _, MASK_STEPS, ...

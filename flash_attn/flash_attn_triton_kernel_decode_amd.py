@@ -295,7 +295,7 @@ def _fwd_kernel_splitK(
             col_offset = N_CTX_Q - kv_len
 
             if IS_LOCAL:
-                local_mask = (WINDOW_SIZE_LEFT <= (col_idx[None, :] + col_offset - row_idx[:, None])) & \
+                local_mask = (-WINDOW_SIZE_LEFT <= (col_idx[None, :] + col_offset - row_idx[:, None])) & \
                              ((col_idx[None, :] + col_offset - row_idx[:, None]) <= WINDOW_SIZE_RIGHT)
                 mask = mask * local_mask # apply local mask to mask
                 
@@ -307,13 +307,13 @@ def _fwd_kernel_splitK(
             # Apply the combined mask
             qk = tl.where(mask, qk, float("-inf"))
         
-        print("start_m: ", start_m)
-        print("start_n: ", start_n)
-        print("BLOCK_M: ", BLOCK_M)
-        print("BLOCK_N: ", BLOCK_N)
-        print("OFFSET ", (col_idx[None, :] + col_offset - row_idx[:, None]))
-        print("MASK: ", mask)
-        print("QK: ", qk)
+        # print("start_m: ", start_m)
+        # print("start_n: ", start_n)
+        # print("BLOCK_M: ", BLOCK_M)
+        # print("BLOCK_N: ", BLOCK_N)
+        # print("OFFSET ", (col_idx[None, :] + col_offset - row_idx[:, None]))
+        # print("MASK: ", mask)
+        # print("QK: ", qk)
 
         # TODO: This is slow, and only needed at the last iteration.
         # Maybe we can unroll the last iteration instead?
@@ -500,7 +500,7 @@ def _splitK_reduce(
     g_sum = tl.sum(l_sum, axis=0)
     acc = acc * alpha[:, None]
 
-    if IS_CAUSAL or True:   # TODO: add IS_LOCAL
+    if IS_CAUSAL or IS_LOCAL:   # TODO: add IS_LOCAL
         # Avoid division by zero
         g_sum_safe = tl.where(g_sum > 0, g_sum, 1.0)
         acc_out = tl.sum(acc, axis=0) / g_sum_safe
