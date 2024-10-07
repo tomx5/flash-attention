@@ -41,6 +41,7 @@ def rotary_kernel(
     stride_x_seqlen,
     stride_x_group,
     stride_x_nheads,
+    stride_x_splitk,
     stride_x_headdim,
     # Meta-parameters
     BLOCK_K: tl.constexpr,
@@ -59,11 +60,11 @@ def rotary_kernel(
     rotary_dim_half = rotary_dim // 2
 
     if not IS_VARLEN:
-        X = X + pid_batch * stride_x_batch + pid_group * stride_x_group + pid_head * stride_x_nheads
+        X = X + pid_batch * stride_x_batch + pid_group * stride_x_group + pid_head * stride_x_nheads + pid_splitk * stride_x_splitk
     else:
         start_idx = tl.load(CU_SEQLENS + pid_batch)
         seqlen = tl.load(CU_SEQLENS + pid_batch + 1) - start_idx
-        X = X + start_idx * stride_x_seqlen + pid_group * stride_x_group + pid_head * stride_x_nheads
+        X = X + start_idx * stride_x_seqlen + pid_group * stride_x_group + pid_head * stride_x_nheads + pid_splitk * stride_x_splitk
 
     if pid_m * BLOCK_M >= seqlen:
         return
@@ -78,7 +79,7 @@ def rotary_kernel(
 
     if not INTERLEAVED:
         # Load the 1st and 2nd halves of X, do calculation, then store to 1st and 2nd halves of OUT
-        X = X + (rm[:, None] * stride_x_seqlen + rk_half[None, :] * stride_x_headdim)
+        X = X + (rm[:, None] * stride_x_seqlen + rk_half[None, :] * stride_x_headdim) # this needs to change
         COS = COS + (rm_cs[:, None] * rotary_dim_half + rk_half[None, :])
         SIN = SIN + (rm_cs[:, None] * rotary_dim_half + rk_half[None, :])
         cos = tl.load(
@@ -120,6 +121,7 @@ def rotary_kernel(
         # and for the odd indices.
         rk_swap = rk + ((rk + 1) % 2) * 2 - 1  # 1, 0, 3, 2, 5, 4, ...
         rk_repeat = tl.arange(0, BLOCK_K) // 2
+        # these need to change
         X0 = X + (rm[:, None] * stride_x_seqlen + rk[None, :] * stride_x_headdim)
         X1 = X + (rm[:, None] * stride_x_seqlen + rk_swap[None, :] * stride_x_headdim)
         COS = COS + (rm_cs[:, None] * rotary_dim_half + rk_repeat[None, :])
@@ -169,6 +171,7 @@ def _fwd_kernel_splitK(
     seqlen_ro,
     IS_SEQLEN_OFFSETS_TENSOR: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    BLOCK_K: tl.constexpr,
     # Strides
     stride_qz,
     stride_qm,
@@ -304,6 +307,7 @@ def _fwd_kernel_splitK(
 
             # apply rotary to k here
             if USE_ROTARY:
+                print("k_new_block", k_new_block)
                 k_new_block = rotary_kernel(
                     X=k_new_block,
                     COS=Rotary_cos,
@@ -318,17 +322,18 @@ def _fwd_kernel_splitK(
                     off_head=off_h_q,
                     off_group=off_g_q,
                     splitk_idx=splitk_idx,
-                    stride_x_batch= ,
-                    stride_x_seqlen= ,
-                    stride_x_group= ,
-                    stride_x_nheads= ,
-                    stride_x_headdim= ,
-                    BLOCK_K= ,
-                    IS_SEQLEN_OFFSETS_TENSOR= ,
-                    IS_VARLEN= ,
-                    INTERLEAVED= ,
-                    CONJUGATE= ,
-                    BLOCK_M= 
+                    stride_x_batch= (k.stride(0) if not IS_VARLEN else 0),  # batch_strides if not varlen else 0
+                    stride_x_seqlen=k.stride(-5),
+                    stride_x_group=k.stride(-4),
+                    stride_x_nheads=k.stride(-3),
+                    stride_x_splitk=k.stride(-2),
+                    stride_x_headdim=k.stride(-1),
+                    BLOCK_K=BLOCK_K,
+                    IS_SEQLEN_OFFSETS_TENSOR=IS_SEQLEN_OFFSETS_TENSOR,
+                    IS_VARLEN=IS_VARLEN,
+                    INTERLEAVED=Rotary_interleaved,
+                    CONJUGATE=Rotary_conjugate,
+                    BLOCK_M=BLOCK_M
                 )
             
             # Store to K
@@ -874,6 +879,13 @@ class _attention(torch.autograd.Function):
         split_size = (seqlen_k + split_k - 1) // split_k
         use_cache_seqlens = cache_seqlens is not None
 
+        # Rotary Block Metadata (compute BLOCK_K)
+        BLOCK_K = (
+            32
+            if input_metadata.rotary_dim <= 32
+            else (64 if input_metadata.rotary_dim <= 64 else (128 if input_metadata.rotary_dim <= 128 else 256))
+        )
+
         # TODO: enable quantization
         _fwd_kernel_splitK[grid](
             Q=q,
@@ -893,8 +905,9 @@ class _attention(torch.autograd.Function):
             Rotary_interleaved = input_metadata.rotary_interleaved,
             Rotary_conjugate = input_metadata.rotary_conjugate,
             seqlen_ro = input_metadata.rotary_seqlen,
-            IS_SEQLEN_OFFSETS_TENSOR = ,
-            IS_VARLEN = ,
+            IS_SEQLEN_OFFSETS_TENSOR = isinstance(input_metadata.rotary_seqlen_offsets, torch.Tensor),
+            IS_VARLEN = input_metadata.rotary_is_varlen,
+            BLOCK_K=BLOCK_K,
             **_strides(q, "qz", "qm", "qg", "qh", "qd"),
             **_strides(k, "kz", "kn", "kg", "kh", "kd"),
             **_strides(v, "vz", "vn", "vg", "vh", "vd"),
