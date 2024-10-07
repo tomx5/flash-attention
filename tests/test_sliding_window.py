@@ -1,8 +1,8 @@
 import torch
 import math
 
-IS_LOCAL = True
-IS_CASUAL = False
+IS_LOCAL = False
+IS_CASUAL = True
 
 BLOCK_M = 16
 BLOCK_N = 64
@@ -34,7 +34,7 @@ for start_m in range(math.ceil(N_CTX_Q / BLOCK_M)):
 
         col_offset = N_CTX_Q - N_CTX_KV
 
-        if IS_LOCAL:
+        if IS_LOCAL or IS_CASUAL:
             local_mask = (WINDOW_SIZE_LEFT <= (col_idx[None, :] + col_offset - row_idx[:, None])) & \
                          ((col_idx[None, :] + col_offset - row_idx[:, None]) <= WINDOW_SIZE_RIGHT)
             mask = mask * local_mask # apply local mask to mask
