@@ -224,10 +224,10 @@ def _fwd_kernel_splitK(
     V_scale_shift_block_ptr = None
 
     # initialize pointer to m and l
-    m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float16)
-    l_i = tl.zeros([BLOCK_M], dtype=tl.float16)
+    m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
 
-    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float16)  # noqa: F821
+    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)  # noqa: F821
 
     # scale sm_scale by log_2(e) and use
     # 2^x instead of exp in the loop because CSE and LICM
@@ -267,7 +267,7 @@ def _fwd_kernel_splitK(
             pass
 
         # -- compute qk ---
-        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float16)
+        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk += tl.dot(q, k)
 
         if USE_ALIBI:
@@ -367,8 +367,8 @@ def load_k_v_group(
     V_block_ptr = tl.advance(V_block_ptr, (0, ACTUAL_BLOCK_DMODEL * group_id))
 
     # -- load k, v --
-    k = tl.load(K_block_ptr, boundary_check=(1, ) if BOUNDS_CHECKS_N else ())
-    v = tl.load(V_block_ptr, boundary_check=(0, ) if BOUNDS_CHECKS_N else ())
+    k = tl.load(K_block_ptr, boundary_check=(1, ) if BOUNDS_CHECKS_N else ()).to(tl.float32)
+    v = tl.load(V_block_ptr, boundary_check=(0, ) if BOUNDS_CHECKS_N else ()).to(tl.float32)
 
     return k, v
 
