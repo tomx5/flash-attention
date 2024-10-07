@@ -100,8 +100,11 @@ def rotary_kernel(
         ).to(tl.float32)
         if CONJUGATE:
             sin = -sin
+        pdb.set_trace()
         o0 = x0 * cos - x1 * sin
         o1 = x0 * sin + x1 * cos
+        print("o0", o0)
+        print("o1", o1)
         # write back result
         # OUT = OUT + (rm[:, None] * stride_out_seqlen + rk_half[None, :] * stride_out_headdim)
         # tl.store(OUT, o0, mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half))
@@ -305,9 +308,10 @@ def _fwd_kernel_splitK(
                 other=0
             )
 
+            pdb.set_trace()
+
             # apply rotary to k here
             if USE_ROTARY:
-                print("k_new_block", k_new_block)
                 k_new_block = rotary_kernel(
                     X=k_new_block,
                     COS=Rotary_cos,
@@ -399,10 +403,10 @@ def _fwd_kernel_splitK(
     V_scale_shift_block_ptr = None
 
     # initialize pointer to m and l
-    m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float16)
-    l_i = tl.zeros([BLOCK_M], dtype=tl.float16)
+    m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
 
-    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float16)  # noqa: F821
+    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)  # noqa: F821
 
     # scale sm_scale by log_2(e) and use
     # 2^x instead of exp in the loop because CSE and LICM
@@ -438,7 +442,7 @@ def _fwd_kernel_splitK(
             v = tl.where(d_mask[None, :], v, 0.0)
 
         # -- compute qk ---
-        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float16)
+        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk += tl.dot(q, k)
 
         if USE_ALIBI:
@@ -538,8 +542,8 @@ def load_k_v_group(
     V_block_ptr = tl.advance(V_block_ptr, (0, ACTUAL_BLOCK_DMODEL * group_id))
 
     # -- load k, v --
-    k = tl.load(K_block_ptr, boundary_check=(1, ) if BOUNDS_CHECKS_N else ())
-    v = tl.load(V_block_ptr, boundary_check=(0, ) if BOUNDS_CHECKS_N else ())
+    k = tl.load(K_block_ptr, boundary_check=(1, ) if BOUNDS_CHECKS_N else ()).to(tl.float32)
+    v = tl.load(V_block_ptr, boundary_check=(0, ) if BOUNDS_CHECKS_N else ()).to(tl.float32)
 
     return k, v
 
