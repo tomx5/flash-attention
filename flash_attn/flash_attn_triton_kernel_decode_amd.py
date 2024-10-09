@@ -20,6 +20,64 @@ def _strides(x: torch.Tensor, *stride_names: str):
     return {f"stride_{s}": x.stride(i) for i, s in enumerate(stride_names)}
 
 @triton.jit
+def rotary_kernel_splitk(
+    # Dimensions of X
+    X,              # tensor being rotated. Has shape (batch (z), seqlen (s), group (g), head (h), head_dim (d))
+    seqlen_x,       # seqlen of the x dim. shape is (batch (z), )
+    rotary_dim,     # size of embedding space we end up rotating
+
+    # COS/SIN and Offsetting Into It
+    COS,            # tensor of shape (seqlen (m), ro_dim // 2)
+    SIN,            # tensor of shape (seqlen (m), ro_dim // 2)
+    SEQLEN_OFFSET,  # we use this as an offset into COS and SIN to apply the correct rotation
+
+    # PID Offsets
+    batch_pid,      # pid for batch
+    m_pid,          # break seqlen into chunks. pid for accessing blocks of tokens in seqlen
+    group_pid,      # pid for group
+    head_pid,       # pid to access head
+    splitk_pid,     # break head_dim into chunks (splitk chunks). pid to access each splitk chunk
+
+    # Strides
+    stride_batch,
+    stride_m,
+    stride_group,
+    stride_head,
+    stride_splitk,
+    stride_headdim,
+
+    # Misc
+    INTERLEAVED: tl.constexpr,
+
+    # Meta-parameters
+    BLOCK_M: tl.constexpr,          # block size to access chunks of tokens (# of tokens simultaneously)
+    BLOCK_DMODEL: tl.constexpr,     # block size to access chunks of headdim (# of dimensions processed)
+):
+    range_m = m_pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    range_d = tl.arange(0, BLOCK_DMODEL)
+
+    x_ptr = X + (batch_pid * stride_batch) + (group_pid * stride_group) + (head_pid * stride_head)   # pointer to x block
+    x_mask = (range_m < seqlen_x)[:, None] & (range_d < rotary_dim)[None, :]
+
+    ro_dim_half = rotary_dim // 2       # length of cos/sin
+    range_d_half = tl.arange(0, BLOCK_DMODEL // 2)
+
+    if not INTERLEAVED:
+        x0_range = range_m[:, None]*stride_m + range_d_half[None, :]                # BLOCK_M x 1st half of headdim (fast to load)
+        x1_range = range_m[:, None]*stride_m + range_d_half[None, :] + ro_dim_half  # BLOCK_M x 2nd half of headdim (fast to load)
+    else:
+        range_d_swap = range_d + ((range_d + 1) % 2) * 2 - 1            # 1, 0, 3, 2, 5, 4, ...
+        range_d_repeat = tl.arange(0, BLOCK_DMODEL) // 2                # 0, 0, 1, 1, 2, 2, ...
+
+        x0_range = range_m[:, None]*stride_m + range_d[None, :]         # 0, 1, 2, 3, 4, 5, ... (fast to load)
+        x1_range = range_m[:, None]*stride_m + range_d_swap[None, :]    # 1, 0, 3, 2, 5, 4, ... (slow to load)
+
+    x0 = tl.load(x_ptr + x0_range, mask=x_mask)
+    x1 = tl.load(x_ptr + x1_range, mask=x_mask)
+
+    pdb.set_trace()
+
+@triton.jit
 def rotary_kernel(
     X,
     COS,
