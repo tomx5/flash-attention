@@ -54,7 +54,7 @@ def rotary_kernel_splitk(
     range_d_half = tl.arange(0, BLOCK_DMODEL // 2)
 
     # COS/SIN Range
-    cs_range = (SEQLEN_OFFSET + tl.arange(0, BLOCK_M))[:, None]*(ro_dim_half) + tl.arange(0, ro_dim_half)
+    # cs_range = (SEQLEN_OFFSET + tl.arange(0, BLOCK_M))[:, None]*(ro_dim_half) + tl.arange(0, ro_dim_half)
 
     if not INTERLEAVED:
         x0_range = range_m[:, None]*stride_m + range_d_half[None, :]*stride_headdim                # BLOCK_M x 1st half of headdim (fast to load)
@@ -75,16 +75,16 @@ def rotary_kernel_splitk(
         
         # Load COS/SIN
         range_d_repeat = tl.arange(0, BLOCK_DMODEL) // 2                # 0, 0, 1, 1, 2, 2, ...
-        COS = COS + (cs_range[:, None] * ro_dim_half + range_d_repeat[None, :])
-        SIN = SIN + (cs_range[:, None] * ro_dim_half + range_d_repeat[None, :])
+        COS = COS + (range_m[:, None] * ro_dim_half + range_d_repeat[None, :])
+        SIN = SIN + (range_m[:, None] * ro_dim_half + range_d_repeat[None, :])
         cos = tl.load(
             COS,
-            mask=(cs_range[:, None] < seqlen_x) & (range_d_repeat[None, :] < ro_dim_half),
+            mask=(range_m[:, None] < seqlen_x) & (range_d_repeat[None, :] < ro_dim_half),
             other=1.0,
         ).to(tl.float32)
         sin = tl.load(
             SIN,
-            mask=(cs_range[:, None] < seqlen_x) & (range_d_repeat[None, :] < ro_dim_half),
+            mask=(range_m[:, None] < seqlen_x) & (range_d_repeat[None, :] < ro_dim_half),
             other=0.0,
         ).to(tl.float32)
         # if CONJUGATE:
