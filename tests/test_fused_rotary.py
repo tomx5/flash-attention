@@ -43,7 +43,7 @@ def rotary_kernel_splitk(
     Note: 
     - for K in splitk let BLOCK_M = BLOCK_N, and start_m=start_n
     """
-    pdb.set_trace()
+    # pdb.set_trace()
     range_m = start_m + tl.arange(0, BLOCK_M)
     range_d = tl.arange(0, BLOCK_DMODEL)
 
@@ -59,8 +59,36 @@ def rotary_kernel_splitk(
     if not INTERLEAVED:
         x0_range = range_m[:, None]*stride_m + range_d_half[None, :]*stride_headdim                # BLOCK_M x 1st half of headdim (fast to load)
         x1_range = range_m[:, None]*stride_m + range_d_half[None, :]*stride_headdim + ro_dim_half  # BLOCK_M x 2nd half of headdim (fast to load)
+
         x0_mask = (range_m < seqlen_x)[:, None] & (range_d_half < rotary_dim)[None, :]                  # Mask for the first half
         x1_mask = (range_m < seqlen_x)[:, None] & (range_d_half + ro_dim_half < rotary_dim)[None, :]    # Mask for the second half
+
+        range_m_cos_sin = range_m + SEQLEN_OFFSET
+        COS = COS + (range_m_cos_sin[:, None] * ro_dim_half + range_d_half[None, :])
+        SIN = SIN + (range_m_cos_sin[:, None] * ro_dim_half + range_d_half[None, :])
+        cos = tl.load(
+            COS, mask=(range_m[:, None] < seqlen_x) & (range_d_half[None, :] < ro_dim_half), other=1.0
+        ).to(tl.float32)
+        sin = tl.load(
+            SIN, mask=(range_m[:, None] < seqlen_x + SEQLEN_OFFSET) & (range_d_half[None, :] < ro_dim_half), other=0.0
+        ).to(tl.float32)
+        # if CONJUGATE:
+        #     sin = -sin
+        
+        x0 = tl.load(x_ptr + x0_range, mask=x0_mask).to(tl.float32)
+        x1 = tl.load(x_ptr + x1_range, mask=x1_mask).to(tl.float32)
+
+        # Rotate corresponding elements in each half
+        o0 = x0 * cos - x1 * sin
+        o1 = x0 * sin + x1 * cos
+
+        # Concatenate the each dim_half to form full dim
+        out = tl.join(o0, o1)
+        out = tl.permute(out, 0, 2, 1)
+        out = tl.reshape(out, BLOCK_M, BLOCK_DMODEL)
+
+        return out
+        
     else:
         # Interleaved is slow due to x1 load
         range_d_swap = range_d + ((range_d + 1) % 2) * 2 - 1            # 1, 0, 3, 2, 5, 4, ...
@@ -75,8 +103,10 @@ def rotary_kernel_splitk(
         
         # Load COS/SIN
         range_d_repeat = tl.arange(0, BLOCK_DMODEL) // 2                # 0, 0, 1, 1, 2, 2, ...
-        COS = COS + (range_m[:, None] * ro_dim_half + range_d_repeat[None, :])
-        SIN = SIN + (range_m[:, None] * ro_dim_half + range_d_repeat[None, :])
+
+        range_m_cos_sin = range_m + SEQLEN_OFFSET
+        COS = COS + (range_m_cos_sin[:, None] * ro_dim_half + range_d_repeat[None, :])
+        SIN = SIN + (range_m_cos_sin[:, None] * ro_dim_half + range_d_repeat[None, :])
         cos = tl.load(
             COS,
             mask=(range_m[:, None] < seqlen_x) & (range_d_repeat[None, :] < ro_dim_half),
@@ -89,22 +119,16 @@ def rotary_kernel_splitk(
         ).to(tl.float32)
         # if CONJUGATE:
         #     sin = -sin
+
+        x0 = tl.load(x_ptr + x0_range, mask=x0_mask)
+        x1 = tl.load(x_ptr + x1_range, mask=x1_mask)
+
         x0_cos = x0 * cos
         x1_sin = x1 * sin
+
         out = tl.where(range_d[None, :] % 2 == 0, x0_cos - x1_sin, x0_cos + x1_sin)
 
-        pdb.set_trace()
-
         return out
-    pdb.set_trace()
-    x0 = tl.load(x_ptr + x0_range, mask=x0_mask)
-    x1 = tl.load(x_ptr + x1_range, mask=x1_mask)
-
-    
-
-    pdb.set_trace()
-    # x0 = x0*cos - x1*sin
-    # x1 = x0*sin + x1*cos
 
 @triton.jit
 def split(
@@ -149,7 +173,7 @@ def split(
     cos = tl.load(COS + cs_range)
     sin = tl.load(SIN + cs_range)
 
-    pdb.set_trace()
+    # pdb.set_trace()
     
     # Below is the code for a single split
     lo = start_m
@@ -158,12 +182,12 @@ def split(
     for start_n in tl.range(lo, hi, BLOCK_M):
         # Launch the kernel
         
-        rotary_kernel_splitk(X=X,
+        x = rotary_kernel_splitk(X=X,
                             seqlen_x=seqlen,
                             rotary_dim=rotary_dim,
                             COS=COS,
                             SIN=SIN,
-                            SEQLEN_OFFSET=0,
+                            SEQLEN_OFFSET=SEQLEN_OFFSET,
                             batch_pid=batch_pid,      
                             start_m=start_n,          
                             group_pid=group_pid,      
@@ -177,18 +201,13 @@ def split(
                             BLOCK_M=BLOCK_M,          
                             BLOCK_DMODEL=BLOCK_DMODEL,
                             )
+        print(x)
 
 
-# @pytest.mark.parametrize('batch', [1])
-# @pytest.mark.parametrize('seqlen', [1])
-# @pytest.mark.parametrize('group', [1])
-# @pytest.mark.parametrize('head', [1])
-# @pytest.mark.parametrize('head_dim', [1])
-#batch, seqlen, group, head, head_dim
-def test_rotary_kernel_splitk():
+def test_rotary_kernel_split():
     batch = 1
     seqlen = 8
-    group = 2
+    group = 1
     head = 1
     head_dim = 4
     assert head_dim >= 2
@@ -196,7 +215,7 @@ def test_rotary_kernel_splitk():
     device = "cuda"
 
     # Create a simple tensor with the specified shape
-    X = torch.randn(batch, seqlen, group, head, head_dim, device='cuda')
+    X = torch.ones(batch, seqlen, group, head, head_dim, device='cuda')
 
     rotary_dim = head_dim
 
@@ -206,7 +225,8 @@ def test_rotary_kernel_splitk():
     theta = 1.0 / theta_base**(numerator / rotary_dim)
 
     # pos/index in the sequence
-    m = torch.arange(seqlen, dtype=theta.dtype, device=theta.device)
+    SEQLEN_OFFSET = 0
+    m = torch.arange(seqlen + SEQLEN_OFFSET, dtype=theta.dtype, device=theta.device) + SEQLEN_OFFSET
 
     # outer product between m and theta
     angle = torch.outer(m, theta)
@@ -220,85 +240,7 @@ def test_rotary_kernel_splitk():
     BLOCK_DMODEL = head_dim
 
     BLOCK_N = 2
-    num_splits = 1
-    N_BLOCKS_PER_SPLIT = (seqlen // BLOCK_N) // num_splits
-    for start_m in range(0, seqlen, BLOCK_M):
-
-
-        for off_zhg in range(0, batch*head*group):
-            
-            # zhg program ids
-            batch_pid = off_zhg // (head * group)      # batch
-            head_pid = (off_zhg // group) % head    # head
-            group_pid = off_zhg % group             # group (gca / mqa)
-
-            for lo in range(0, seqlen, BLOCK_N*N_BLOCKS_PER_SPLIT):
-                # Below is the code for a single split
-                hi = lo + BLOCK_N*N_BLOCKS_PER_SPLIT
-
-                for start_n in range(lo, hi, BLOCK_N):
-                    grid = (1, 1, 1)
-
-                    pdb.set_trace()
-
-                    # Launch the kernel
-                    rotary_kernel_splitk[grid](X=X,
-                                            seqlen_x=seqlen,
-                                            rotary_dim=rotary_dim,
-                                            COS=cos,
-                                            SIN=sin,
-                                            SEQLEN_OFFSET=0,
-                                            batch_pid=batch_pid,      
-                                            start_m=start_n,          
-                                            group_pid=group_pid,      
-                                            head_pid=head_pid,          
-                                            stride_batch=X.stride(0),
-                                            stride_m=X.stride(-4),
-                                            stride_group=X.stride(-3),
-                                            stride_head=X.stride(-2),
-                                            stride_headdim=X.stride(-1),
-                                            INTERLEAVED=False,
-                                            BLOCK_M=BLOCK_N,          
-                                            BLOCK_DMODEL=BLOCK_DMODEL,
-                                            )
-
-def test_rotary_kernel_split():
-    batch = 1
-    seqlen = 4
-    group = 1
-    head = 1
-    head_dim = 4
-    assert head_dim >= 2
-    
-    device = "cuda"
-
-    # Create a simple tensor with the specified shape
-    X = torch.randn(batch, seqlen, group, head, head_dim, device='cuda')
-
-    rotary_dim = head_dim
-
-    # Compute theta for every dim in a token
-    theta_base = 10_000
-    numerator = torch.arange(0, rotary_dim, 2).float()[:rotary_dim//2]
-    theta = 1.0 / theta_base**(numerator / rotary_dim)
-
-    # pos/index in the sequence
-    SEQLEN_OFFSET = 0
-    m = torch.arange(seqlen, dtype=theta.dtype, device=theta.device) + SEQLEN_OFFSET
-
-    # outer product between m and theta
-    angle = torch.outer(m, theta)
-
-    # Computes the cos and sin tensors needed
-    cos = torch.cos(angle)
-    sin = torch.sin(angle)
-
-    # Define the grid and block sizes for the kernel launch
-    BLOCK_M = seqlen
-    BLOCK_DMODEL = head_dim
-
-    BLOCK_N = seqlen
-    num_splits = 1
+    num_splits = 2
     N_BLOCKS_PER_SPLIT = (seqlen // BLOCK_N) // num_splits
     for start_m in range(0, seqlen, BLOCK_M):
 
@@ -317,7 +259,7 @@ def test_rotary_kernel_split():
                             rotary_dim=rotary_dim,
                             COS=cos,
                             SIN=sin,
-                            SEQLEN_OFFSET=0,
+                            SEQLEN_OFFSET=SEQLEN_OFFSET,
                             batch_pid=batch_pid,      
                             start_m=lo,          
                             group_pid=group_pid,      
