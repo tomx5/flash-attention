@@ -18,7 +18,8 @@ def rotary_kernel_splitk(
     COS,            # tensor of shape (seqlen (m), ro_dim // 2)
     SIN,            # tensor of shape (seqlen (m), ro_dim // 2)
     SEQLEN_OFFSET,  # we use this as an offset into COS and SIN to apply the correct rotation
-
+    SEQLEN_OFFSET_IS_TENSOR: tl.constexpr, # if seqlen_offset is a tensor it has shape (num_batch, )
+    
     # PID Offsets
     batch_pid: tl.constexpr,      # pid for batch
     start_m: tl.constexpr,        # the token idx the current M_BLOCK starts at.
@@ -56,6 +57,11 @@ def rotary_kernel_splitk(
     # COS/SIN Range
     # cs_range = (SEQLEN_OFFSET + tl.arange(0, BLOCK_M))[:, None]*(ro_dim_half) + tl.arange(0, ro_dim_half)
 
+    if SEQLEN_OFFSET_IS_TENSOR:
+        seqlen_offset = tl.load(SEQLEN_OFFSET + batch_pid) # a tensor
+    else:
+        seqlen_offset = SEQLEN_OFFSET # an int
+
     if not INTERLEAVED:
         x0_range = range_m[:, None]*stride_m + range_d_half[None, :]*stride_headdim                # BLOCK_M x 1st half of headdim (fast to load)
         x1_range = range_m[:, None]*stride_m + range_d_half[None, :]*stride_headdim + ro_dim_half  # BLOCK_M x 2nd half of headdim (fast to load)
@@ -63,14 +69,14 @@ def rotary_kernel_splitk(
         x0_mask = (range_m < seqlen_x)[:, None] & (range_d_half < rotary_dim)[None, :]                  # Mask for the first half
         x1_mask = (range_m < seqlen_x)[:, None] & (range_d_half + ro_dim_half < rotary_dim)[None, :]    # Mask for the second half
 
-        range_m_cos_sin = range_m + SEQLEN_OFFSET
+        range_m_cos_sin = range_m + seqlen_offset
         COS = COS + (range_m_cos_sin[:, None] * ro_dim_half + range_d_half[None, :])
         SIN = SIN + (range_m_cos_sin[:, None] * ro_dim_half + range_d_half[None, :])
         cos = tl.load(
             COS, mask=(range_m[:, None] < seqlen_x) & (range_d_half[None, :] < ro_dim_half), other=1.0
         ).to(tl.float32)
         sin = tl.load(
-            SIN, mask=(range_m[:, None] < seqlen_x + SEQLEN_OFFSET) & (range_d_half[None, :] < ro_dim_half), other=0.0
+            SIN, mask=(range_m[:, None] < seqlen_x + seqlen_offset) & (range_d_half[None, :] < ro_dim_half), other=0.0
         ).to(tl.float32)
         # if CONJUGATE:
         #     sin = -sin
@@ -104,7 +110,7 @@ def rotary_kernel_splitk(
         # Load COS/SIN
         range_d_repeat = tl.arange(0, BLOCK_DMODEL) // 2                # 0, 0, 1, 1, 2, 2, ...
 
-        range_m_cos_sin = range_m + SEQLEN_OFFSET
+        range_m_cos_sin = range_m + seqlen_offset
         COS = COS + (range_m_cos_sin[:, None] * ro_dim_half + range_d_repeat[None, :])
         SIN = SIN + (range_m_cos_sin[:, None] * ro_dim_half + range_d_repeat[None, :])
         cos = tl.load(
@@ -141,7 +147,8 @@ def split(
     COS,            # pointer to tensor of shape (seqlen (m), ro_dim // 2)
     SIN,            # pointer to tensor of shape (seqlen (m), ro_dim // 2)
     SEQLEN_OFFSET,  # we use this as an offset into COS and SIN to apply the correct rotation
-
+    SEQLEN_OFFSET_IS_TENSOR: tl.constexpr, # if seqlen_offset is a tensor it has shape (num_batch, )
+    
     # PID Offsets
     batch_pid: tl.constexpr,      # pid for batch
     start_m: tl.constexpr,        # the token idx the current M_BLOCK starts at.
@@ -165,16 +172,8 @@ def split(
     # Split Parameters
     N_BLOCKS_PER_SPLIT: tl.constexpr,
 ):
-    # BLOCK_N = BLOCK_M
     seqlen = seqlen_x
 
-    # load all of cos/sin ONCE for a single split (program)
-    cs_range = (SEQLEN_OFFSET + tl.arange(0, BLOCK_M))[:, None]*(rotary_dim//2) + tl.arange(0, rotary_dim//2)
-    cos = tl.load(COS + cs_range)
-    sin = tl.load(SIN + cs_range)
-
-    # pdb.set_trace()
-    
     # Below is the code for a single split
     lo = start_m
     hi = lo + BLOCK_M*N_BLOCKS_PER_SPLIT
@@ -188,6 +187,7 @@ def split(
                             COS=COS,
                             SIN=SIN,
                             SEQLEN_OFFSET=SEQLEN_OFFSET,
+                            SEQLEN_OFFSET_IS_TENSOR=SEQLEN_OFFSET_IS_TENSOR,
                             batch_pid=batch_pid,      
                             start_m=start_n,          
                             group_pid=group_pid,      
@@ -201,11 +201,12 @@ def split(
                             BLOCK_M=BLOCK_M,          
                             BLOCK_DMODEL=BLOCK_DMODEL,
                             )
+        # pdb.set_trace()
         print(x)
 
 
 def test_rotary_kernel_split():
-    batch = 1
+    batch = 4
     seqlen = 8
     group = 1
     head = 1
@@ -225,8 +226,16 @@ def test_rotary_kernel_split():
     theta = 1.0 / theta_base**(numerator / rotary_dim)
 
     # pos/index in the sequence
-    SEQLEN_OFFSET = 0
-    m = torch.arange(seqlen + SEQLEN_OFFSET, dtype=theta.dtype, device=theta.device) + SEQLEN_OFFSET
+    SEQLEN_OFFSET_IS_TENSOR = True
+    if SEQLEN_OFFSET_IS_TENSOR:
+        SEQLEN_OFFSET = torch.randint(low=0, high=4, size=(batch, ))
+        max_offset = SEQLEN_OFFSET.max()
+    else:
+        max_offset = SEQLEN_OFFSET = 0
+
+    print("SEQLEN_OFFSET", SEQLEN_OFFSET)
+
+    m = torch.arange(seqlen + (max_offset), dtype=theta.dtype, device=theta.device)
 
     # outer product between m and theta
     angle = torch.outer(m, theta)
@@ -239,7 +248,7 @@ def test_rotary_kernel_split():
     BLOCK_M = seqlen
     BLOCK_DMODEL = head_dim
 
-    BLOCK_N = 2
+    BLOCK_N = 4
     num_splits = 2
     N_BLOCKS_PER_SPLIT = (seqlen // BLOCK_N) // num_splits
     for start_m in range(0, seqlen, BLOCK_M):
@@ -252,6 +261,8 @@ def test_rotary_kernel_split():
             head_pid = (off_zhg // group) % head    # head
             group_pid = off_zhg % group             # group (gca / mqa)
 
+            print("start_m: ", start_m, "| batch: ", batch_pid, "| head: ", head_pid, "| group: ", group_pid)
+
             for lo in range(0, seqlen, BLOCK_N*N_BLOCKS_PER_SPLIT):
                 grid = (1, 1, 1)
                 split[grid](X=X,
@@ -260,6 +271,7 @@ def test_rotary_kernel_split():
                             COS=cos,
                             SIN=sin,
                             SEQLEN_OFFSET=SEQLEN_OFFSET,
+                            SEQLEN_OFFSET_IS_TENSOR=isinstance(SEQLEN_OFFSET, torch.Tensor),
                             batch_pid=batch_pid,      
                             start_m=lo,          
                             group_pid=group_pid,      
@@ -274,3 +286,4 @@ def test_rotary_kernel_split():
                             BLOCK_DMODEL=BLOCK_DMODEL,
                             N_BLOCKS_PER_SPLIT=N_BLOCKS_PER_SPLIT
                             )
+            print('\n')
