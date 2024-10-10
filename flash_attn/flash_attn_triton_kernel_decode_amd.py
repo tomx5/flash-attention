@@ -25,26 +25,26 @@ def rotary_kernel_splitk(
     X,              # tensor being rotated. Has shape (batch (z), seqlen (s), group (g), head (h), head_dim (d))
     seqlen_x,       # seqlen of the x dim. shape is (batch (z), )
     rotary_dim,     # size of embedding space we end up rotating
+    IS_TRANSPOSE: tl.constexpr, # if this tensor is transposed
 
     # COS/SIN and Offsetting Into It
     COS,            # tensor of shape (seqlen (m), ro_dim // 2)
     SIN,            # tensor of shape (seqlen (m), ro_dim // 2)
     SEQLEN_OFFSET,  # we use this as an offset into COS and SIN to apply the correct rotation
-
+    SEQLEN_OFFSET_IS_TENSOR: tl.constexpr, # if seqlen_offset is a tensor it has shape (num_batch, )
+    
     # PID Offsets
-    batch_pid,      # pid for batch
-    m_pid,          # break seqlen into chunks. pid for accessing blocks of tokens in seqlen
-    group_pid,      # pid for group
-    head_pid,       # pid to access head
-    splitk_pid,     # break head_dim into chunks (splitk chunks). pid to access each splitk chunk
+    batch_pid: tl.constexpr,      # pid for batch
+    start_m: tl.constexpr,        # the token idx the current M_BLOCK starts at.
+    group_pid: tl.constexpr,      # pid for group
+    head_pid: tl.constexpr,       # pid to access head
 
     # Strides
-    stride_batch,
-    stride_m,
-    stride_group,
-    stride_head,
-    stride_splitk,
-    stride_headdim,
+    stride_batch: tl.constexpr,
+    stride_m: tl.constexpr,
+    stride_group: tl.constexpr,
+    stride_head: tl.constexpr,
+    stride_headdim: tl.constexpr,
 
     # Misc
     INTERLEAVED: tl.constexpr,
@@ -53,7 +53,12 @@ def rotary_kernel_splitk(
     BLOCK_M: tl.constexpr,          # block size to access chunks of tokens (# of tokens simultaneously)
     BLOCK_DMODEL: tl.constexpr,     # block size to access chunks of headdim (# of dimensions processed)
 ):
-    range_m = m_pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    """
+    Note: 
+    - for K in splitk let BLOCK_M = BLOCK_N, and start_m=start_n
+    """
+    # pdb.set_trace()
+    range_m = start_m + tl.arange(0, BLOCK_M)
     range_d = tl.arange(0, BLOCK_DMODEL)
 
     x_ptr = X + (batch_pid * stride_batch) + (group_pid * stride_group) + (head_pid * stride_head)   # pointer to x block
@@ -62,20 +67,90 @@ def rotary_kernel_splitk(
     ro_dim_half = rotary_dim // 2       # length of cos/sin
     range_d_half = tl.arange(0, BLOCK_DMODEL // 2)
 
-    if not INTERLEAVED:
-        x0_range = range_m[:, None]*stride_m + range_d_half[None, :]                # BLOCK_M x 1st half of headdim (fast to load)
-        x1_range = range_m[:, None]*stride_m + range_d_half[None, :] + ro_dim_half  # BLOCK_M x 2nd half of headdim (fast to load)
+    # COS/SIN Range
+    # cs_range = (SEQLEN_OFFSET + tl.arange(0, BLOCK_M))[:, None]*(ro_dim_half) + tl.arange(0, ro_dim_half)
+
+    if SEQLEN_OFFSET_IS_TENSOR:
+        seqlen_offset = tl.load(SEQLEN_OFFSET + batch_pid) # a tensor
     else:
-        range_d_swap = range_d + ((range_d + 1) % 2) * 2 - 1            # 1, 0, 3, 2, 5, 4, ...
-        range_d_repeat = tl.arange(0, BLOCK_DMODEL) // 2                # 0, 0, 1, 1, 2, 2, ...
+        seqlen_offset = SEQLEN_OFFSET # an int
 
-        x0_range = range_m[:, None]*stride_m + range_d[None, :]         # 0, 1, 2, 3, 4, 5, ... (fast to load)
-        x1_range = range_m[:, None]*stride_m + range_d_swap[None, :]    # 1, 0, 3, 2, 5, 4, ... (slow to load)
+    if IS_TRANSPOSE:
+        if not INTERLEAVED:
+            x0_range = range_m[:, None]*stride_m + range_d_half[None, :]*stride_headdim                # BLOCK_M x 1st half of headdim (fast to load)
+            x1_range = range_m[:, None]*stride_m + range_d_half[None, :]*stride_headdim + ro_dim_half  # BLOCK_M x 2nd half of headdim (fast to load)
 
-    x0 = tl.load(x_ptr + x0_range, mask=x_mask)
-    x1 = tl.load(x_ptr + x1_range, mask=x_mask)
+            x0_mask = (range_m < seqlen_x)[:, None] & (range_d_half < rotary_dim)[None, :]                  # Mask for the first half
+            x1_mask = (range_m < seqlen_x)[:, None] & (range_d_half + ro_dim_half < rotary_dim)[None, :]    # Mask for the second half
 
-    pdb.set_trace()
+            range_m_cos_sin = range_m + seqlen_offset
+            COS = COS + (range_m_cos_sin[:, None] * ro_dim_half + range_d_half[None, :])
+            SIN = SIN + (range_m_cos_sin[:, None] * ro_dim_half + range_d_half[None, :])
+            cos = tl.load(
+                COS, mask=(range_m[:, None] < seqlen_x) & (range_d_half[None, :] < ro_dim_half), other=1.0
+            ).to(tl.float32)
+            sin = tl.load(
+                SIN, mask=(range_m[:, None] < seqlen_x + seqlen_offset) & (range_d_half[None, :] < ro_dim_half), other=0.0
+            ).to(tl.float32)
+            # if CONJUGATE:
+            #     sin = -sin
+
+            pdb.set_trace()
+            
+            x0 = tl.load(x_ptr + x0_range, mask=x0_mask).to(tl.float32)
+            x1 = tl.load(x_ptr + x1_range, mask=x1_mask).to(tl.float32)
+
+            # Rotate corresponding elements in each half
+            o0 = x0 * cos - x1 * sin
+            o1 = x0 * sin + x1 * cos
+
+            # Concatenate the each dim_half to form full dim
+            out = tl.join(o0, o1)
+            out = tl.permute(out, 0, 2, 1)
+            out = tl.reshape(out, BLOCK_M, BLOCK_DMODEL)
+
+            return out
+        else:
+            # Interleaved is slow due to x1 load
+            range_d_swap = range_d + ((range_d + 1) % 2) * 2 - 1            # 1, 0, 3, 2, 5, 4, ...
+
+            # X Range
+            x0_range = range_m[:, None]*stride_m + range_d[None, :]         # 0, 1, 2, 3, 4, 5, ... (fast to load)
+            x1_range = range_m[:, None]*stride_m + range_d_swap[None, :]    # 1, 0, 3, 2, 5, 4, ... (slow to load)
+            
+            # X Masks
+            x0_mask = (range_m < seqlen_x)[:, None] & (range_d < rotary_dim)[None, :]                  # Mask for the first half
+            x1_mask = (range_m < seqlen_x)[:, None] & (range_d_swap < rotary_dim)[None, :]    # Mask for the second half
+            
+            # Load COS/SIN
+            range_d_repeat = tl.arange(0, BLOCK_DMODEL) // 2                # 0, 0, 1, 1, 2, 2, ...
+
+            range_m_cos_sin = range_m + seqlen_offset
+            COS = COS + (range_m_cos_sin[:, None] * ro_dim_half + range_d_repeat[None, :])
+            SIN = SIN + (range_m_cos_sin[:, None] * ro_dim_half + range_d_repeat[None, :])
+            cos = tl.load(
+                COS,
+                mask=(range_m[:, None] < seqlen_x) & (range_d_repeat[None, :] < ro_dim_half),
+                other=1.0,
+            ).to(tl.float32)
+            sin = tl.load(
+                SIN,
+                mask=(range_m[:, None] < seqlen_x) & (range_d_repeat[None, :] < ro_dim_half),
+                other=0.0,
+            ).to(tl.float32)
+            # if CONJUGATE:
+            #     sin = -sin
+
+            pdb.set_trace()
+            x0 = tl.load(x_ptr + x0_range, mask=x0_mask)
+            x1 = tl.load(x_ptr + x1_range, mask=x1_mask)
+
+            x0_cos = x0 * cos
+            x1_sin = x1 * sin
+
+            out = tl.where(range_d[None, :] % 2 == 0, x0_cos - x1_sin, x0_cos + x1_sin)
+
+            return out
 
 @triton.jit
 def rotary_kernel(
@@ -372,34 +447,35 @@ def _fwd_kernel_splitK(
 
             # apply rotary to k here
             if USE_ROTARY:
-                k_new_block = rotary_kernel(
+                k_new_block = rotary_kernel_splitk(
                     X=k_new_block,
+                    seqlen_x=N_CTX_NEW,
+                    rotary_dim=Rotary_dim,
+                    IS_TRANSPOSE=True,
+
                     COS=Rotary_cos,
                     SIN=Rotary_sin,
-                    CU_SEQLENS=Cache_seqlens,
-                    SEQLEN_OFFSETS=0,
-                    seqlen=N_CTX_NEW,
-                    rotary_dim=Rotary_dim,
-                    seqlen_ro=N_CTX_NEW,
+                    SEQLEN_OFFSET=Cache_seqlens,
+                    SEQLEN_OFFSET_IS_TENSOR=IS_SEQLEN_OFFSETS_TENSOR,
+
+                    batch_pid=off_z,
                     start_m=start_m,
-                    off_batch=off_z,
-                    off_head=off_h_q,
-                    off_group=off_g_q,
-                    splitk_idx=splitk_idx,
-                    stride_x_batch= (stride_kz if not IS_VARLEN else 0),  # batch_strides if not varlen else 0
-                    stride_x_seqlen=stride_kn,
-                    stride_x_group=stride_kg,
-                    stride_x_nheads=stride_kh,
-                    stride_x_splitk=BLOCK_N_PER_SPLIT,
-                    stride_x_headdim=stride_kd,
-                    BLOCK_K=BLOCK_K,
-                    IS_SEQLEN_OFFSETS_TENSOR=IS_SEQLEN_OFFSETS_TENSOR,
-                    IS_VARLEN=IS_VARLEN,
+                    group_pid=off_g_q,
+                    head_pid=off_h_q,
+
+                    stride_batch= stride_kz,  # batch_strides if not varlen else 0
+                    stride_m=stride_kn,
+                    stride_group=stride_kg,
+                    stride_head=stride_kh,
+                    stride_headdim=stride_kd,
+
                     INTERLEAVED=Rotary_interleaved,
-                    CONJUGATE=Rotary_conjugate,
-                    BLOCK_M=BLOCK_M
+
+                    BLOCK_M=BLOCK_N,
+                    BLOCK_DMODEL=BLOCK_DMODEL
                 )
                 pdb.set_trace()
+                pass
             
             # Store to K
             tl.store(
@@ -483,6 +559,34 @@ def _fwd_kernel_splitK(
     q = (q * qk_scale)
     if PADDED_HEAD:
         q = tl.where(d_mask[None, :], q, 0.0)
+
+    q = rotary_kernel_splitk(
+                            X=q,
+                            seqlen_x=N_CTX_Q,
+                            rotary_dim=Rotary_dim,
+                            IS_TRANSPOSE=False,
+
+                            COS=Rotary_cos,
+                            SIN=Rotary_sin,
+                            SEQLEN_OFFSET=Cache_seqlens,
+                            SEQLEN_OFFSET_IS_TENSOR=IS_SEQLEN_OFFSETS_TENSOR,
+
+                            batch_pid=off_z,
+                            start_m=start_m,
+                            group_pid=off_g_q,
+                            head_pid=off_h_q,
+
+                            stride_batch= (stride_kz if not IS_VARLEN else 0),  # batch_strides if not varlen else 0
+                            stride_m=stride_kn,
+                            stride_group=stride_kg,
+                            stride_head=stride_kh,
+                            stride_headdim=stride_kd,
+
+                            INTERLEAVED=Rotary_interleaved,
+
+                            BLOCK_M=BLOCK_N,
+                            BLOCK_DMODEL=BLOCK_DMODEL
+                            )
 
     # loop over k, v and update accumulator
     for start_n in range(lo, hi, BLOCK_N):
@@ -914,7 +1018,7 @@ class _attention(torch.autograd.Function):
         # context
         cls.SPLIT_K: Optional[int] = None
         cls.BLOCK_M = 16
-        cls.BLOCK_N = 64
+        cls.BLOCK_N = 16
 
         cls.NUM_QUANT_GROUPS = 1  # Default quantization is row-wise
 
@@ -970,7 +1074,7 @@ class _attention(torch.autograd.Function):
             Rotary_interleaved = input_metadata.rotary_interleaved,
             Rotary_conjugate = input_metadata.rotary_conjugate,
             seqlen_ro = input_metadata.rotary_seqlen,
-            IS_SEQLEN_OFFSETS_TENSOR = isinstance(input_metadata.rotary_seqlen_offsets, torch.Tensor),
+            IS_SEQLEN_OFFSETS_TENSOR = isinstance(cache_seqlens, torch.Tensor),
             IS_VARLEN = input_metadata.rotary_is_varlen,
             BLOCK_K=BLOCK_K,
             **_strides(q, "qz", "qm", "qg", "qh", "qd"),
