@@ -3,7 +3,7 @@ import triton
 from .common import MetaData, get_shape_from_layout
 from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
-from .fwd_decode import attention_decode
+from .fwd_decode import attention_decode_forward_triton_impl
 
 DEBUG = False
 
@@ -278,5 +278,5 @@ def fwd_kvcache(
         input_metadata.need_alibi(alibi_slopes, batch, nheads_q)
 
     # launch kernel
-    tri_out, softmax_lse = attention_decode(q, k_cache, v_cache, input_metadata)
+    tri_out, softmax_lse = attention_decode_forward_triton_impl(q, k_cache, v_cache, input_metadata)
     return tri_out, softmax_lse
