@@ -60,9 +60,11 @@ jobs:
           python setup.py install
       - name: AMD Kernel Tests
         run: |
+          export FLASH_ATTENTION_USE_TRITON_ROCM="TRUE"
           pytest -v -s flash_attn/flash_attn_triton_amd/test.py
       - name: AMD Kernel Bench
         run: |
+          export FLASH_ATTENTION_USE_TRITON_ROCM="TRUE"
           python flash_attn/flash_attn_triton_amd/bench.py
       - name: Flash Attention Tests
         run: |
