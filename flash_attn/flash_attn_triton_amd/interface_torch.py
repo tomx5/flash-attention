@@ -1,6 +1,7 @@
 import torch
 from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
+from .fwd_decode import attention_decode_forward_triton_impl
 
 
 class _attention_prefill(torch.autograd.Function):
@@ -50,3 +51,10 @@ class _attention_prefill(torch.autograd.Function):
 attention_prefill = _attention_prefill.apply
 
 
+class _attention_decode(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, q, k, v, input_metadata):
+        out, lse = attention_decode_forward_triton_impl(q, k, v, input_metadata)
+        return out, lse
+
+attention_decode = _attention_decode.apply

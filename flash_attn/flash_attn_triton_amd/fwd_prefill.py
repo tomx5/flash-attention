@@ -1,36 +1,7 @@
-"""
-Fused Attention
-===============
-
-This is a Triton implementation of the Flash Attention v2 algorithm
-See https://tridao.me/publications/flash2/flash2.pdf
-
-Credits:
-AMD Triton kernels team
-OpenAI kernel team
-
-Currently only the forward kernel is supported, and contains these features:
-
-1) Fwd with causal masking
-2) Arbitrary Q and KV sequence lengths
-3) Arbitrary head sizes
-4) Multi and grouped query attention
-5) Variable sequence lengths
-6) ALiBi and matrix bias
-
-"""
-
-import pytest
-import sys
 import torch
-
 import triton
 import triton.language as tl
-
-from triton import cdiv
-
-from .bwd_prefill import attention_prefill_backward_triton_new_impl
-from .common import get_shape_from_layout
+from .common import get_shape_from_layout, get_strides_from_layout
 
 DEBUG = False
 
@@ -38,12 +9,6 @@ DEBUG = False
 @triton.jit
 def cdiv_fn(x, y):
     return (x + y - 1) // y
-
-
-@triton.jit
-def max_fn(x, y):
-    return tl.math.max(x, y)
-
 
 @triton.jit
 def dropout_offsets(philox_seed, philox_offset, dropout_p, m, n, stride):
@@ -510,30 +475,6 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
     if PADDED_HEAD:
         o_ptrs_mask = o_ptrs_mask & (offs_d[None, :] < ACTUAL_BLOCK_DMODEL)
     tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
-
-
-
-
-# TODO: This can probably optimized to have fewer lines of code.
-def get_strides_from_layout(q, k, v, o, metadata):
-    if metadata.layout == 'thd':
-        q_strides = (0, q.stride(1), q.stride(0), q.stride(2))
-        k_strides = (0, k.stride(1), k.stride(0), k.stride(2))
-        v_strides = (0, v.stride(1), v.stride(0), v.stride(2))
-        o_strides = (0, o.stride(1), o.stride(0), o.stride(2))
-    elif metadata.layout == 'bhsd':
-        q_strides = (q.stride(0), q.stride(1), q.stride(2), q.stride(3))
-        k_strides = (k.stride(0), k.stride(1), k.stride(2), k.stride(3))
-        v_strides = (v.stride(0), v.stride(1), v.stride(2), v.stride(3))
-        o_strides = (o.stride(0), o.stride(1), o.stride(2), o.stride(3))
-    elif metadata.layout == 'bshd':
-        q_strides = (q.stride(0), q.stride(2), q.stride(1), q.stride(3))
-        k_strides = (k.stride(0), k.stride(2), k.stride(1), k.stride(3))
-        v_strides = (v.stride(0), v.stride(2), v.stride(1), v.stride(3))
-        o_strides = (o.stride(0), o.stride(2), o.stride(1), o.stride(3))
-    else:
-        assert False, 'Got unsupported layout.'
-    return q_strides, k_strides, v_strides, o_strides
 
 
 def attention_prefill_forward_triton_impl(q, k, v, o, metadata):

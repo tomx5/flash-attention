@@ -2,7 +2,6 @@ import torch
 import triton
 import triton.language as tl
 
-
 DEBUG = False
 
 @triton.jit
@@ -733,29 +732,9 @@ def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, 
 
 
 def attention_prefill_backward_triton_impl(do, q, k, v, o, softmax_lse,  dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, bwd_preprocessing_use_o, use_new):
-    if False:
-        if use_exp2:
-            RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
-            softmax_lse *= RCP_LN2 # oai kernel expects softmax_lse to be an intermediate result of using exp2
-        else:
-            raise ValueError("openai backward kernel assumes exp2")
-        return attention_prefill_backward_triton_oai_impl(
-            do,
-            q,
-            k,
-            v,
-            o,
-            softmax_lse,
-            dq,
-            dk,
-            dv,
-            sm_scale,
-            head_size,
-            alibi_slopes,
-            causal,
-            layout,
-        )
-    elif False:
+    if use_new:
+            return attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, bwd_preprocessing_use_o)
+    else:
         # test pytorch impl
         dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
             do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, bwd_preprocessing_use_o
@@ -776,8 +755,4 @@ def attention_prefill_backward_triton_impl(do, q, k, v, o, softmax_lse,  dq, dk,
             dv = dv_ref
 
         return dq, dk, dv, delta_ref, None, None
-    elif use_new:
-        return attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, bwd_preprocessing_use_o)
-    else:
-        return attention_prefill_backward_triton_old_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2)
 

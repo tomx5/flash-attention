@@ -1,8 +1,5 @@
 
 import torch
-import triton
-import triton.language as tl
-from triton import cdiv
 
 
 def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout):
@@ -74,6 +71,42 @@ def get_shape_from_layout(q, k, metadata):
         assert False, "Got unsupported layout."
     return batch, nheads_q, nheads_k, head_size
 
+def get_padded_headsize(size):
+    # Get closest power of 2 over or equal to 32.
+    padded_d_model = 1 << (size - 1).bit_length()
+    # Smallest head_dim supported is 16. If smaller, the tile in the
+    # kernel is padded - there is no padding in memory for any dims.
+    padded_d_model = max(padded_d_model, 16)
+    return padded_d_model
+
+
+def _strides(x: torch.Tensor, *stride_names: str):
+    if x is None:
+        return {f"stride_{s}": 0 for i, s in enumerate(stride_names)}
+
+    assert x.ndim == len(stride_names)
+    return {f"stride_{s}": x.stride(i) for i, s in enumerate(stride_names)}
+
+# TODO: This can probably optimized to have fewer lines of code.
+def get_strides_from_layout(q, k, v, o, metadata):
+    if metadata.layout == 'thd':
+        q_strides = (0, q.stride(1), q.stride(0), q.stride(2))
+        k_strides = (0, k.stride(1), k.stride(0), k.stride(2))
+        v_strides = (0, v.stride(1), v.stride(0), v.stride(2))
+        o_strides = (0, o.stride(1), o.stride(0), o.stride(2))
+    elif metadata.layout == 'bhsd':
+        q_strides = (q.stride(0), q.stride(1), q.stride(2), q.stride(3))
+        k_strides = (k.stride(0), k.stride(1), k.stride(2), k.stride(3))
+        v_strides = (v.stride(0), v.stride(1), v.stride(2), v.stride(3))
+        o_strides = (o.stride(0), o.stride(1), o.stride(2), o.stride(3))
+    elif metadata.layout == 'bshd':
+        q_strides = (q.stride(0), q.stride(2), q.stride(1), q.stride(3))
+        k_strides = (k.stride(0), k.stride(2), k.stride(1), k.stride(3))
+        v_strides = (v.stride(0), v.stride(2), v.stride(1), v.stride(3))
+        o_strides = (o.stride(0), o.stride(2), o.stride(1), o.stride(3))
+    else:
+        assert False, 'Got unsupported layout.'
+    return q_strides, k_strides, v_strides, o_strides
 
 
 def get_input_shapes():

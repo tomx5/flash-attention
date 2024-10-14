@@ -1,21 +1,21 @@
-
-import math
 import torch
 import pytest
-import triton
-import triton.language as tl
 
-from .common import MetaData, input_helper
-
+from .common import MetaData, get_input_shapes, input_helper, varlen_input_helper
+from .interface_torch import attention_prefill, attention_decode
+from .fwd_ref import attention_forward_pytorch_ref_impl, compute_alibi_tensor_ref
+from .fwd_prefill import attention_prefill_forward_triton_impl
+from .bwd_prefill import attention_prefill_backward_triton_impl
+from .bwd_ref import attention_backward_pytorch_ref_impl
+from .fwd_decode import dequantize_kv_fp16, quantize_kv_int4
 
 DEBUG=False
 
-
-def compute_alibi_tensor_ref(alibi_slopes, seqlen_q, seqlen_k):
-    q_idx = torch.arange(seqlen_q, dtype=torch.int32, device="cuda").unsqueeze(-1)  # (N_CTX_Q, 1)
-    k_idx = torch.arange(seqlen_k, dtype=torch.int32, device="cuda").unsqueeze(0)  # (1, N_CTX_K)
-    relative_pos = torch.abs(q_idx + seqlen_k - seqlen_q - k_idx)  # (N_CTX_Q, N_CTX_K)
-    return -1 * alibi_slopes.unsqueeze(-1).unsqueeze(-1) * relative_pos  # (Z, H, N_CTX_Q, N_CTX_K)
+# fp16 default is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
+ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 
+# ATOL, RTOL = 1e-3, 1e-3  # catchs fa mismatch issues
+# ATOL, RTOL = 1e-4, 1e-3 # to strict. there will be small diffs
+# ATOL, RTOL = 1e-5, 1e-3 # # default fp16. there will be small diffs
 
 @pytest.mark.parametrize('Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD', [
     (4, 48, 24, 1024, 1024, 64),
@@ -330,156 +330,7 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
     torch.testing.assert_close(ref_dq, tri_dq, atol=ATOL, rtol=RTOL)
 
 
-def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_exp2):
-    """compute reference output and softmax_lse using PyTorch's built-in function"""
 
-    # expects bhsd layout
-    if layout != "bhsd":
-        raise ValueError("bhsd is the only layout supported")
-
-    # get seqlens
-    N_CTX_Q = q.shape[2]
-    N_CTX_K = k.shape[2]
-
-    # compute attention scores
-    attention_scores = torch.matmul(q.to(torch.float32), k.transpose(-2, -1).to(torch.float32))
-
-
-    # scale score
-    attention_scaled_scores = sm_scale * attention_scores
-
-    # ===========================  Softmax ========================================
-    # compute max for numerical stability
-    max_scores = torch.max(attention_scaled_scores, dim=-1, keepdim=True)[0]
-
-    # shift scores to by subtracing max
-    attention_shifted_scaled_scores = attention_scaled_scores - max_scores
-
-    # subtract max and exponentiate
-    if use_exp2:
-        RCP_LN = 1/ math.log(2)
-        exp2_scores = torch.exp2(RCP_LN * attention_shifted_scaled_scores)
-    else:
-        exp_scores = torch.exp(attention_shifted_scaled_scores)
-
-    # sum of exponentials
-    if use_exp2:
-        sum_exp2_scores = torch.sum(exp2_scores, dim=-1, keepdim=True)
-    else:
-        sum_exp_scores = torch.sum(exp_scores, dim=-1, keepdim=True)
-
-    # softmax probabilities
-    if use_exp2:
-        softmax_exp2 = exp2_scores / sum_exp2_scores
-    else:
-        softmax = exp_scores / sum_exp_scores
-    
-    # compute log-sum-exp and squeeze final dim which will be 1
-    if use_exp2:
-        LN2 = math.log(2)
-        RCP_LN = 1/ math.log(2)
-        # compute log-sum-exp in base 2 units
-        max_scores_base2 = max_scores * RCP_LN
-        softmax_exp2_lse_base2 = max_scores_base2 + torch.log2(sum_exp2_scores)
-        # Convert back to natural units
-        softmax_exp2_lse = softmax_exp2_lse_base2 * LN2
-        softmax_exp2_lse.squeeze_(-1)
-    else:
-        softmax_lse = max_scores + torch.log(sum_exp_scores)
-        softmax_lse.squeeze_(-1)
-    
-    # compute output
-    if use_exp2:
-        o_exp2 = torch.matmul(softmax_exp2, v.to(torch.float32)).to(torch.float16)
-    else:
-        o = torch.matmul(softmax, v.to(torch.float32)).to(torch.float16)
-
-
-    if use_exp2:
-        return o_exp2, softmax_exp2_lse, exp2_scores, softmax_exp2, attention_shifted_scaled_scores, attention_scores
-    else:
-        return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scores
-
-def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, bwd_preprocessing_use_o):
-    # ensure the layout is 'bhsd'
-    if layout == "bshd":
-        print("Changing layout to bhsd!")
-        do = do.transpose(1, 2).contiguous()
-        q = q.transpose(1, 2).contiguous()
-        k = k.transpose(1, 2).contiguous()
-        v = v.transpose(1, 2).contiguous()
-        o = o.transpose(1, 2).contiguous()
-        # softmax_lse = softmax_lse.transpose(1, 2).contiguous()
-        # TODO: does L/M need to be transposed. possible to use strides
-    elif layout == "bhsd":
-        pass
-    else:
-        raise ValueError(f"Unknown layout {layout}")
-    
-    # recompute attention_scores
-    attention_scores = torch.matmul(q, k.transpose(-2, -1))
-    if DEBUG:
-        print("attention_scores:", attention_scores)
-
-    # scale scores
-    attention_scaled_scores = sm_scale * attention_scores
-    if DEBUG:
-        print("attention_scaled_scores:", attention_scaled_scores)
-
-    # compute probabilities using softmax_lse
-    if use_exp2:
-        RCP_LN = 1 / math.log(2)
-        attention_scaled_scores_base2 = attention_scaled_scores * RCP_LN
-        softmax_lse_base2 = softmax_lse * RCP_LN
-        p = torch.exp2(attention_scaled_scores_base2 - softmax_lse_base2.unsqueeze(-1))
-    else:
-        p = torch.exp(attention_scaled_scores - softmax_lse.unsqueeze(-1))
-
-    if DEBUG:
-        print("p:", p)
-    # compute gradient wrt v
-    dv = torch.matmul(p.transpose(-2, -1), do.to(torch.float32))
-
-    # compute dp
-    dp = torch.matmul(do, v.transpose(-2, -1))
-
-    # calculate ds
-    if bwd_preprocessing_use_o:
-        delta = torch.sum(o * do, axis=-1).unsqueeze(-1).to(torch.float32) # what oai kernel uses
-    else:
-        delta = torch.sum(p * dp, axis=-1).unsqueeze(-1) # what the math says you should use
-    ds = (p * (dp - delta)) * sm_scale
-
-    # compute gradient wrt k
-    dk = torch.matmul(ds.transpose(-2, -1), q.to(torch.float32))
-
-    # compute gradient wrt q
-    dq = torch.matmul(ds, k.to(torch.float32))
-
-    # cast back to original dtype
-    dq = dq.to(q.dtype)
-    dk = dk.to(k.dtype)
-    dv = dv.to(v.dtype)
-
-    # go back to original layout
-    if layout == "bshd":
-        print("Changing back to bshd!")
-        dq = dq.transpose(1, 2)
-        dk = dk.transpose(1, 2)
-        dv = dv.transpose(1, 2)
-    elif layout == "bhsd":
-        pass
-    else:
-        raise ValueError(f"Unknown layout {layout}")
-
-    return dq, dk, dv, delta.squeeze(-1)
-
-
-# fp16 default is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
-ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 
-# ATOL, RTOL = 1e-3, 1e-3  # catchs fa mismatch issues
-# ATOL, RTOL = 1e-4, 1e-3 # to strict. there will be small diffs
-# ATOL, RTOL = 1e-5, 1e-3 # # default fp16. there will be small diffs
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
     (1, 1, 1, 1, 1),
@@ -803,7 +654,7 @@ def test_op_fwd_int4_kv(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
     dq_ref_out = dq_attn @ dqv
     torch.testing.assert_close(dq_ref_out, tri_out, atol=1e-3, rtol=0)
 
-
+@pytest
 def test_quantization():
     a = torch.randn((2, 4, 32), dtype=torch.float16, device='cuda')
     qa = quantize_kv_int4(a, num_groups=4)

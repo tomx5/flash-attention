@@ -1,10 +1,9 @@
 import argparse
-import pytest
 import sys
 import torch
-
 import triton
-import triton.language as tl
+from .common import MetaData, get_input_shapes, input_helper, varlen_input_helper
+from .interface_torch import attention_prefill, attention_decode
 
 def nonvarlen_benchmark_configs():
     configs = [

@@ -1,21 +1,7 @@
-import math
-from typing import Optional
-import pytest
 import torch
-import sys
-
 import triton
 import triton.language as tl
-from .common import MetaData
-
-
-def _strides(x: torch.Tensor, *stride_names: str):
-    if x is None:
-        return {f"stride_{s}": 0 for i, s in enumerate(stride_names)}
-
-    assert x.ndim == len(stride_names)
-    return {f"stride_{s}": x.stride(i) for i, s in enumerate(stride_names)}
-
+from .common import _strides, get_padded_headsize
 
 @triton.jit
 def _fwd_kernel_splitK(
@@ -554,206 +540,170 @@ def get_split_k(B: int, G: int, H: int, Mk: int) -> int:
     split_k = max(split_k, 1)
     return split_k
 
-def get_padded_headsize(size):
-    # Get closest power of 2 over or equal to 32.
-    padded_d_model = 1 << (size - 1).bit_length()
-    # Smallest head_dim supported is 16. If smaller, the tile in the
-    # kernel is padded - there is no padding in memory for any dims.
-    padded_d_model = max(padded_d_model, 16)
-    return padded_d_model
+def attention_decode_forward_triton_impl(q, k, v, input_metadata, BLOCK_M= 16, BLOCK_N= 64, SPLIT_K=None, NUM_QUANT_GROUPS = 1):
+    original_layout = input_metadata.layout
 
-class _attention_decode(torch.autograd.Function):
+    # kernels expects "bsghd"
+    if input_metadata.layout == "bshd":
+        q=q.unsqueeze(2)
+        k=k.unsqueeze(2)
+        v=v.unsqueeze(2)
 
-    OPERATOR = _fwd_kernel_splitK
-    SUPPORTED_DEVICES = {"cuda"}
-    CUDA_MINIMUM_COMPUTE_CAPABILITY = (8, 0)
-    SUPPORTED_DTYPES = {
-        torch.half,
-        torch.bfloat16,
-    }
-    SUPPORTED_MAX_K = 128
-    SUPPORTS_DROPOUT = False
-    SUPPORTS_CUSTOM_SCALE = True
-    SUPPORTS_BMGHK = True
-    NAME = "triton_splitKF"
+        if input_metadata.new_kv:
+            input_metadata.k_new = input_metadata.k_new.unsqueeze(2)
+            input_metadata.v_new = input_metadata.v_new.unsqueeze(2)
 
-    @staticmethod
-    def forward(cls, q, k, v, input_metadata):
-        original_layout = input_metadata.layout
-
-        # kernels expects "bsghd"
-        if input_metadata.layout == "bshd":
-            q=q.unsqueeze(2)
-            k=k.unsqueeze(2)
-            v=v.unsqueeze(2)
-
-            if input_metadata.new_kv:
-                input_metadata.k_new = input_metadata.k_new.unsqueeze(2)
-                input_metadata.v_new = input_metadata.v_new.unsqueeze(2)
-
-            input_metadata.layout = "bsghd"
-        elif input_metadata.layout == "bhsd":
-            q=q.permute(0, 2, 1, 3).unsqueeze(2)
-            k=k.permute(0, 2, 1, 3).unsqueeze(2)
-            v=v.permute(0, 2, 1, 3).unsqueeze(2)
-            if input_metadata.new_kv:
-                input_metadata.k_new = input_metadata.k_new.permute(0, 2, 1, 3).unsqueeze(2)
-                input_metadata.v_new = input_metadata.v_new.permute(0, 2, 1, 3).unsqueeze(2)
+        input_metadata.layout = "bsghd"
+    elif input_metadata.layout == "bhsd":
+        q=q.permute(0, 2, 1, 3).unsqueeze(2)
+        k=k.permute(0, 2, 1, 3).unsqueeze(2)
+        v=v.permute(0, 2, 1, 3).unsqueeze(2)
+        if input_metadata.new_kv:
+            input_metadata.k_new = input_metadata.k_new.permute(0, 2, 1, 3).unsqueeze(2)
+            input_metadata.v_new = input_metadata.v_new.permute(0, 2, 1, 3).unsqueeze(2)
 
 
-            input_metadata.layout = "bsghd"
-        elif input_metadata.layout == "bsghd":
-            pass
-        elif input_metadata.layout is None:
-            raise ValueError("Layout not given")
+        input_metadata.layout = "bsghd"
+    elif input_metadata.layout == "bsghd":
+        pass
+    elif input_metadata.layout is None:
+        raise ValueError("Layout not given")
 
-        assert input_metadata.layout == "bsghd"
+    assert input_metadata.layout == "bsghd"
 
-        # get dims
-        batch_size, seqlen_q, n_group_q, heads_per_group_q, dim_q = q.shape
-        _, seqlen_k, n_group_k, heads_per_group_k, dim_k = k.shape
-        _, seqlen_v, n_group_v, heads_per_group_v, dim_v = v.shape
+    # get dims
+    batch_size, seqlen_q, n_group_q, heads_per_group_q, dim_q = q.shape
+    _, seqlen_k, n_group_k, heads_per_group_k, dim_k = k.shape
+    _, seqlen_v, n_group_v, heads_per_group_v, dim_v = v.shape
 
-        assert dim_q == dim_k == dim_v, f"Dimensions must match: {dim_q}, {dim_k}, {dim_v}"
+    assert dim_q == dim_k == dim_v, f"Dimensions must match: {dim_q}, {dim_k}, {dim_v}"
 
-        # get padded size
-        dim_padded  = get_padded_headsize(dim_k)
+    # get padded size
+    dim_padded  = get_padded_headsize(dim_k)
 
-        # Handle MQA/GQA case
-        if heads_per_group_q > heads_per_group_k:
-            input_metadata.is_gqa = True
-        elif heads_per_group_q < heads_per_group_k:
-            raise ValueError("heads_per_group_q < heads_per_group_k")
-        else:
-            input_metadata.is_gqa = False
+    # Handle MQA/GQA case
+    if heads_per_group_q > heads_per_group_k:
+        input_metadata.is_gqa = True
+    elif heads_per_group_q < heads_per_group_k:
+        raise ValueError("heads_per_group_q < heads_per_group_k")
+    else:
+        input_metadata.is_gqa = False
 
-        # context
-        cls.SPLIT_K: Optional[int] = None
-        cls.BLOCK_M = 16
-        cls.BLOCK_N = 64
+    # attn_bias = inp.attn_bias
+    if input_metadata.cache_seqlens is not None:
+        cache_seqlens = input_metadata.cache_seqlens
+    else:
+        cache_seqlens = None
 
-        cls.NUM_QUANT_GROUPS = 1  # Default quantization is row-wise
+    assert dim_k == dim_q, f"Keys have head dim {dim_k} but queries have head dim {dim_q}"
 
-        # attn_bias = inp.attn_bias
-        if input_metadata.cache_seqlens is not None:
-            cache_seqlens = input_metadata.cache_seqlens
-        else:
-            cache_seqlens = None
+    if SPLIT_K is not None:
+        split_k = SPLIT_K
+    else:
+        # Use heuristics
+        split_k = get_split_k(batch_size, n_group_q, heads_per_group_q, seqlen_k) # NOTE: should the split think about seqlens?
 
-        assert dim_k == dim_q, f"Keys have head dim {dim_k} but queries have head dim {dim_q}"
+    seqlen_q_ceil = (seqlen_q + BLOCK_M - 1) // BLOCK_M * BLOCK_M
+    out_splitk = torch.empty([batch_size * n_group_q * heads_per_group_q, split_k, seqlen_q_ceil, dim_padded], dtype=torch.float32, device=q.device)
+    metadata = torch.empty([batch_size * n_group_q * heads_per_group_q, 2, split_k, seqlen_q_ceil], dtype=torch.float32, device=q.device)
+    lse = torch.empty((batch_size * n_group_q * heads_per_group_q, seqlen_q), device=q.device, dtype=torch.float32)
+    grid = (triton.cdiv(seqlen_q, BLOCK_M), batch_size * n_group_q * heads_per_group_q, split_k)
 
-        BLOCK_M = cls.BLOCK_M
-        BLOCK_N = cls.BLOCK_N
-        if cls.SPLIT_K is not None:
-            split_k = cls.SPLIT_K
-        else:
-            # Use heuristics
-            split_k = get_split_k(batch_size, n_group_q, heads_per_group_q, seqlen_k) # NOTE: should the split think about seqlens?
+    num_warps = 1
+    split_size = (seqlen_k + split_k - 1) // split_k
+    use_cache_seqlens = cache_seqlens is not None
 
-        seqlen_q_ceil = (seqlen_q + BLOCK_M - 1) // BLOCK_M * BLOCK_M
-        out_splitk = torch.empty([batch_size * n_group_q * heads_per_group_q, split_k, seqlen_q_ceil, dim_padded], dtype=torch.float32, device=q.device)
-        metadata = torch.empty([batch_size * n_group_q * heads_per_group_q, 2, split_k, seqlen_q_ceil], dtype=torch.float32, device=q.device)
-        lse = torch.empty((batch_size * n_group_q * heads_per_group_q, seqlen_q), device=q.device, dtype=torch.float32)
-        grid = (triton.cdiv(seqlen_q, BLOCK_M), batch_size * n_group_q * heads_per_group_q, split_k)
+    # TODO: enable quantization
+    _fwd_kernel_splitK[grid](
+        Q=q,
+        K=k,
+        V=v,
+        sm_scale=input_metadata.sm_scale,
+        Out_splitK=out_splitk,
+        Metadata=metadata,
+        K_new = input_metadata.k_new,
+        V_new = input_metadata.v_new,
+        Cache_seqlens=cache_seqlens,
+        Cache_batch_idx=input_metadata.cache_batch_idx,
+        Alibi_slopes=input_metadata.alibi_slopes,
+        **_strides(q, "qz", "qm", "qg", "qh", "qd"),
+        **_strides(k, "kz", "kn", "kg", "kh", "kd"),
+        **_strides(v, "vz", "vn", "vg", "vh", "vd"),
+        **_strides(out_splitk, "osk_zhg", "osk_s", "osk_m", "osk_d"),
+        **_strides(metadata, "mzhg", "m2", "ms", "mm"),
+        **_strides(input_metadata.k_new, "kn_z", "kn_n", "kn_g", "kn_h", "kn_d"),
+        **_strides(input_metadata.v_new, "vn_z", "vn_n", "vn_g", "vn_h", "vn_d"),
+        **_strides(input_metadata.alibi_slopes, "az", "ah"),
+        Z=batch_size,
+        H_q=heads_per_group_q,
+        H_kv=heads_per_group_k,
+        G_q=n_group_q,
+        N_CTX_Q=seqlen_q,
+        N_CTX_K=seqlen_k,
+        N_CTX_NEW=input_metadata.k_new.shape[1] if input_metadata.new_kv else None,
+        BLOCK_N_PER_SPLIT=split_size,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_DMODEL=dim_padded,
+        ACTUAL_BLOCK_DMODEL=dim_k,
+        BOUNDS_CHECKS_N=(split_size % BLOCK_N) > 0 or use_cache_seqlens,
+        USE_CACHE_SEQLENs=use_cache_seqlens,
+        USE_CACHE_BATCH_IDX= input_metadata.cache_batch_idx is not None,
+        NEW_KV=input_metadata.new_kv,
+        IS_GQA=input_metadata.is_gqa,
+        IS_CAUSAL=input_metadata.causal,
+        USE_ALIBI=False if input_metadata.alibi_slopes is None else True,
+        num_warps=num_warps,
+        num_stages=1,
+    )
 
-        num_warps = 1
-        split_size = (seqlen_k + split_k - 1) // split_k
-        use_cache_seqlens = cache_seqlens is not None
+    out = torch.empty((batch_size, seqlen_q, n_group_q, heads_per_group_q, dim_padded), device=q.device, dtype=q.dtype)
 
-        # TODO: enable quantization
-        _fwd_kernel_splitK[grid](
-            Q=q,
-            K=k,
-            V=v,
-            sm_scale=input_metadata.sm_scale,
-            Out_splitK=out_splitk,
-            Metadata=metadata,
-            K_new = input_metadata.k_new,
-            V_new = input_metadata.v_new,
-            Cache_seqlens=cache_seqlens,
-            Cache_batch_idx=input_metadata.cache_batch_idx,
-            Alibi_slopes=input_metadata.alibi_slopes,
-            **_strides(q, "qz", "qm", "qg", "qh", "qd"),
-            **_strides(k, "kz", "kn", "kg", "kh", "kd"),
-            **_strides(v, "vz", "vn", "vg", "vh", "vd"),
-            **_strides(out_splitk, "osk_zhg", "osk_s", "osk_m", "osk_d"),
-            **_strides(metadata, "mzhg", "m2", "ms", "mm"),
-            **_strides(input_metadata.k_new, "kn_z", "kn_n", "kn_g", "kn_h", "kn_d"),
-            **_strides(input_metadata.v_new, "vn_z", "vn_n", "vn_g", "vn_h", "vn_d"),
-            **_strides(input_metadata.alibi_slopes, "az", "ah"),
-            Z=batch_size,
-            H_q=heads_per_group_q,
-            H_kv=heads_per_group_k,
-            G_q=n_group_q,
-            N_CTX_Q=seqlen_q,
-            N_CTX_K=seqlen_k,
-            N_CTX_NEW=input_metadata.k_new.shape[1] if input_metadata.new_kv else None,
-            BLOCK_N_PER_SPLIT=split_size,
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
-            BLOCK_DMODEL=dim_padded,
-            ACTUAL_BLOCK_DMODEL=dim_k,
-            BOUNDS_CHECKS_N=(split_size % BLOCK_N) > 0 or use_cache_seqlens,
-            USE_CACHE_SEQLENs=use_cache_seqlens,
-            USE_CACHE_BATCH_IDX= input_metadata.cache_batch_idx is not None,
-            NEW_KV=input_metadata.new_kv,
-            IS_GQA=input_metadata.is_gqa,
-            IS_CAUSAL=input_metadata.causal,
-            USE_ALIBI=False if input_metadata.alibi_slopes is None else True,
-            num_warps=num_warps,
-            num_stages=1,
-        )
+    # Merge together
+    splitK_pow2 = triton.next_power_of_2(split_k)
+    use_mask = splitK_pow2 > split_k
+    if batch_size * n_group_q * heads_per_group_q * seqlen_q >= 512:
+        k_block_num = 1
+    else:
+        k_block_num = 2
+    assert dim_padded % k_block_num == 0
+    k_block_size = dim_padded // k_block_num
+    grid = (batch_size * n_group_q * heads_per_group_q, seqlen_q, k_block_num)
 
-        out = torch.empty((batch_size, seqlen_q, n_group_q, heads_per_group_q, dim_padded), device=q.device, dtype=q.dtype)
+    _splitK_reduce[grid](
+        out_splitk, 
+        metadata, 
+        out, 
+        lse, 
+        **_strides(out_splitk, "osk_zhg", "osk_s", "osk_m", "osk_k"),
+        **_strides(metadata, "mzhg", "m2", "ms", "mm"), 
+        **_strides(out, "oz", "om", "og", "oh", "ok"),
+        **_strides(lse, "lse_zhg", "lse_m"), 
+        M_ceil=seqlen_q_ceil, 
+        BLOCK_SIZE=k_block_size, 
+        G=n_group_q, 
+        H=heads_per_group_q,
+        # TODO: Tune num_warps
+        split_k=split_k, 
+        splitK_pow2=splitK_pow2, 
+        use_mask=use_mask,
+        IS_CAUSAL=input_metadata.causal,
+        num_warps=4)
 
-        # Merge together
-        splitK_pow2 = triton.next_power_of_2(split_k)
-        use_mask = splitK_pow2 > split_k
-        if batch_size * n_group_q * heads_per_group_q * seqlen_q >= 512:
-            k_block_num = 1
-        else:
-            k_block_num = 2
-        assert dim_padded % k_block_num == 0
-        k_block_size = dim_padded // k_block_num
-        grid = (batch_size * n_group_q * heads_per_group_q, seqlen_q, k_block_num)
+    lse = lse.reshape([batch_size, n_group_q, heads_per_group_q, seqlen_q])
+    if q.ndim == 4:
+        # BMGHK -> BMHK
+        assert n_group_q == 1
+        out = out[:, :, 0]
+        lse = lse[:, 0]
+    if seqlen_k == 0:
+        out.zero_()
+    out = out.reshape(batch_size, heads_per_group_q * n_group_q, -1, dim_padded).contiguous()
 
-        _splitK_reduce[grid](
-            out_splitk, 
-            metadata, 
-            out, 
-            lse, 
-            **_strides(out_splitk, "osk_zhg", "osk_s", "osk_m", "osk_k"),
-            **_strides(metadata, "mzhg", "m2", "ms", "mm"), 
-            **_strides(out, "oz", "om", "og", "oh", "ok"),
-            **_strides(lse, "lse_zhg", "lse_m"), 
-            M_ceil=seqlen_q_ceil, 
-            BLOCK_SIZE=k_block_size, 
-            G=n_group_q, 
-            H=heads_per_group_q,
-            # TODO: Tune num_warps
-            split_k=split_k, 
-            splitK_pow2=splitK_pow2, 
-            use_mask=use_mask,
-            IS_CAUSAL=input_metadata.causal,
-            num_warps=4)
+    # output is batch_size, heads_per_group_q * group_q, seqlen_q, dim_q
+    if original_layout == "bshd":
+        # out=out.transpose(1, 2).contiguous() # this screws up heads and data.
+        # the data is laid out properly. Just need to reshape dims
+        out = out.reshape(batch_size, seqlen_q, -1, dim_padded)
 
-        lse = lse.reshape([batch_size, n_group_q, heads_per_group_q, seqlen_q])
-        if q.ndim == 4:
-            # BMGHK -> BMHK
-            assert n_group_q == 1
-            out = out[:, :, 0]
-            lse = lse[:, 0]
-        if seqlen_k == 0:
-            out.zero_()
-        out = out.reshape(batch_size, heads_per_group_q * n_group_q, -1, dim_padded).contiguous()
-
-        # output is batch_size, heads_per_group_q * group_q, seqlen_q, dim_q
-        if original_layout == "bshd":
-            # out=out.transpose(1, 2).contiguous() # this screws up heads and data.
-            # the data is laid out properly. Just need to reshape dims
-            out = out.reshape(batch_size, seqlen_q, -1, dim_padded)
-
-        return out.narrow(-1, 0, dim_k), lse
-
-
-attention_decode = _attention_decode.apply
+    return out.narrow(-1, 0, dim_k), lse
