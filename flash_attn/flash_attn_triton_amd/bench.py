@@ -1,7 +1,7 @@
 import argparse
 import torch
 import triton
-from flash_attn.flash_attn_triton_amd.common import MetaData, get_input_shapes, input_helper, varlen_input_helper
+from flash_attn.flash_attn_triton_amd.utils import MetaData, get_input_shapes, input_helper, varlen_input_helper
 from flash_attn.flash_attn_triton_amd.interface_torch import attention_prefill, attention_decode
 
 def nonvarlen_benchmark_configs():

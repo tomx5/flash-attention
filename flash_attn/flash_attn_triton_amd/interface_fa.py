@@ -1,6 +1,6 @@
 import torch
 import triton
-from .common import MetaData, get_shape_from_layout
+from .utils import MetaData, get_shape_from_layout
 from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
 from .fwd_decode import attention_decode_forward_triton_impl

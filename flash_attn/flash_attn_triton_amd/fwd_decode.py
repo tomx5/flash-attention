@@ -1,7 +1,7 @@
 import torch
 import triton
 import triton.language as tl
-from .common import _strides, get_padded_headsize
+from .utils import _strides, get_padded_headsize
 
 @triton.jit
 def _fwd_kernel_splitK(

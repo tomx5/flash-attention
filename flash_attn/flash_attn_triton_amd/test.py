@@ -1,7 +1,7 @@
 import torch
 import pytest
 
-from .common import MetaData, get_input_shapes, input_helper, varlen_input_helper
+from .utils import MetaData, get_input_shapes, input_helper, varlen_input_helper
 from .interface_torch import attention_prefill, attention_decode
 from .fwd_ref import attention_forward_pytorch_ref_impl, compute_alibi_tensor_ref
 from .fwd_prefill import attention_prefill_forward_triton_impl
