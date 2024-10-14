@@ -1,7 +1,9 @@
 import torch
 import triton
-from .flash_attn_triton_kernel_prefill_amd import MetaData, get_shape_from_layout, attention_prefill_forward_triton_impl, attention_prefill_backward_triton_impl
-from .flash_attn_triton_kernel_decode_amd import attention_decode
+from .common import MetaData, get_shape_from_layout
+from .fwd_prefill import attention_prefill_forward_triton_impl
+from .bwd_prefill import attention_prefill_backward_triton_impl
+from .fwd_decode import attention_decode
 
 DEBUG = False
 

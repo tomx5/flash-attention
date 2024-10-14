@@ -6,7 +6,7 @@ import sys
 
 import triton
 import triton.language as tl
-from flash_attn.flash_attn_triton_kernel_prefill_amd import MetaData
+from .common import MetaData
 
 
 def _strides(x: torch.Tensor, *stride_names: str):
@@ -562,7 +562,7 @@ def get_padded_headsize(size):
     padded_d_model = max(padded_d_model, 16)
     return padded_d_model
 
-class _attention(torch.autograd.Function):
+class _attention_decode(torch.autograd.Function):
 
     OPERATOR = _fwd_kernel_splitK
     SUPPORTED_DEVICES = {"cuda"}
@@ -756,147 +756,4 @@ class _attention(torch.autograd.Function):
         return out.narrow(-1, 0, dim_k), lse
 
 
-attention_decode = _attention.apply
-
-
-def get_input_shapes():
-    cases = [(max(1, 2**(16 - i)), 1, 2**i, 16, 1, 128)
-             for i in range(8, 18)] + [(max(1, 2**(16 - i)), 1, 2**i, 16, 2, 128) for i in range(8, 18)]
-
-    return cases
-
-
-@pytest.mark.parametrize('batch_size, seqlen_q, seqlen_k, group_q, group_k, dim', get_input_shapes())
-def test_op_fwd(batch_size, seqlen_q, seqlen_k, group_q, group_k, dim, dtype=torch.bfloat16):
-    print()
-    print(f"batch_size = {batch_size}, seqlen_q = {seqlen_q}, seqlen_k = {seqlen_k}, group_q = {group_q}, group_k = {group_k}, dim = {dim}")
-    torch.manual_seed(20)
-    query_group_head_size = (group_q + group_k - 1) // group_k
-    q = (torch.empty((batch_size, seqlen_q, group_k, query_group_head_size, dim), dtype=dtype,
-                     device="cuda").normal_(mean=0., std=0.5).requires_grad_())
-    k = (torch.empty((batch_size, seqlen_k, group_k, 1, dim), dtype=dtype,
-                     device="cuda").normal_(mean=0.,
-                                            std=0.5).requires_grad_()).expand(-1, -1, -1, query_group_head_size, -1)
-    v = (torch.empty((batch_size, seqlen_k, group_k, 1, dim), dtype=dtype,
-                     device="cuda").normal_(mean=0.,
-                                            std=0.5).requires_grad_()).expand(-1, -1, -1, query_group_head_size, -1)
-    scale = 1 / dim**0.5
-    input_metadata = MetaData(sm_scale=scale)
-    input_metadata.layout = "bsghd"
-    tri_out, _ = attention_decode(q, k, v, input_metadata)
-
-    q = q.reshape([batch_size, seqlen_q, -1, dim]).permute(0, 2, 1, 3)
-    k = k.reshape([batch_size, seqlen_k, -1, dim]).permute(0, 2, 1, 3)
-    v = v.reshape([batch_size, seqlen_k, -1, dim]).permute(0, 2, 1, 3)
-    attn = (q @ k.transpose(-1, -2) * scale).softmax(-1)
-    ref_out = attn @ v
-
-    # compare
-    torch.testing.assert_close(ref_out, tri_out, atol=1e-3, rtol=0)
-
-
-@pytest.mark.parametrize('B, Mq, Mkv, Hq, Hkv, K', get_input_shapes())
-def test_op_fwd_int4_kv(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
-    torch.manual_seed(2)
-    q = (torch.empty((B, Mq, Hkv, (Hq + Hkv - 1) // Hkv, K), dtype=dtype,
-                     device="cuda").normal_(mean=1.0, std=0.5).requires_grad_())
-    k = (torch.empty((B, Mkv, Hkv, 1, K), dtype=dtype,
-                     device="cuda").normal_(mean=1.0,
-                                            std=0.5).requires_grad_()).expand(-1, -1, -1, (Hq + Hkv - 1) // Hkv, -1)
-    v = (torch.empty((B, Mkv, Hkv, 1, K), dtype=dtype,
-                     device="cuda").normal_(mean=1.0,
-                                            std=0.5).requires_grad_()).expand(-1, -1, -1, (Hq + Hkv - 1) // Hkv, -1)
-
-    num_groups = 1
-    quant_k = (quantize_kv_int4(k, num_groups=num_groups).contiguous().view(torch.int32))
-    quant_v = (quantize_kv_int4(v, num_groups=num_groups).contiguous().view(torch.int32))
-    scale = 1 / K**0.5
-    input_metadata = MetaData(sm_scale=scale)
-    input_metadata.layout = "bsghd"
-    tri_out, _ = attention_decode(q, quant_k, quant_v, input_metadata)
-
-    q = q.reshape([B, Mq, -1, K]).permute(0, 2, 1, 3)
-    k = k.reshape([B, Mkv, -1, K]).permute(0, 2, 1, 3)
-    v = v.reshape([B, Mkv, -1, K]).permute(0, 2, 1, 3)
-    attn = (q @ k.transpose(-1, -2) * scale).softmax(-1)
-    ref_out = attn @ v
-    # compare
-    torch.testing.assert_close(ref_out, tri_out, atol=2.1e-2, rtol=0)
-
-    # since quantization introduces rounding error, use the
-    # dequantized kv as inputs to the ref implementation to reduce
-    # the tolerance to 1e-3
-    dqk = dequantize_kv_fp16(quant_k, num_groups=num_groups)
-    dqv = dequantize_kv_fp16(quant_v, num_groups=num_groups)
-    dqk = dqk.reshape([B, Mkv, -1, K]).permute(0, 2, 1, 3)
-    dqv = dqv.reshape([B, Mkv, -1, K]).permute(0, 2, 1, 3)
-    dq_attn = (q @ dqk.transpose(-1, -2) * scale).softmax(-1)
-    dq_ref_out = dq_attn @ dqv
-    torch.testing.assert_close(dq_ref_out, tri_out, atol=1e-3, rtol=0)
-
-
-def test_quantization():
-    a = torch.randn((2, 4, 32), dtype=torch.float16, device='cuda')
-    qa = quantize_kv_int4(a, num_groups=4)
-    dqa = dequantize_kv_fp16(qa, num_groups=4)
-    torch.testing.assert_close(a, dqa, atol=1.5e-1, rtol=1e-1)
-
-
-try:
-    FLASH_VER = 2
-except BaseException:
-    try:
-        FLASH_VER = 1
-    except BaseException:
-        FLASH_VER = None
-HAS_FLASH = FLASH_VER is not None
-
-configs = []
-for mode in ['fwd']:
-    # for D_HEAD in [128]:
-    for causal in [False]:
-        configs.append(
-            triton.testing.Benchmark(
-                x_names=['B', 'Mq', 'Mkv', 'Hq', 'Hkv', 'K'], x_vals=get_input_shapes(), line_arg='provider',
-                line_vals=['triton'] + (['flash'] if HAS_FLASH else []),
-                line_names=['Triton'] + ([f'Flash-{FLASH_VER}'] if HAS_FLASH else []), styles=[('red', '-'),
-                                                                                               ('blue', '-')],
-                ylabel='ms', plot_name=f'fused-attention-d{128}-{mode}-causal={causal}', args={
-                    # 'D_HEAD': D_HEAD,
-                    'dtype': torch.float16, 'mode': mode, 'causal': causal
-                }))
-
-
-@triton.testing.perf_report(configs)
-def bench_flash_attention(B, Mq, Mkv, Hq, Hkv, K, causal, mode, provider, dtype=torch.float16, device="cuda"):
-    assert mode in ['fwd', 'bwd']
-    warmup = 100
-    rep = 400
-    ms = 0
-    if provider == "triton":
-        q = torch.randn([B, Mq, Hkv, Hq // Hkv, K], device="cuda", dtype=dtype, requires_grad=False)
-        k = torch.randn([B, Mkv, Hkv, 1, K], device="cuda", dtype=dtype,
-                        requires_grad=False).expand(-1, -1, -1, Hq // Hkv, -1)
-        v = torch.randn([B, Mkv, Hkv, 1, K], device="cuda", dtype=dtype,
-                        requires_grad=False).expand(-1, -1, -1, Hq // Hkv, -1)
-
-        sm_scale = 1.3
-        input_metadata = MetaData(sm_scale=sm_scale)
-        input_metadata.layout = "bsghd"
-        fn = lambda: attention_decode(q, k, v, input_metadata)
-        ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
-
-    # flops_per_matmul = 2 * B * Hq * (Mq * K * Mkv + Mq * Mkv * K)
-    # total_flops = 2 * flops_per_matmul
-    # totalBytes = ((B * Mkv * Hkv * K * 2) + (B * Mq * Hq * K) + (B * Mq * Hq * K)) * 2
-
-    # return totalBytes / ms * 1e-9
-    return ms * 1000
-
-
-def main():
-    bench_flash_attention.run(save_path='.', print_data=True)
-
-
-if __name__ == '__main__':
-    sys.exit(main())
+attention_decode = _attention_decode.apply

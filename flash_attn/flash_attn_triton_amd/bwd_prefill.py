@@ -1,9 +1,6 @@
 import torch
-
 import triton
 import triton.language as tl
-
-from triton import cdiv
 
 
 DEBUG = False
@@ -549,8 +546,8 @@ def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, 
     batch = batch_q
 
     # divide up the problem
-    num_blocks_m = cdiv(N_CTX_Q, BLOCK_M)
-    num_blocks_n = cdiv(N_CTX_K, BLOCK_N)
+    num_blocks_m = triton.cdiv(N_CTX_Q, BLOCK_M)
+    num_blocks_n = triton.cdiv(N_CTX_K, BLOCK_N)
 
     # get closest power of 2 over or equal to 32.
     padded_d_model = 1 << (head_size - 1).bit_length()
@@ -733,3 +730,54 @@ def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, 
         raise ValueError(f"Unknown layout {layout}")
 
     return dq, dk, dv, delta, None, None
+
+
+def attention_prefill_backward_triton_impl(do, q, k, v, o, softmax_lse,  dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, bwd_preprocessing_use_o, use_new):
+    if False:
+        if use_exp2:
+            RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
+            softmax_lse *= RCP_LN2 # oai kernel expects softmax_lse to be an intermediate result of using exp2
+        else:
+            raise ValueError("openai backward kernel assumes exp2")
+        return attention_prefill_backward_triton_oai_impl(
+            do,
+            q,
+            k,
+            v,
+            o,
+            softmax_lse,
+            dq,
+            dk,
+            dv,
+            sm_scale,
+            head_size,
+            alibi_slopes,
+            causal,
+            layout,
+        )
+    elif False:
+        # test pytorch impl
+        dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
+            do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, bwd_preprocessing_use_o
+        )
+        if dq is not None:
+            dq.copy_(dq_ref)
+        else:
+            dq = dq_ref
+
+        if dk is not None:
+            dk.copy_(dk_ref)
+        else:
+            dk = dk_ref
+
+        if dv is not None:
+            dv.copy_(dv_ref)
+        else:
+            dv = dv_ref
+
+        return dq, dk, dv, delta_ref, None, None
+    elif use_new:
+        return attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, bwd_preprocessing_use_o)
+    else:
+        return attention_prefill_backward_triton_old_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2)
+
