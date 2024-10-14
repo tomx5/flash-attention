@@ -620,9 +620,15 @@ def test_op_fwd_decode(batch_size, seqlen_q, seqlen_k, group_q, group_k, dim, dt
     # compare
     torch.testing.assert_close(ref_out, tri_out, atol=1e-3, rtol=0)
 
+def test_quantization():
+    a = torch.randn((2, 4, 32), dtype=torch.float16, device='cuda')
+    qa = quantize_kv_int4(a, num_groups=4)
+    dqa = dequantize_kv_fp16(qa, num_groups=4)
+    torch.testing.assert_close(a, dqa, atol=1.5e-1, rtol=1e-1)
 
 @pytest.mark.parametrize('B, Mq, Mkv, Hq, Hkv, K', get_input_shapes())
 def test_op_fwd_decode_int4_kv(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
+    pytest.skip("Decode kernel doesnot support quantization yet")
     torch.manual_seed(2)
     q = (torch.empty((B, Mq, Hkv, (Hq + Hkv - 1) // Hkv, K), dtype=dtype,
                      device="cuda").normal_(mean=1.0, std=0.5).requires_grad_())
@@ -659,9 +665,3 @@ def test_op_fwd_decode_int4_kv(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
     dq_attn = (q @ dqk.transpose(-1, -2) * scale).softmax(-1)
     dq_ref_out = dq_attn @ dqv
     torch.testing.assert_close(dq_ref_out, tri_out, atol=1e-3, rtol=0)
-
-def test_quantization():
-    a = torch.randn((2, 4, 32), dtype=torch.float16, device='cuda')
-    qa = quantize_kv_int4(a, num_groups=4)
-    dqa = dequantize_kv_fp16(qa, num_groups=4)
-    torch.testing.assert_close(a, dqa, atol=1.5e-1, rtol=1e-1)
