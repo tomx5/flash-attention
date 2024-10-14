@@ -2,6 +2,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .bwd_ref import attention_backward_pytorch_ref_impl
+
 DEBUG = False
 
 @triton.jit

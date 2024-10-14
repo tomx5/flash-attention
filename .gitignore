@@ -29,3 +29,6 @@ venv
 scripts
 *.log
 core.*
+*.csv
+*.png
+*.html

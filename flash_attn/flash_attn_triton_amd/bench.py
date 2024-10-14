@@ -1,9 +1,8 @@
 import argparse
-import sys
 import torch
 import triton
-from .common import MetaData, get_input_shapes, input_helper, varlen_input_helper
-from .interface_torch import attention_prefill, attention_decode
+from flash_attn.flash_attn_triton_amd.common import MetaData, get_input_shapes, input_helper, varlen_input_helper
+from flash_attn.flash_attn_triton_amd.interface_torch import attention_prefill, attention_decode
 
 def nonvarlen_benchmark_configs():
     configs = [
@@ -158,10 +157,65 @@ def parse_args():
     return parser.parse_args()
 
 
-arg_to_torch_dtype = {'fp16': torch.float16, 'bf16': torch.bfloat16, 'fp32': torch.float32}
+def run_benchmark_decode():
+    try:
+        FLASH_VER = 2
+    except BaseException:
+        try:
+            FLASH_VER = 1
+        except BaseException:
+            FLASH_VER = None
+    HAS_FLASH = FLASH_VER is not None
 
 
-def main():
+    configs = []
+    for mode in ['fwd']:
+        # for D_HEAD in [128]:
+        for causal in [False]:
+            configs.append(
+                triton.testing.Benchmark(
+                    x_names=['B', 'Mq', 'Mkv', 'Hq', 'Hkv', 'K'], x_vals=get_input_shapes(), line_arg='provider',
+                    line_vals=['triton'] + (['flash'] if HAS_FLASH else []),
+                    line_names=['Triton'] + ([f'Flash-{FLASH_VER}'] if HAS_FLASH else []), styles=[('red', '-'),
+                                                                                                ('blue', '-')],
+                    ylabel='ms', plot_name=f'fused-attention-d{128}-{mode}-causal={causal}', args={
+                        # 'D_HEAD': D_HEAD,
+                        'dtype': torch.float16, 'mode': mode, 'causal': causal
+                    }))
+
+
+    @triton.testing.perf_report(configs)
+    def bench_flash_attention_decode(B, Mq, Mkv, Hq, Hkv, K, causal, mode, provider, dtype=torch.float16, device="cuda"):
+        assert mode in ['fwd', 'bwd']
+        warmup = 100
+        rep = 400
+        ms = 0
+        if provider == "triton":
+            q = torch.randn([B, Mq, Hkv, Hq // Hkv, K], device="cuda", dtype=dtype, requires_grad=False)
+            k = torch.randn([B, Mkv, Hkv, 1, K], device="cuda", dtype=dtype,
+                            requires_grad=False).expand(-1, -1, -1, Hq // Hkv, -1)
+            v = torch.randn([B, Mkv, Hkv, 1, K], device="cuda", dtype=dtype,
+                            requires_grad=False).expand(-1, -1, -1, Hq // Hkv, -1)
+
+            sm_scale = 1.3
+            input_metadata = MetaData(sm_scale=sm_scale)
+            input_metadata.layout = "bsghd"
+            fn = lambda: attention_decode(q, k, v, input_metadata)
+            ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
+
+        # flops_per_matmul = 2 * B * Hq * (Mq * K * Mkv + Mq * Mkv * K)
+        # total_flops = 2 * flops_per_matmul
+        # totalBytes = ((B * Mkv * Hkv * K * 2) + (B * Mq * Hq * K) + (B * Mq * Hq * K)) * 2
+
+        # return totalBytes / ms * 1e-9
+        return ms * 1000
+
+
+    bench_flash_attention_decode.run(save_path='.', print_data=True)
+
+if __name__ == '__main__':
+    arg_to_torch_dtype = {'fp16': torch.float16, 'bf16': torch.bfloat16, 'fp32': torch.float32}
+
     args = parse_args()
     custom_config = False
     assert args.layout == 'thd' or not args.equal_seqlens, \
@@ -177,66 +231,5 @@ def main():
            "Only fp16, bf16 and f32 types currently supported."
 
     run_benchmark(custom_config, args)
-
-
-
-try:
-    FLASH_VER = 2
-except BaseException:
-    try:
-        FLASH_VER = 1
-    except BaseException:
-        FLASH_VER = None
-HAS_FLASH = FLASH_VER is not None
-
-
-configs = []
-for mode in ['fwd']:
-    # for D_HEAD in [128]:
-    for causal in [False]:
-        configs.append(
-            triton.testing.Benchmark(
-                x_names=['B', 'Mq', 'Mkv', 'Hq', 'Hkv', 'K'], x_vals=get_input_shapes(), line_arg='provider',
-                line_vals=['triton'] + (['flash'] if HAS_FLASH else []),
-                line_names=['Triton'] + ([f'Flash-{FLASH_VER}'] if HAS_FLASH else []), styles=[('red', '-'),
-                                                                                               ('blue', '-')],
-                ylabel='ms', plot_name=f'fused-attention-d{128}-{mode}-causal={causal}', args={
-                    # 'D_HEAD': D_HEAD,
-                    'dtype': torch.float16, 'mode': mode, 'causal': causal
-                }))
-
-
-@triton.testing.perf_report(configs)
-def bench_flash_attention(B, Mq, Mkv, Hq, Hkv, K, causal, mode, provider, dtype=torch.float16, device="cuda"):
-    assert mode in ['fwd', 'bwd']
-    warmup = 100
-    rep = 400
-    ms = 0
-    if provider == "triton":
-        q = torch.randn([B, Mq, Hkv, Hq // Hkv, K], device="cuda", dtype=dtype, requires_grad=False)
-        k = torch.randn([B, Mkv, Hkv, 1, K], device="cuda", dtype=dtype,
-                        requires_grad=False).expand(-1, -1, -1, Hq // Hkv, -1)
-        v = torch.randn([B, Mkv, Hkv, 1, K], device="cuda", dtype=dtype,
-                        requires_grad=False).expand(-1, -1, -1, Hq // Hkv, -1)
-
-        sm_scale = 1.3
-        input_metadata = MetaData(sm_scale=sm_scale)
-        input_metadata.layout = "bsghd"
-        fn = lambda: attention_decode(q, k, v, input_metadata)
-        ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
-
-    # flops_per_matmul = 2 * B * Hq * (Mq * K * Mkv + Mq * Mkv * K)
-    # total_flops = 2 * flops_per_matmul
-    # totalBytes = ((B * Mkv * Hkv * K * 2) + (B * Mq * Hq * K) + (B * Mq * Hq * K)) * 2
-
-    # return totalBytes / ms * 1e-9
-    return ms * 1000
-
-
-def main_decode():
-    bench_flash_attention.run(save_path='.', print_data=True)
-
-
-if __name__ == '__main__':
-    sys.exit(main())
+    run_benchmark_decode()
 

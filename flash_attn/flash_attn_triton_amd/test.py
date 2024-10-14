@@ -11,7 +11,7 @@ from .fwd_decode import dequantize_kv_fp16, quantize_kv_int4
 
 DEBUG=False
 
-# fp16 default is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
+# defailt fp16 tolerance is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
 ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 
 # ATOL, RTOL = 1e-3, 1e-3  # catchs fa mismatch issues
 # ATOL, RTOL = 1e-4, 1e-3 # to strict. there will be small diffs
@@ -38,7 +38,7 @@ ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose.
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('use_alibi', [True, False])
 @pytest.mark.parametrize('layout', ['bshd', 'bhsd'])
-def test_op_fwd(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_alibi, layout, dtype=torch.float16):
+def test_op_fwd_prefill(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_alibi, layout, dtype=torch.float16):
     torch.manual_seed(20)
     q, k, v, input_metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout)
     if causal:
@@ -111,7 +111,7 @@ def test_op_fwd(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_alibi, layout, 
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('use_bias', [True])
-def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype=torch.float16):
+def test_op_fwd_prefill_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype=torch.float16):
     torch.manual_seed(20)
     sm_scale = D_HEAD**-0.5
     input_metadata = MetaData(sm_scale=sm_scale)
@@ -350,7 +350,7 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
 @pytest.mark.parametrize('check_softmax', [True, False])
 @pytest.mark.parametrize('use_exp2', [True, False]) # works when use_exp2 is false
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues
-def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, check_softmax, use_exp2, DEBUG_INPUT):
+def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, check_softmax, use_exp2, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(0)
 
@@ -401,41 +401,47 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, chec
     ) = attention_forward_pytorch_ref_impl(
         q.clone(), k.clone(), v.clone(), sm_scale, causal, "bhsd", use_exp2
     )
-    # ref output
-    print("attention_scores_ref:", attention_scores_ref, attention_scores_ref.shape)
-    print("attention_shifted_scaled_scores_ref:", attention_shifted_scaled_scores_ref, attention_shifted_scaled_scores_ref.shape)
-    print("exp_scores_ref:", exp_scores_ref, exp_scores_ref.shape)
-    print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
-    print("softmax_ref:", softmax_ref, softmax_ref.shape)
+    if DEBUG:
+        # ref output
+        print("attention_scores_ref:", attention_scores_ref, attention_scores_ref.shape)
+        print("attention_shifted_scaled_scores_ref:", attention_shifted_scaled_scores_ref, attention_shifted_scaled_scores_ref.shape)
+        print("exp_scores_ref:", exp_scores_ref, exp_scores_ref.shape)
+        print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
+        print("softmax_ref:", softmax_ref, softmax_ref.shape)
 
-    # compare the outputs with ref
-    print("o:", o, o.shape)
-    print("ref_o:", o_ref, o_ref.shape)
+    if DEBUG:
+        # compare the outputs with ref
+        print("o:", o, o.shape)
+        print("ref_o:", o_ref, o_ref.shape)
     torch.testing.assert_close(o, o_ref, atol=ATOL, rtol=RTOL)
 
     # compare with pytorch
     out_pytorch, softmax_pytorch = torch.ops.aten._scaled_dot_product_attention_math(q, k, v, dropout_p=dropout_p,
                                                                             is_causal=causal, scale=sm_scale,
                                                                             dropout_mask=None)
-    print("o:", o, o.shape)
-    print("out_pytorch:", out_pytorch, out_pytorch.shape)
+    if DEBUG:
+        print("o:", o, o.shape)
+        print("out_pytorch:", out_pytorch, out_pytorch.shape)
     torch.testing.assert_close(o, out_pytorch, atol=ATOL, rtol=RTOL)
 
     if check_softmax:
-        # compare softmax_lse with ref
-        print("softmax_lse_triton:", softmax_lse_triton, softmax_lse_triton.shape)
-        print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
+        if DEBUG:
+            # compare softmax_lse with ref
+            print("softmax_lse_triton:", softmax_lse_triton, softmax_lse_triton.shape)
+            print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
         torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=ATOL, rtol=RTOL)
 
         # use trick with lse to get the softmax. you need the scores but is it
         softmax_triton = torch.exp(sm_scale * attention_scores_ref - softmax_lse_triton.unsqueeze(-1))
-        print("softmax_triton:", softmax_triton, softmax_triton.shape)
-        print("softmax_ref:", softmax_ref, softmax_ref.shape)
+        if DEBUG:
+            print("softmax_triton:", softmax_triton, softmax_triton.shape)
+            print("softmax_ref:", softmax_ref, softmax_ref.shape)
         torch.testing.assert_close(softmax_triton, softmax_ref, atol=ATOL, rtol=RTOL)       
 
         # compare with pytorch output
-        print("softmax_triton:", softmax_triton, softmax_triton.shape)
-        print("softmax_pytorch:", softmax_pytorch, softmax_pytorch.shape)
+        if DEBUG:
+            print("softmax_triton:", softmax_triton, softmax_triton.shape)
+            print("softmax_pytorch:", softmax_pytorch, softmax_pytorch.shape)
         torch.testing.assert_close(softmax_triton, softmax_pytorch.to(torch.float32), atol=ATOL, rtol=RTOL)
 
 
@@ -585,11 +591,11 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, bwd_prepr
     torch.testing.assert_close(dq, dq_ref, atol=ATOL, rtol=RTOL)
 
 
-
 @pytest.mark.parametrize('batch_size, seqlen_q, seqlen_k, group_q, group_k, dim', get_input_shapes())
-def test_op_fwd(batch_size, seqlen_q, seqlen_k, group_q, group_k, dim, dtype=torch.bfloat16):
-    print()
-    print(f"batch_size = {batch_size}, seqlen_q = {seqlen_q}, seqlen_k = {seqlen_k}, group_q = {group_q}, group_k = {group_k}, dim = {dim}")
+def test_op_fwd_decode(batch_size, seqlen_q, seqlen_k, group_q, group_k, dim, dtype=torch.bfloat16):
+    if DEBUG:
+        print()
+        print(f"batch_size = {batch_size}, seqlen_q = {seqlen_q}, seqlen_k = {seqlen_k}, group_q = {group_q}, group_k = {group_k}, dim = {dim}")
     torch.manual_seed(20)
     query_group_head_size = (group_q + group_k - 1) // group_k
     q = (torch.empty((batch_size, seqlen_q, group_k, query_group_head_size, dim), dtype=dtype,
@@ -616,7 +622,7 @@ def test_op_fwd(batch_size, seqlen_q, seqlen_k, group_q, group_k, dim, dtype=tor
 
 
 @pytest.mark.parametrize('B, Mq, Mkv, Hq, Hkv, K', get_input_shapes())
-def test_op_fwd_int4_kv(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
+def test_op_fwd_decode_int4_kv(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
     torch.manual_seed(2)
     q = (torch.empty((B, Mq, Hkv, (Hq + Hkv - 1) // Hkv, K), dtype=dtype,
                      device="cuda").normal_(mean=1.0, std=0.5).requires_grad_())
@@ -654,7 +660,6 @@ def test_op_fwd_int4_kv(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
     dq_ref_out = dq_attn @ dqv
     torch.testing.assert_close(dq_ref_out, tri_out, atol=1e-3, rtol=0)
 
-@pytest
 def test_quantization():
     a = torch.randn((2, 4, 32), dtype=torch.float16, device='cuda')
     qa = quantize_kv_int4(a, num_groups=4)
