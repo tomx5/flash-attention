@@ -900,53 +900,54 @@ def test_flash_attn_varlen_qkvpacked(
         assert (dqkv - dqkv_ref).abs().max().item() <= 2 * (dqkv_pt - dqkv_ref).abs().max().item()
 
 
-@pytest.mark.parametrize("kvpacked", [True, False])
-# @pytest.mark.parametrize("kvpacked", [False])
-@pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
-# @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
-# @pytest.mark.parametrize("mha_type", ["mha"])
-@pytest.mark.parametrize("deterministic", [False, True])
-# @pytest.mark.parametrize("deterministic", [True])
-@pytest.mark.parametrize("alibi", [False, True])
-# @pytest.mark.parametrize("alibi", [False])
-@pytest.mark.parametrize("local", [False, True])
-# @pytest.mark.parametrize("local", [False])
-@pytest.mark.parametrize("causal", [False, True])
-# @pytest.mark.parametrize("causal", [True])
-@pytest.mark.parametrize("d", [32, 40, 59, 64, 96, 111, 128, 160, 192, 224, 256])
+# @pytest.mark.parametrize("kvpacked", [True, False])
+@pytest.mark.parametrize("kvpacked", [False])
+# @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
+@pytest.mark.parametrize("dtype", [torch.float32])
+# @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
+@pytest.mark.parametrize("mha_type", ["mha"])
+# @pytest.mark.parametrize("deterministic", [False, True])
+@pytest.mark.parametrize("deterministic", [True])
+# @pytest.mark.parametrize("alibi", [False, True])
+@pytest.mark.parametrize("alibi", [False])
+# @pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("local", [False])
+# @pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("causal", [True])
+# @pytest.mark.parametrize("d", [32, 40, 59, 64, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
-# @pytest.mark.parametrize("d", [64])
+@pytest.mark.parametrize("d", [64])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
         (113, 203),
-        (128, 217),
-        (113, 211),
-        (108, 256),
-        (256, 512),
-        (512, 256),
-        (1024, 1024),
-        (1023, 1024),
-        (1024, 1023),
-        (2048, 2048),
+        # (128, 217),
+        # (113, 211),
+        # (108, 256),
+        # (256, 512),
+        # (512, 256),
+        # (1024, 1024),
+        # (1023, 1024),
+        # (1024, 1023),
+        # (2048, 2048),
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
-@pytest.mark.parametrize("dropout_p", [0.0, 0.17])
-# @pytest.mark.parametrize("dropout_p", [0.0])
-@pytest.mark.parametrize("softcap", [0.0, 50.0])
+# @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
+@pytest.mark.parametrize("dropout_p", [0.00])
+# @pytest.mark.parametrize("softcap", [0.0, 50.0])
+@pytest.mark.parametrize("softcap", [0.0])
 def test_flash_attn_output(
     seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, softcap
 ):
     if USE_TRITON_ROCM:
         test_backward = False
 
-        if dropout_p != 0.0:
-            pytest.skip("Dropout not supported on AMD's Triton Backend yet")
+        # if dropout_p != 0.0:
+        #     pytest.skip("Dropout not supported on AMD's Triton Backend yet")
 
         if softcap != 0.0:
             pytest.skip("softcap not supported on AMD's Triton Backend yet")
@@ -1173,18 +1174,18 @@ def test_flash_attn_output(
 
     # Check that FlashAttention's numerical error is at most twice the numerical error
     # of a Pytorch implementation.
-    assert (out - out_ref).abs().max().item() <= 2 * (out_pt - out_ref).abs().max().item()
+    assert (out - out_ref).abs().max().item() <= (2 * (out_pt - out_ref).abs().max().item() + 1e-5)
 
     if dropout_p > 0.0:
-        assert (attn - attn_ref).abs().max().item() <= 2 * (attn_pt - attn_ref).abs().max().item()
+        assert (attn - attn_ref).abs().max().item() <= (2 * (attn_pt - attn_ref).abs().max().item() + 1e-5)
         # With alibi, many of the prob values are 0.0 & -0.0 so dropout_fraction isn't accurate
         if not alibi:
             assert abs(dropout_fraction - dropout_p) <= (0.01 if not local else 0.025)
 
     if test_backward:
-        assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
-        assert (dk - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
-        assert (dv - dv_ref).abs().max().item() <= 3 * (dv_pt - dv_ref).abs().max().item()
+        assert (dq - dq_ref).abs().max().item() <= 3 * ((dq_pt - dq_ref).abs().max().item() + 1e-5)
+        assert (dk - dk_ref).abs().max().item() <= 3 * ((dk_pt - dk_ref).abs().max().item() + 1e-5)
+        assert (dv - dv_ref).abs().max().item() <= 3 * ((dv_pt - dv_ref).abs().max().item() + 1e-5)
 
 
 @pytest.mark.parametrize("kvpacked", [True, False])

@@ -17,8 +17,8 @@ def fwd(q,
         return_softmax,
         gen_):
 
-    if dropout_p != 0.0:
-        raise ValueError("dropout is not supported on AMD's Triton Backend yet")
+    # if dropout_p != 0.0:
+    #     raise ValueError("dropout is not supported on AMD's Triton Backend yet")
 
     if o is None:
         o = torch.empty_like(q)
