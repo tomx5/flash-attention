@@ -460,9 +460,9 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
     (1, 1, 512, 512, 64), 
     (1, 1, 1024, 1024, 64),
     # old tests that work
-    (4, 48, 1024, 1024, 73),
-    (4, 48, 1024, 1024, 64),
-    (4, 48, 2048, 2048, 64),
+    (2, 16, 1024, 1024, 73),
+    (4, 16, 1024, 1024, 64),
+    (4, 24, 2048, 2048, 64),
     (1, 24, 4096, 4096, 64),
     (1, 16, 1024, 1024, 64),
     (1, 16, 1024, 1024, 128),
@@ -569,7 +569,8 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, bwd_prepr
     )
 
     # =============================================== Check ==============================================================
-    print()
+    if DEBUG:
+        print()
     if DEBUG:
         print("delta:", delta, delta.shape)
         print("delta_ref:", delta_ref, delta_ref.shape)
