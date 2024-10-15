@@ -1,12 +1,22 @@
 import math
 import torch
 
+DEBUG = False
+
 def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_exp2):
     """compute reference output and softmax_lse using PyTorch's built-in function"""
 
-    # expects bhsd layout
-    if layout != "bhsd":
-        raise ValueError("bhsd is the only layout supported")
+    # ensure the layout is 'bhsd'
+    if layout == "bshd":
+        if DEBUG:
+            print("Changing layout to bhsd!")
+        q = q.transpose(1, 2).contiguous()
+        k = k.transpose(1, 2).contiguous()
+        v = v.transpose(1, 2).contiguous()
+    elif layout == "bhsd":
+        pass
+    else:
+        raise ValueError(f"Unknown layout {layout}")
 
     # get seqlens
     N_CTX_Q = q.shape[2]
@@ -65,6 +75,19 @@ def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_ex
     else:
         o = torch.matmul(softmax, v.to(torch.float32)).to(torch.float16)
 
+
+    # go back to original layout
+    if layout == "bshd":
+        if DEBUG:
+            print("Changing back to bshd!")
+        if use_exp2:
+            o_exp2 = o_exp2.transpose(1, 2)
+        else:
+            o = o.transpose(1, 2)
+    elif layout == "bhsd":
+        pass
+    else:
+        raise ValueError(f"Unknown layout {layout}")
 
     if use_exp2:
         return o_exp2, softmax_exp2_lse, exp2_scores, softmax_exp2, attention_shifted_scaled_scores, attention_scores

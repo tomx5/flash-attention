@@ -56,20 +56,45 @@ def varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, equal_seqlen
     return q, k, v, input_metadata
 
 
-def get_shape_from_layout(q, k, metadata):
-    if metadata.layout == 'thd':
-        nheads_q, nheads_k = q.shape[1], k.shape[1]
-        head_size = q.shape[-1]
-        batch = metadata.num_contexts
-    elif metadata.layout == 'bhsd':
-        batch, nheads_q, _, head_size = q.shape
-        nheads_k = k.shape[1]
-    elif metadata.layout == 'bshd':
-        batch, _, nheads_q, head_size = q.shape
-        nheads_k = k.shape[2]
+def get_shape_from_layout(q, k, layout, cu_seqlens_q = None, cu_seqlens_k = None, max_seqlen_q=None, max_seqlen_k=None):
+    if layout == 'bhsd':
+        batch_q, nheads_q, seqlen_q, head_size_q = q.shape
+        batch_k, nheads_k, seqlen_k, head_size_k = k.shape
+    elif layout == 'bshd':
+        batch_q, seqlen_q, nheads_q, head_size_q = q.shape
+        batch_k, seqlen_k, nheads_k, head_size_k = k.shape
+    elif  layout == 'thd':
+        batch_q, seqlen_q, nheads_q,  head_size_q = len(cu_seqlens_q) - 1, max_seqlen_q, q.shape[1], q.shape[2]
+        batch_k, seqlen_k, nheads_k,  head_size_k = len(cu_seqlens_k) - 1, max_seqlen_k, k.shape[1], k.shape[2]
     else:
         assert False, "Got unsupported layout."
-    return batch, nheads_q, nheads_k, head_size
+    
+    # assert
+    assert batch_q == batch_k
+    assert nheads_q == nheads_k # might not be true in mqa and gqa. Keep for now
+    assert head_size_q == head_size_k
+
+    return batch_q, nheads_q, nheads_k, head_size_q, seqlen_q, seqlen_k
+
+def get_strides_from_layout(q, k, v, o, layout):
+    if layout == 'thd':
+        q_strides = (0, q.stride(1), q.stride(0), q.stride(2))
+        k_strides = (0, k.stride(1), k.stride(0), k.stride(2))
+        v_strides = (0, v.stride(1), v.stride(0), v.stride(2))
+        o_strides = (0, o.stride(1), o.stride(0), o.stride(2))
+    elif layout == 'bhsd':
+        q_strides = (q.stride(0), q.stride(1), q.stride(2), q.stride(3))
+        k_strides = (k.stride(0), k.stride(1), k.stride(2), k.stride(3))
+        v_strides = (v.stride(0), v.stride(1), v.stride(2), v.stride(3))
+        o_strides = (o.stride(0), o.stride(1), o.stride(2), o.stride(3))
+    elif layout == 'bshd':
+        q_strides = (q.stride(0), q.stride(2), q.stride(1), q.stride(3))
+        k_strides = (k.stride(0), k.stride(2), k.stride(1), k.stride(3))
+        v_strides = (v.stride(0), v.stride(2), v.stride(1), v.stride(3))
+        o_strides = (o.stride(0), o.stride(2), o.stride(1), o.stride(3))
+    else:
+        assert False, 'Got unsupported layout.'
+    return q_strides, k_strides, v_strides, o_strides
 
 def get_padded_headsize(size):
     # Get closest power of 2 over or equal to 32.
@@ -87,26 +112,7 @@ def _strides(x: torch.Tensor, *stride_names: str):
     assert x.ndim == len(stride_names)
     return {f"stride_{s}": x.stride(i) for i, s in enumerate(stride_names)}
 
-# TODO: This can probably optimized to have fewer lines of code.
-def get_strides_from_layout(q, k, v, o, metadata):
-    if metadata.layout == 'thd':
-        q_strides = (0, q.stride(1), q.stride(0), q.stride(2))
-        k_strides = (0, k.stride(1), k.stride(0), k.stride(2))
-        v_strides = (0, v.stride(1), v.stride(0), v.stride(2))
-        o_strides = (0, o.stride(1), o.stride(0), o.stride(2))
-    elif metadata.layout == 'bhsd':
-        q_strides = (q.stride(0), q.stride(1), q.stride(2), q.stride(3))
-        k_strides = (k.stride(0), k.stride(1), k.stride(2), k.stride(3))
-        v_strides = (v.stride(0), v.stride(1), v.stride(2), v.stride(3))
-        o_strides = (o.stride(0), o.stride(1), o.stride(2), o.stride(3))
-    elif metadata.layout == 'bshd':
-        q_strides = (q.stride(0), q.stride(2), q.stride(1), q.stride(3))
-        k_strides = (k.stride(0), k.stride(2), k.stride(1), k.stride(3))
-        v_strides = (v.stride(0), v.stride(2), v.stride(1), v.stride(3))
-        o_strides = (o.stride(0), o.stride(2), o.stride(1), o.stride(3))
-    else:
-        assert False, 'Got unsupported layout.'
-    return q_strides, k_strides, v_strides, o_strides
+
 
 
 def get_input_shapes():
@@ -201,7 +207,7 @@ class MetaData():
     def check_args(self, q, k, v, o):
         assert q.dim() == k.dim() and q.dim() == v.dim()
 
-        batch, nheads_q, nheads_k, head_size = get_shape_from_layout(q, k, self)
+        batch, nheads_q, nheads_k, head_size, _, _ = get_shape_from_layout(q, k, self.layout, self.cu_seqlens_q, self.cu_seqlens_k, self.max_seqlens_q, self.max_seqlens_k)
         if self.varlen:
             assert q.dim() == 3
             assert self.cu_seqlens_q is not None

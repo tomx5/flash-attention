@@ -1,12 +1,14 @@
 import torch
 import math
 
-DEBUG=False
+DEBUG = False
 
 def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, bwd_preprocessing_use_o):
     # ensure the layout is 'bhsd'
     if layout == "bshd":
-        print("Changing layout to bhsd!")
+        if DEBUG:
+            print()
+            print("Changing layout to bhsd!")
         do = do.transpose(1, 2).contiguous()
         q = q.transpose(1, 2).contiguous()
         k = k.transpose(1, 2).contiguous()
@@ -66,7 +68,9 @@ def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, c
 
     # go back to original layout
     if layout == "bshd":
-        print("Changing back to bshd!")
+        if DEBUG:
+            print()
+            print("Changing back to bshd!")
         dq = dq.transpose(1, 2)
         dk = dk.transpose(1, 2)
         dv = dv.transpose(1, 2)

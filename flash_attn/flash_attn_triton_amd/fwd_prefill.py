@@ -486,8 +486,8 @@ def attention_prefill_forward_triton_impl(q, k, v, o, metadata):
         o = torch.empty_like(q, dtype=v.dtype)
     metadata.check_args(q, k, v, o)
 
-    batch, nheads_q, nheads_k, head_size = get_shape_from_layout(q, k, metadata)
-    q_strides, k_strides, v_strides, o_strides = get_strides_from_layout(q, k, v, o, metadata)
+    batch, nheads_q, nheads_k, head_size, seqlen_q, seqlen_k = get_shape_from_layout(q, k, metadata.layout, metadata.cu_seqlens_q, metadata.cu_seqlens_k, metadata.max_seqlens_q, metadata.max_seqlens_k)
+    q_strides, k_strides, v_strides, o_strides = get_strides_from_layout(q, k, v, o, metadata.layout)
 
     # Get closest power of 2 over or equal to 32.
     padded_d_model = 1 << (head_size - 1).bit_length()

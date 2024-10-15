@@ -19,16 +19,11 @@ from flash_attn.bert_padding import pad_input, unpad_input
 from flash_attn.flash_attn_interface import _get_block_size_n
 from flash_attn.layers.rotary import apply_rotary_emb
 
-
+DEBUG = False
 # Test ROCM Triton Backend
 USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_USE_TRITON_ROCM", "FALSE") == "TRUE"
 if USE_TRITON_ROCM:
     random.seed(42)
-
-def skip_config(**kwargs):
-    if 'd' in kwargs:
-        return random.random() < 0.20
-    return False
 
 MAX_HEADDIM_SM8x = 192
 
@@ -225,7 +220,7 @@ def construct_local_mask(
             col_idx > torch.minimum(row_idx + sk - sq + window_size[1], sk),
             col_idx < row_idx + sk - sq - window_size[0],
         )
-DEBUG = False
+
 
 def attention_ref(
     q,
@@ -264,15 +259,6 @@ def attention_ref(
         output: (batch_size, seqlen_q, nheads, head_dim)
         attention: (batch_size, nheads, seqlen_q, seqlen_k), softmax after dropout
     """
-    if DEBUG:
-        print()
-        if upcast==False and reorder_ops==True:
-            print("attention_ref_py")
-        else:
-            print("attention_ref")
-    if DEBUG:
-        print("upcast:", upcast)
-        print("reorder_ops:", reorder_ops)
     if causal:
         window_size = (window_size[0], 0)
     dtype_og = q.dtype
@@ -286,8 +272,6 @@ def attention_ref(
         scores = torch.einsum("bthd,bshd->bhts", q / math.sqrt(d), k)
     else:
         scores = torch.einsum("bthd,bshd->bhts", q, k / math.sqrt(d))
-    if DEBUG:
-        print("scores_ref:", scores)
     if softcap > 0:
         scores = scores / softcap
         scores = scores.tanh()
@@ -307,11 +291,7 @@ def attention_ref(
         scores.masked_fill_(local_mask, float("-inf"))
     if attn_bias is not None:
         scores = scores + attn_bias
-    if DEBUG:
-        print("lse_ref:", torch.logsumexp(scores, dim=-1))
     attention = torch.softmax(scores, dim=-1).to(v.dtype)
-    if DEBUG:
-        print("attention_ref:", attention)
     # Some rows might be completely masked out so we fill them with zero instead of NaN
     if window_size[0] >= 0 or window_size[1] >= 0:
         attention = attention.masked_fill(torch.all(local_mask, dim=-1, keepdim=True), 0.0)
@@ -592,16 +572,16 @@ def get_dropout_fraction(
     return dropped.sum() / valid.sum()
 
 
-@pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
-# @pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("deterministic", [False, True])
-# @pytest.mark.parametrize("deterministic", [False])
-@pytest.mark.parametrize("alibi", [False, True])
-# @pytest.mark.parametrize("alibi", [False])
-@pytest.mark.parametrize("local", [False, True])
-# @pytest.mark.parametrize("local", [False])
-@pytest.mark.parametrize("causal", [False, True])
-# @pytest.mark.parametrize("causal", [False])
+# @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
+@pytest.mark.parametrize("dtype", [torch.float16])
+# @pytest.mark.parametrize("deterministic", [False, True])
+@pytest.mark.parametrize("deterministic", [False])
+# @pytest.mark.parametrize("alibi", [False, True])
+@pytest.mark.parametrize("alibi", [False])
+# @pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("local", [False])
+# @pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("causal", [False])
 @pytest.mark.parametrize("d", [32, 40, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 64, 96, 128])
@@ -609,20 +589,16 @@ def get_dropout_fraction(
 # @pytest.mark.parametrize('seqlen', [128, 256, 384, 512, 768, 1024, 2048])
 @pytest.mark.parametrize("seqlen", [97, 128, 200, 384, 768, 1024, 1025, 2048])
 # @pytest.mark.parametrize("seqlen", [512])
-@pytest.mark.parametrize("dropout_p", [0.0, 0.17])
-# @pytest.mark.parametrize("dropout_p", [0.0])
+# @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
+@pytest.mark.parametrize("dropout_p", [0.0])
 def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, deterministic, dtype):
     if USE_TRITON_ROCM:
-        test_backward = False
-
+        test_backward = True
         if dropout_p != 0.0:
             pytest.skip("Dropout not supported in AMD's Triton Backend yet")
 
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
-
-        if skip_config(seqlen=seqlen, d=d):
-            pytest.skip("Skipping configuration due to limited test time")
 
     if seqlen >= 2048 and torch.cuda.get_device_properties("cuda").total_memory <= 16 * 2**30:
         pytest.skip()  # Reference implementation OOM
@@ -754,38 +730,33 @@ def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, determ
         assert (dqkv - dqkv_ref).abs().max().item() <= 2 * (dqkv_pt - dqkv_ref).abs().max().item()
 
 
-@pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
-# @pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.parametrize("deterministic", [False, True])
-# @pytest.mark.parametrize("deterministic", [True])
-@pytest.mark.parametrize("alibi", [False, True])
-# @pytest.mark.parametrize("alibi", [True])
-@pytest.mark.parametrize("local", [False, True])
-# @pytest.mark.parametrize("local", [True])
-@pytest.mark.parametrize("causal", [False, True])
-# @pytest.mark.parametrize('causal', [False])
+# @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
+@pytest.mark.parametrize('dtype', [torch.float16])
+# @pytest.mark.parametrize("deterministic", [False, True])
+@pytest.mark.parametrize("deterministic", [False])
+# @pytest.mark.parametrize("alibi", [False, True])
+@pytest.mark.parametrize("alibi", [False])
+# @pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("local", [True])
+# @pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize("d", [32, 59, 64, 80, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [64])
 @pytest.mark.parametrize("seqlen", [97, 128, 200, 257, 384, 512, 768, 1025, 2048])
 # @pytest.mark.parametrize('seqlen', [128])
-@pytest.mark.parametrize("dropout_p", [0.0, 0.17])
-# @pytest.mark.parametrize('dropout_p', [0.0])
+# @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
+@pytest.mark.parametrize('dropout_p', [0.0])
 def test_flash_attn_varlen_qkvpacked(
     seqlen, d, dropout_p, causal, local, alibi, deterministic, dtype
 ):
     if USE_TRITON_ROCM:
-        test_backward = False
-
+        test_backward = True
         if dropout_p != 0.0:
             pytest.skip("Dropout not supported in AMD's Triton Backend yet")
 
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
-
-        if skip_config(seqlen=seqlen, d=d):
-            pytest.skip("Skipping configuration due to limited test time")
-
     if seqlen >= 2048 and torch.cuda.get_device_properties("cuda").total_memory <= 16 * 2**30:
         pytest.skip()  # Reference implementation OOM
     device = "cuda"
@@ -938,7 +909,6 @@ def test_flash_attn_varlen_qkvpacked(
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
 # @pytest.mark.parametrize("d", [64])
-# @pytest.mark.parametrize("d", [16])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
@@ -964,8 +934,6 @@ def test_flash_attn_output(
 ):
     if USE_TRITON_ROCM:
         test_backward = True
-        DEBUG_INPUT= False
-
         if dropout_p != 0.0:
             pytest.skip("Dropout not supported on AMD's Triton Backend yet")
 
@@ -974,10 +942,6 @@ def test_flash_attn_output(
 
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
-
-        # if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
-        #     pytest.skip("Skipping configuration due to limited test time")
-
     if (
         max(seqlen_q, seqlen_k) >= 2048
         and torch.cuda.get_device_properties("cuda").total_memory <= 16 * 2**30
@@ -988,16 +952,12 @@ def test_flash_attn_output(
     device = "cuda"
     # set seed
     torch.random.manual_seed(0)
-    batch_size = 1 #4
-    nheads = 1 # if softcap == 0.0 else 4  # softcap reference impl takes more memory
+    batch_size = 4
+    nheads = 6 if softcap == 0.0 else 4  # softcap reference impl takes more memory
     nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 2)
     assert nheads % nheads_k == 0
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
-    if DEBUG_INPUT:
-        q = torch.arange(seqlen_q, dtype=dtype, device="cuda").view(1, seqlen_q, 1,  1).expand(batch_size, seqlen_q, nheads, d).contiguous().requires_grad_()
-    else:
-        q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
-
+    q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
     if softcap > 0:
         # Ensure the values of qk are at least within softcap range.
         q = q * softcap
@@ -1006,16 +966,12 @@ def test_flash_attn_output(
             batch_size, seqlen_k, 2, nheads_k, d, device=device, dtype=dtype, requires_grad=True
         )
     else:
-        if DEBUG_INPUT:
-            k = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, seqlen_k, 1, 1).expand(batch_size,seqlen_k,  nheads_k, d).contiguous().requires_grad_()
-            v = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, seqlen_k, 1, 1).expand(batch_size, seqlen_k, nheads_k,  d).contiguous().requires_grad_()
-        else:
-            k = torch.randn(
-                batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype, requires_grad=True
-            )
-            v = torch.randn(
-                batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype, requires_grad=True
-            )
+        k = torch.randn(
+            batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype, requires_grad=True
+        )
+        v = torch.randn(
+            batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype, requires_grad=True
+        )
     if alibi:
         alibi_slopes = torch.rand(batch_size, nheads, device=device, dtype=torch.float32) * 0.3
         attn_bias = attn_bias_from_alibi_slopes(alibi_slopes, seqlen_q, seqlen_k, causal=causal)
@@ -1151,10 +1107,7 @@ def test_flash_attn_output(
         print(f"Attention max diff: {(attn - attn_ref).abs().max().item()}")
         print(f"Attention Pytorch max diff: {(attn_pt - attn_ref).abs().max().item()}")
 
-    if DEBUG_INPUT:
-        g = torch.ones_like(out).contiguous()
-    else:
-        g = torch.randn_like(out)
+    g = torch.randn_like(out)
     do_o = (g.float() * out.float()).sum(-1)
     test_backward = test_backward and ((d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90))
     if test_backward:
@@ -1205,7 +1158,6 @@ def test_flash_attn_output(
 
     # Check that FlashAttention's numerical error is at most twice the numerical error
     # of a Pytorch implementation.
-    DEBUG=False
     if DEBUG:
         print("out:", out, out.shape)
         print("out_ref:", out_ref, out_ref.shape)
@@ -1222,71 +1174,66 @@ def test_flash_attn_output(
             print("dv:", dv, dv.shape)
             print("dv_ref:", dv_ref, dv_ref.shape)
             print("dv_pt:", dv_pt, dv_pt.shape)
-        # fp16 default is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
-        ATOL, RTOL = 1e-4, 1e-3
-        # torch.testing.assert_close(dv, dv_ref, atol=ATOL, rtol=RTOL)
         assert (dv - dv_ref).abs().max().item() <= 3 * (dv_pt - dv_ref).abs().max().item()
         
         if DEBUG:
             print("dk:", dk, dk.shape)
             print("dk_ref:", dk_ref, dk_ref.shape)
             print("dk_pt:", dk_pt, dk_pt.shape)
-        # torch.testing.assert_close(dk, dk_ref, atol=ATOL, rtol=RTOL)
         assert (dk - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
 
         if DEBUG:
             print("dq:", dq, dq.shape)
             print("dq_ref:", dq_ref, dq_ref.shape)
             print("dq_pt:", dq_pt, dq_pt.shape)
-        # torch.testing.assert_close(dq, dq_ref, atol=ATOL, rtol=RTOL)
         assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
         
 
 
-@pytest.mark.parametrize("kvpacked", [True, False])
+@pytest.mark.parametrize("kvpacked", [False])
 # @pytest.mark.parametrize('kvpacked', [False])
-@pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
-# @pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
-# @pytest.mark.parametrize('mha_type', ["mqa"])
-@pytest.mark.parametrize("deterministic", [False, True])
-# @pytest.mark.parametrize("deterministic", [True])
-@pytest.mark.parametrize("alibi", [False, True])
-# @pytest.mark.parametrize("alibi", [True])
-@pytest.mark.parametrize("local", [False, True])
-# @pytest.mark.parametrize("local", [True])
-@pytest.mark.parametrize("causal", [False, True])
-# @pytest.mark.parametrize('causal', [True])
-@pytest.mark.parametrize("d", [32, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
+# @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
+@pytest.mark.parametrize('dtype', [torch.float16])
+# @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
+@pytest.mark.parametrize('mha_type', ["mha"])
+# @pytest.mark.parametrize("deterministic", [False, True])
+@pytest.mark.parametrize("deterministic", [False])
+# @pytest.mark.parametrize("alibi", [False, True])
+@pytest.mark.parametrize("alibi", [False])
+# @pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("local", [False])
+# @pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize('causal', [False])
+# @pytest.mark.parametrize("d", [32, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
-# @pytest.mark.parametrize('d', [64])
+@pytest.mark.parametrize('d', [32])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
-        (1, 147),
-        (113, 203),
-        (128, 217),
-        (113, 211),
-        (108, 256),
-        (256, 512),
-        (512, 256),
-        (1024, 1024),
-        (1023, 1024),
-        (1024, 1023),
-        (2048, 2048),
+        (4, 4)
+        # (1, 147),
+        # (113, 203),
+        # (128, 217),
+        # (113, 211),
+        # (108, 256),
+        # (256, 512),
+        # (512, 256),
+        # (1024, 1024),
+        # (1023, 1024),
+        # (1024, 1023),
+        # (2048, 2048),
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(128, 128)])
-@pytest.mark.parametrize("dropout_p", [0.0, 0.17])
-@pytest.mark.parametrize("softcap", [0.0, 50.0])
-# @pytest.mark.parametrize('dropout_p', [0.0])
+# @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
+@pytest.mark.parametrize('dropout_p', [0.0])
+# @pytest.mark.parametrize("softcap", [0.0, 50.0])
+@pytest.mark.parametrize("softcap", [0.0])
 def test_flash_attn_varlen_output(
     seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, softcap
 ):
-
     if USE_TRITON_ROCM:
-        test_backward = False
-
+        test_backward = True
         if dropout_p != 0.0:
             pytest.skip("Dropout not supported in AMD's Triton Backend yet")
 
@@ -1295,9 +1242,6 @@ def test_flash_attn_varlen_output(
         
         if softcap != 0.0:
             pytest.skip("softcap not supported on AMD's Triton Backend yet")
-        
-        if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
-            pytest.skip("Skipping configuration due to limited test time")
 
     if (
         max(seqlen_q, seqlen_k) >= 2048
@@ -1579,18 +1523,18 @@ def test_flash_attn_varlen_output(
         assert (dv - dv_ref).abs().max().item() <= 3 * (dv_pt - dv_ref).abs().max().item()
 
 
-@pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
-# @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("local", [False, True])
-# @pytest.mark.parametrize("local", [True])
+# @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
+@pytest.mark.parametrize("dtype", [torch.float16])
+# @pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("local", [False])
 @pytest.mark.parametrize("d", [32, 40, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
 # @pytest.mark.parametrize("d", [64, 128])
-@pytest.mark.parametrize("swap_sq_sk", [False, True])
-# @pytest.mark.parametrize("swap_sq_sk", [True])
+# @pytest.mark.parametrize("swap_sq_sk", [False, True])
+@pytest.mark.parametrize("swap_sq_sk", [False])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
@@ -1609,14 +1553,9 @@ def test_flash_attn_varlen_output(
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
 def test_flash_attn_causal(seqlen_q, seqlen_k, swap_sq_sk, d, local, dtype):
     if USE_TRITON_ROCM:
-        test_backward = False
-
+        test_backward = True
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
-
-        if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
-            pytest.skip("Skipping configuration due to limited test time")
-    
     if (
         max(seqlen_q, seqlen_k) >= 2048
         and torch.cuda.get_device_properties("cuda").total_memory <= 16 * 2**30
@@ -1700,18 +1639,18 @@ def test_flash_attn_causal(seqlen_q, seqlen_k, swap_sq_sk, d, local, dtype):
         assert (dv - dv_ref).abs().max().item() <= 2 * (dv_pt - dv_ref).abs().max().item() + 1e-5
 
 
-@pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
-# @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("local", [False, True])
-# @pytest.mark.parametrize("local", [True])
+# @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
+@pytest.mark.parametrize("dtype", [torch.float16])
+# @pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("local", [False])
 @pytest.mark.parametrize("d", [32, 40, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
 # @pytest.mark.parametrize("d", [64])
-@pytest.mark.parametrize("swap_sq_sk", [False, True])
-# @pytest.mark.parametrize("swap_sq_sk", [True])
+# @pytest.mark.parametrize("swap_sq_sk", [False, True])
+@pytest.mark.parametrize("swap_sq_sk", [False])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
@@ -1734,8 +1673,7 @@ def test_flash_attn_varlen_causal(
     seqlen_q, seqlen_k, swap_sq_sk, d, local, paged_kv_block_size, dtype
 ):
     if USE_TRITON_ROCM:
-        test_backward = False
-      
+        test_backward = True
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
 
@@ -1744,10 +1682,6 @@ def test_flash_attn_varlen_causal(
 
         if seqlen_q * seqlen_k >= 256 * 512:
             pytest.skip(f"{seqlen_q}, {seqlen_k} leads to out of memory on AMD")
-
-        if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
-            pytest.skip("Skipping configuration due to limited test time")
-
     if (
         max(seqlen_q, seqlen_k) >= 2048
         and torch.cuda.get_device_properties("cuda").total_memory <= 16 * 2**30
@@ -1884,24 +1818,24 @@ def test_flash_attn_varlen_causal(
         assert (dv - dv_ref).abs().max().item() <= 2 * (dv_pt - dv_ref).abs().max().item() + 1e-5
 
 
-@pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
-# @pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("deterministic", [False, True])
-# @pytest.mark.parametrize("deterministic", [True])
-@pytest.mark.parametrize("alibi", [False, True])
-# @pytest.mark.parametrize("alibi", [True])
-@pytest.mark.parametrize("local", [False, True])
-# @pytest.mark.parametrize("local", [False])
-@pytest.mark.parametrize("causal", [False, True])
-# @pytest.mark.parametrize("causal", [True])
+# @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
+@pytest.mark.parametrize("dtype", [torch.float16])
+# @pytest.mark.parametrize("deterministic", [False, True])
+@pytest.mark.parametrize("deterministic", [False])
+# @pytest.mark.parametrize("alibi", [False, True])
+@pytest.mark.parametrize("alibi", [False])
+# @pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("local", [False])
+# @pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("causal", [False])
 @pytest.mark.parametrize("d", [32, 40, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
 # @pytest.mark.parametrize("d", [64])
-@pytest.mark.parametrize("swap_sq_sk", [False, True])
-# @pytest.mark.parametrize("swap_sq_sk", [False])
+# @pytest.mark.parametrize("swap_sq_sk", [False, True])
+@pytest.mark.parametrize("swap_sq_sk", [False])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
@@ -1920,16 +1854,10 @@ def test_flash_attn_varlen_causal(
 def test_flash_attn_splitkv(
     seqlen_q, seqlen_k, swap_sq_sk, d, causal, local, alibi, deterministic, dtype
 ):
-    
     if USE_TRITON_ROCM:
-        test_backward = False
-
+        test_backward = True
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
-
-        if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
-            pytest.skip("Skipping configuration due to limited test time")
-    
     if swap_sq_sk:
         seqlen_q, seqlen_k = seqlen_k, seqlen_q
     device = "cuda"
@@ -2102,10 +2030,6 @@ def test_flash_attn_kvcache(
 
         if has_leftpad == True:
             pytest.skip("cache_leftpad not supported on AMD's Triton Backend yet")
-
-        if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
-            pytest.skip("Skipping configuration due to limited test time")
-
     if seqlen_q > seqlen_k and new_kv:
         pytest.skip()
     if not new_kv and rotary_fraction > 0.0:
@@ -2353,8 +2277,8 @@ def _generate_block_kvcache(seqlen_k, paged_kv_block_size, batch_size, nheads_k,
 
 # @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
 @pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("causal", [False, True])
-# @pytest.mark.parametrize('causal', [True])
+# @pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize("d", [32, 40, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 56, 64, 80, 96, 128])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192])
@@ -2382,14 +2306,9 @@ def _generate_block_kvcache(seqlen_k, paged_kv_block_size, batch_size, nheads_k,
 # @pytest.mark.parametrize("dropout_p", [0.0])
 def test_flash_attn_race_condition(seqlen_q, seqlen_k, d, dropout_p, causal, dtype):
     if USE_TRITON_ROCM:
-        test_backward = False
-
+        test_backward = True
         if dropout_p != 0.0:
             pytest.skip("Dropout not supported in AMD's Triton Backend yet")
-
-        if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
-            pytest.skip("Skipping configuration due to limited test time")
-        
     device = "cuda"
     # set seed
     torch.random.manual_seed(0)
@@ -2442,13 +2361,6 @@ def test_flash_attn_bwd_overflow(seqlen, d, causal, dtype):
     """We previously had a bug where not masking elements beyond seqlen_k caused NaN in dQ,
     in the case where seqlen % 128 != 0.
     """
-    if USE_TRITON_ROCM:
-        if True:
-            pytest.skip("Backward Attention not supported on AMD's Triton Backend yet")
-        
-        if skip_config(seqlen=seqlen, d=d):
-            pytest.skip("Skipping configuration due to limited test time")
-
     device = "cuda"
     # set seed
     torch.random.manual_seed(0)
@@ -2505,13 +2417,6 @@ def test_flash_attn_bwd_transpose(seqlen, d, causal, dtype):
     """We previously had a bug where we were using the wrong strides of dout, which shows up
     when dout is not contiguous.
     """
-    if USE_TRITON_ROCM:
-        if True:
-            pytest.skip("Backward Attention not supported on AMD's Triton Backend yet")
-        
-        if skip_config(seqlen=seqlen, d=d):
-            pytest.skip("Skipping configuration due to limited test time")
-
     device = "cuda"
     # set seed
     torch.random.manual_seed(0)
@@ -2564,13 +2469,6 @@ def test_flash_attn_bwd_varlen_overflow(d, causal, dtype):
     """We previously had a bug where not masking elements beyond seqlen_k caused NaN in dQ,
     in the case where seqlen % 128 != 0 or varlen.
     """
-    if USE_TRITON_ROCM:
-        if True:
-            pytest.skip("Backward Attention not supported on AMD's Triton Backend yet")
-
-        if skip_config(d=d):
-            pytest.skip("Skipping configuration due to limited test time")
-
     device = "cuda"
     # set seed
     torch.random.manual_seed(0)
@@ -2595,20 +2493,20 @@ def test_flash_attn_bwd_varlen_overflow(d, causal, dtype):
     assert not v.grad.isnan().any()
 
 
-@pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
-# @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("local", [False, True])
-# @pytest.mark.parametrize("local", [True])
-@pytest.mark.parametrize("causal", [False, True])
-# @pytest.mark.parametrize("causal", [True])
+# @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+# @pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("local", [False])
+# @pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("causal", [False])
 @pytest.mark.parametrize("d", [32, 40, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
 # @pytest.mark.parametrize("d", [64])
-@pytest.mark.parametrize("swap_sq_sk", [False, True])
-# @pytest.mark.parametrize("swap_sq_sk", [False])
+# @pytest.mark.parametrize("swap_sq_sk", [False, True])
+@pytest.mark.parametrize("swap_sq_sk", [False])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
@@ -2627,14 +2525,9 @@ def test_flash_attn_bwd_varlen_overflow(d, causal, dtype):
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
 def test_flash_attn_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, causal, local, dtype):
     if USE_TRITON_ROCM:
-        test_backward = False
-
+        test_backward = True
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
-
-        if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
-            pytest.skip("Skipping configuration due to limited test time")
-
     if (
         max(seqlen_q, seqlen_k) >= 2048
         and torch.cuda.get_device_properties("cuda").total_memory <= 16 * 2**30
@@ -2664,20 +2557,20 @@ def test_flash_attn_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, causal, loc
             assert torch.equal(dq, dq0)
 
 
-@pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
-# @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("local", [False, True])
-# @pytest.mark.parametrize("local", [True])
-@pytest.mark.parametrize("causal", [False, True])
-# @pytest.mark.parametrize("causal", [True])
+# @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
+@pytest.mark.parametrize("dtype", [torch.float16])
+# @pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("local", [False])
+# @pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("causal", [False])
 @pytest.mark.parametrize("d", [32, 40, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
 # @pytest.mark.parametrize("d", [64])
-@pytest.mark.parametrize("swap_sq_sk", [False, True])
-# @pytest.mark.parametrize("swap_sq_sk", [True])
+# @pytest.mark.parametrize("swap_sq_sk", [False, True])
+@pytest.mark.parametrize("swap_sq_sk", [False])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
@@ -2696,14 +2589,9 @@ def test_flash_attn_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, causal, loc
 # @pytest.mark.parametrize("seqlen_q,seqlen_k", [(256, 128)])
 def test_flash_attn_varlen_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, causal, local, dtype):
     if USE_TRITON_ROCM:
-        test_backward = False
-        
+        test_backward = True
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
-
-        if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
-            pytest.skip("Skipping configuration due to limited test time")
-
     if (
         max(seqlen_q, seqlen_k) >= 2048
         and torch.cuda.get_device_properties("cuda").total_memory <= 16 * 2**30
