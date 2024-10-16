@@ -54,7 +54,7 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
 
     return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scores
 
-def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_exp2):
+def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_exp2):
     """Compute reference output and softmax_lse using PyTorch's built-in function"""
 
     # Ensure the layout is 'bhsd'
@@ -178,6 +178,63 @@ def attention_varlen_forward_pytorch_ref_impl(
         softmax,
         attention_shifted_scaled_scores,
         attention_scores,
+    )
+
+
+def attention_forward_pytorch_ref_impl(
+    q,
+    k,
+    v,
+    sm_scale,
+    causal,
+    layout,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    use_exp2
+    ):
+     # compute reference
+    if layout == "thd":
+        (
+            o_ref,
+            softmax_lse_ref,
+            exp_scores_ref,
+            softmax_ref,
+            attention_shifted_scaled_scores_ref,
+            attention_scores_ref,
+        ) = attention_varlen_forward_pytorch_ref_impl(
+            q.clone(), 
+            k.clone(), 
+            v.clone(), 
+            sm_scale, 
+            causal, 
+            layout,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            use_exp2,
+        )
+    else:
+        (
+            o_ref,
+            softmax_lse_ref,
+            exp_scores_ref,
+            softmax_ref,
+            attention_shifted_scaled_scores_ref,
+            attention_scores_ref,
+        ) = attention_vanilla_forward_pytorch_ref_impl(
+            q.clone(), k.clone(), v.clone(), sm_scale, causal, layout, use_exp2
+        )
+
+    return (
+            o_ref,
+            softmax_lse_ref,
+            exp_scores_ref,
+            softmax_ref,
+            attention_shifted_scaled_scores_ref,
+            attention_scores_ref,
     )
 
 

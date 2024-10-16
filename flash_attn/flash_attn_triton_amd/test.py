@@ -3,7 +3,7 @@ import pytest
 
 from .utils import MetaData, get_input_shapes, input_helper, varlen_input_helper
 from .interface_torch import attention_prefill, attention_decode
-from .fwd_ref import attention_forward_pytorch_ref_impl, attention_varlen_forward_pytorch_ref_impl, compute_alibi_tensor_ref
+from .fwd_ref import attention_forward_pytorch_ref_impl, compute_alibi_tensor_ref
 from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
@@ -387,39 +387,27 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
     # call Triton's forward implementation directly
     o, softmax_lse_triton, exp_scores_triton, grid, head_size, philox_seed, philox_offset, _, _ = attention_prefill_forward_triton_impl(q, k, v, o, metadata)
 
-    # compute reference
-    if layout == "thd":
-        (
-            o_ref,
-            softmax_lse_ref,
-            exp_scores_ref,
-            softmax_ref,
-            attention_shifted_scaled_scores_ref,
-            attention_scores_ref,
-        ) = attention_varlen_forward_pytorch_ref_impl(
-            q.clone(), 
-            k.clone(), 
-            v.clone(), 
-            metadata.sm_scale, 
-            causal, 
-            layout,
-            metadata.cu_seqlens_q,
-            metadata.cu_seqlens_k,
-            metadata.max_seqlens_q,
-            metadata.max_seqlens_k,
-            use_exp2,
-        )
-    else:
-        (
-            o_ref,
-            softmax_lse_ref,
-            exp_scores_ref,
-            softmax_ref,
-            attention_shifted_scaled_scores_ref,
-            attention_scores_ref,
-        ) = attention_forward_pytorch_ref_impl(
-            q.clone(), k.clone(), v.clone(), metadata.sm_scale, causal, layout, use_exp2
-        )
+    (
+        o_ref,
+        softmax_lse_ref,
+        exp_scores_ref,
+        softmax_ref,
+        attention_shifted_scaled_scores_ref,
+        attention_scores_ref,
+    ) = attention_forward_pytorch_ref_impl(
+        q.clone(), 
+        k.clone(), 
+        v.clone(), 
+        metadata.sm_scale, 
+        causal, 
+        layout,
+        metadata.cu_seqlens_q,
+        metadata.cu_seqlens_k,
+        metadata.max_seqlens_q,
+        metadata.max_seqlens_k,
+        use_exp2
+    )
+
     if DEBUG:
         # ref output
         print("attention_scores_ref:", attention_scores_ref, attention_scores_ref.shape)
@@ -511,12 +499,7 @@ def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, b
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
 
-    if DEBUG_INPUT:
-        sm_scale = 1
-    else:
-        sm_scale =  D_HEAD ** -0.5
     alibi_slopes = None
-
     if layout == "thd":
         q, k, v, metadata = varlen_input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT)
     else:
@@ -538,7 +521,17 @@ def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, b
         attention_shifted_scaled_scores_ref,
         attention_scores_ref,
     ) = attention_forward_pytorch_ref_impl(
-        q_ref, k_ref, v_ref, sm_scale, causal, layout, use_exp2
+        q_ref,
+        k_ref, 
+        v_ref,
+        metadata.sm_scale, 
+        causal, 
+        layout,
+        metadata.cu_seqlens_q,
+        metadata.cu_seqlens_k,
+        metadata.max_seqlens_q,
+        metadata.max_seqlens_k,
+        use_exp2
     )
     if DEBUG:
         print()
@@ -564,7 +557,7 @@ def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, b
         v_ref,
         o_ref,
         softmax_lse_ref,
-        sm_scale,
+        metadata.sm_scale,
         causal,
         layout,
         use_exp2,
@@ -584,7 +577,7 @@ def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, b
         dq,
         dk,
         dv,
-        sm_scale,
+        metadata.sm_scale,
         alibi_slopes,
         causal,
         layout,
