@@ -2,7 +2,7 @@
 import torch
 
 
-def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout):
+def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=False):
     torch.manual_seed(20)
 
     # Initialize q, k, v
@@ -13,11 +13,26 @@ def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout):
         q_tensor_shape = (Z, N_CTX_Q, HQ, D_HEAD)
         k_tensor_shape = (Z, N_CTX_K, HK, D_HEAD)
     else:
-        assert False, 'Got unsupported tensor layout'
-    q = torch.randn(q_tensor_shape, dtype=dtype, device="cuda", requires_grad=True)
-    k = torch.randn(k_tensor_shape, dtype=dtype, device="cuda", requires_grad=True)
-    v = torch.randn(k_tensor_shape, dtype=dtype, device="cuda", requires_grad=True)
-    sm_scale = D_HEAD**-0.5
+        assert False, f'Got unsupported tensor layout: {layout}'
+
+    if DEBUG_INPUT:
+        if layout == "bhsd":
+            q = torch.arange(N_CTX_Q, dtype=dtype, device="cuda").view(1, 1, N_CTX_Q, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
+            k = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+            v = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+        elif layout == "bshd":
+            q = torch.arange(N_CTX_Q, dtype=dtype, device="cuda").view(1, N_CTX_Q, 1, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
+            k = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+            v = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+    else:
+        q = torch.randn(q_tensor_shape, dtype=dtype, device="cuda", requires_grad=True)
+        k = torch.randn(k_tensor_shape, dtype=dtype, device="cuda", requires_grad=True)
+        v = torch.randn(k_tensor_shape, dtype=dtype, device="cuda", requires_grad=True)
+    
+    if DEBUG_INPUT:
+        sm_scale = 1
+    else:
+        sm_scale = D_HEAD**-0.5
     input_metadata = MetaData(sm_scale=sm_scale)
     input_metadata.max_seqlens_q = N_CTX_Q
     input_metadata.max_seqlens_k = N_CTX_K
@@ -25,7 +40,7 @@ def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout):
     return q, k, v, input_metadata
 
 
-def varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, equal_seqlens=False):
+def varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, equal_seqlens=False, DEBUG_INPUT=False):
     torch.manual_seed(20)
 
     # Random sequence lengths. Using N_CTX as kind of max of sum of individual seqs

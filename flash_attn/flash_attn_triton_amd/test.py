@@ -3,7 +3,7 @@ import pytest
 
 from .utils import MetaData, get_input_shapes, input_helper, varlen_input_helper
 from .interface_torch import attention_prefill, attention_decode
-from .fwd_ref import attention_forward_pytorch_ref_impl, compute_alibi_tensor_ref
+from .fwd_ref import attention_forward_pytorch_ref_impl, attention_varlen_forward_pytorch_ref_impl, compute_alibi_tensor_ref
 from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
@@ -330,99 +330,96 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
     torch.testing.assert_close(ref_dq, tri_dq, atol=ATOL, rtol=RTOL)
 
 
-
-def input_gen(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, layout, dtype, DEBUG_INPUT=False):
-    if DEBUG_INPUT:
-        if layout == 'bhsd':
-            q = torch.arange(N_CTX_Q, dtype=dtype, device="cuda").view(1, 1, N_CTX_Q, 1).expand(Z, H, N_CTX_Q, D_HEAD).contiguous().requires_grad_()
-            k = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(Z, H, N_CTX_K, D_HEAD).contiguous().requires_grad_()
-            v = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(Z, H, N_CTX_K, D_HEAD).contiguous().requires_grad_()
-        elif layout == "bshd":
-            q = torch.arange(N_CTX_Q, dtype=dtype, device="cuda").view(1, N_CTX_Q, 1, 1).expand(Z, N_CTX_Q, H, D_HEAD).contiguous().requires_grad_()
-            k = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, N_CTX_K, 1, 1).expand(Z, N_CTX_K, H, D_HEAD).contiguous().requires_grad_()
-            v = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, N_CTX_K, 1, 1).expand(Z, N_CTX_K, H, D_HEAD).contiguous().requires_grad_()
-        else:
-            raise ValueError("Unknown layout")
-    else:
-        if layout == 'bhsd':
-            # Generate random inputs
-            q = torch.randn(Z, H, N_CTX_Q, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-            k = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-            v = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-        elif layout == 'bshd':
-             # Generate random inputs
-            q = torch.randn(Z, N_CTX_Q, H, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-            k = torch.randn(Z, N_CTX_K, H, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-            v = torch.randn(Z, N_CTX_K, H, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-        else:
-            raise ValueError("Unknown layout")
-        
-    return q, k, v
-
-
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
     (1, 1, 1, 1, 1),
     (1, 1, 4, 4, 16),
-    (2, 2, 4, 4, 16),
     (1, 1, 2, 128, 1),
     (1, 1, 2, 128, 16),
     (1, 1, 256, 512, 16),
     (1, 1, 128, 128, 64),
+    (2, 2, 4, 4, 16),
     (2, 4, 1024, 1024, 64),
     (4, 6, 108, 256, 224),
     (4, 8, 2048, 2048, 128),
     (4, 16, 4096, 4096, 64),
     (2, 4, 8192, 8192, 32),
+    # fa configs
+    (4, 6, 113, 203, 256),
+    (4, 6, 128, 217, 256),
+    (4, 6, 113, 211, 128),
+    (4, 6, 108, 256, 128),
+    (4, 6, 256, 512, 64),
+    (4, 6, 512, 256, 64),
+    (4, 6, 1024, 1024, 32),
+    (4, 6, 1023, 1024, 32),
+    (4, 6, 1024, 1023, 32),
+    (4, 6, 2048, 2048, 32),
 ])
 @pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('return_scores', [False])
-@pytest.mark.parametrize('layout', ["bshd", "bhsd"])
+@pytest.mark.parametrize('layout', ["bshd", "bhsd", "thd"])
 @pytest.mark.parametrize('use_exp2', [True, False]) # works when use_exp2 is false
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues
 def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, layout, use_exp2, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(0)
-
-    if DEBUG_INPUT:
-        sm_scale = 1
-    else:
-        sm_scale =  D_HEAD ** -0.5
     alibi_slopes = None
     dropout_p = 0.0
 
-    q, k, v = input_gen(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, layout, dtype, DEBUG_INPUT)
+    if layout == "thd":
+        q, k, v, metadata = varlen_input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT)
+    else:
+        q, k, v, metadata = input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT)
     if DEBUG_INPUT:
         o = torch.zeros_like(q).contiguous()
     else:
         o = torch.empty_like(q)
 
-    # Set up metadata
-    input_metadata = MetaData(sm_scale=sm_scale)
-    input_metadata.max_seqlens_q = N_CTX_Q
-    input_metadata.max_seqlens_k = N_CTX_K
-    input_metadata.layout = layout
-    input_metadata.use_exp2 = use_exp2
+    # update metadata
+    metadata.use_exp2 = use_exp2
     if causal:
-        input_metadata.need_causal()
+        metadata.need_causal()
 
     # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
     if return_scores:
-        input_metadata.return_scores = True
+        metadata.return_scores = True
 
     # call Triton's forward implementation directly
-    o, softmax_lse_triton, exp_scores_triton, grid, head_size, philox_seed, philox_offset, _, _ = attention_prefill_forward_triton_impl(q, k, v, o, input_metadata)
+    o, softmax_lse_triton, exp_scores_triton, grid, head_size, philox_seed, philox_offset, _, _ = attention_prefill_forward_triton_impl(q, k, v, o, metadata)
 
     # compute reference
-    (
-        o_ref,
-        softmax_lse_ref,
-        exp_scores_ref,
-        softmax_ref,
-        attention_shifted_scaled_scores_ref,
-        attention_scores_ref,
-    ) = attention_forward_pytorch_ref_impl(
-        q.clone(), k.clone(), v.clone(), sm_scale, causal, layout, use_exp2
-    )
+    if layout == "thd":
+        (
+            o_ref,
+            softmax_lse_ref,
+            exp_scores_ref,
+            softmax_ref,
+            attention_shifted_scaled_scores_ref,
+            attention_scores_ref,
+        ) = attention_varlen_forward_pytorch_ref_impl(
+            q.clone(), 
+            k.clone(), 
+            v.clone(), 
+            metadata.sm_scale, 
+            causal, 
+            layout,
+            metadata.cu_seqlens_q,
+            metadata.cu_seqlens_k,
+            metadata.max_seqlens_q,
+            metadata.max_seqlens_k,
+            use_exp2,
+        )
+    else:
+        (
+            o_ref,
+            softmax_lse_ref,
+            exp_scores_ref,
+            softmax_ref,
+            attention_shifted_scaled_scores_ref,
+            attention_scores_ref,
+        ) = attention_forward_pytorch_ref_impl(
+            q.clone(), k.clone(), v.clone(), metadata.sm_scale, causal, layout, use_exp2
+        )
     if DEBUG:
         # ref output
         print("attention_scores_ref:", attention_scores_ref, attention_scores_ref.shape)
@@ -444,7 +441,7 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
     torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=ATOL, rtol=RTOL)
 
     # use trick with lse to get the softmax. you need the scores but is it
-    softmax_triton = torch.exp(sm_scale * attention_scores_ref - softmax_lse_triton.unsqueeze(-1))
+    softmax_triton = torch.exp(metadata.sm_scale * attention_scores_ref - softmax_lse_triton.unsqueeze(-1))
     if DEBUG:
         print("softmax_triton:", softmax_triton, softmax_triton.shape)
         print("softmax_ref:", softmax_ref, softmax_ref.shape)
@@ -458,7 +455,7 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
                                                                             k.transpose(1, 2) if layout == "bshd" else k, 
                                                                             v.transpose(1, 2) if layout == "bshd" else v, 
                                                                             dropout_p=dropout_p,
-                                                                            is_causal=causal, scale=sm_scale,
+                                                                            is_causal=causal, scale=metadata.sm_scale,
                                                                             dropout_mask=None)
         out_pytorch = out_pytorch.transpose(1, 2) if layout == "bshd" else out_pytorch
 
@@ -520,7 +517,10 @@ def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, b
         sm_scale =  D_HEAD ** -0.5
     alibi_slopes = None
 
-    q, k, v = input_gen(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, layout, dtype, DEBUG_INPUT)
+    if layout == "thd":
+        q, k, v, metadata = varlen_input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT)
+    else:
+        q, k, v, metadata = input_helper(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT)
     if DEBUG_INPUT:
         do = torch.ones_like(q).contiguous()
     else:

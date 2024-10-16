@@ -519,14 +519,7 @@ def attention_prefill_forward_triton_impl(q, k, v, o, metadata):
         exp_scores = None
 
     # stores LSE the log of the normalization constant / sum of expoential score(unnormalzied probablities)
-    # if metadata.layout == "bhsd":
     softmax_lse = torch.empty((batch, nheads_q, metadata.max_seqlens_q), device=q.device, dtype=torch.float32)
-    # elif metadata.layout == "bshd":
-    #     softmax_lse = torch.empty((batch, metadata.max_seqlens_q, nheads_q), device=q.device, dtype=torch.float32)
-    # else:
-    #     print("metadat.layout:",  metadata.layout)
-    #     raise ValueError("unknown layout")
-
 
     # Seed the RNG so we get reproducible results for testing.
     philox_seed = 0x1BF52
