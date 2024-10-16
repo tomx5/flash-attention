@@ -153,7 +153,10 @@ def max_fn(x, y):
 def dropout_offsets(philox_seed, philox_offset, dropout_p, m, n, stride):
     ms = tl.arange(0, m)
     ns = tl.arange(0, n)
-    return philox_offset + ms[:, None] * stride + ns[None, :]
+    # pdb.set_trace()
+    res = philox_offset + ms[:, None] * stride + ns[None, :]
+    # pdb.set_trace()
+    return res
 
 
 @triton.jit
@@ -174,6 +177,7 @@ def dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride):
 # "First" is the major dim, "second" is the minor dim.
 @triton.jit
 def load_fn(ptrs, offset_first, offset_second, boundary_first, boundary_second):
+    # pdb.set_trace()
     if offset_first is not None and offset_second is not None:
         mask = (offset_first[:, None] < boundary_first) & \
                (offset_second[None, :] < boundary_second)
@@ -186,6 +190,7 @@ def load_fn(ptrs, offset_first, offset_second, boundary_first, boundary_second):
         tensor = tl.load(ptrs, mask=mask, other=0.0)
     else:
         tensor = tl.load(ptrs)
+    # pdb.set_trace()
     return tensor
 
 
@@ -238,7 +243,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                     ENABLE_DROPOUT: tl.constexpr, RETURN_ENCODED_SOFTMAX: tl.constexpr, PADDED_HEAD: tl.constexpr,
                     ACTUAL_BLOCK_DMODEL: tl.constexpr):
     # loop over k, v, and update accumulator
-    for start_n in range(block_min, block_max, BLOCK_N):
+    for start_n in tl.range(block_min, block_max, BLOCK_N):
         # For padded blocks, we will overrun the tensor size if
         # we load all BLOCK_N. For others, the blocks are all within range.
         if MASK_STEPS:
@@ -302,13 +307,16 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
             keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, actual_seqlen_k)
             if RETURN_ENCODED_SOFTMAX:
                 tl.store(encoded_sm_ptrs, tl.where(keep, p, -p))
+            pdb.set_trace()
             p = tl.where(keep, p, 0.0)
+            pdb.set_trace()
         elif RETURN_ENCODED_SOFTMAX:
             tl.store(encoded_sm_ptrs, p)
         # -- update output accumulator --
         alpha = tl.math.exp2(m_i - m_ij)
         acc = acc * alpha[:, None]
         if not PRE_LOAD_V:
+            # pdb.set_trace()
             v = load_fn(v_ptrs, k_offs_n, k_offs_k, actual_seqlen_k, ACTUAL_BLOCK_DMODEL)
         # -- update m_i and l_i
         l_i = l_i * alpha + l_ij
@@ -321,7 +329,9 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         if bias_ptrs is not None:
             bias_ptrs += BLOCK_N * stride_bn
         if RETURN_ENCODED_SOFTMAX:
+            # pdb.set_trace()
             encoded_sm_ptrs += BLOCK_N
+            # pdb.set_trace()
     return acc, l_i, m_i
 
 
@@ -443,6 +453,7 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm, s
     k_ptrs = k_offset + offs_d[:, None] * stride_kk + offs_n[None, :] * stride_kn
     v_offset = V + off_z * stride_vz + off_h_k * stride_vh + cu_seqlens_k_start * stride_vk
     v_ptrs = v_offset + offs_n[:, None] * stride_vk + offs_d[None, :] * stride_vn
+
     if USE_BIAS:
         # Note: this might get large enough to overflow on some configs
         bias_offset = off_h_q * stride_bh
@@ -532,6 +543,7 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm, s
             bias_ptrs += n_full_blocks * BLOCK_N * stride_bn
         if RETURN_ENCODED_SOFTMAX:
             encoded_sm_ptrs += n_full_blocks * BLOCK_N
+
         acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk, stride_bn,
                                         start_m, seqlen_k, seqlen_q, dropout_p, philox_seed, batch_philox_offset,
                                         encoded_sm_ptrs, block_min, block_max, offs_n_causal, masked_blocks,
@@ -934,6 +946,10 @@ class _attention_prefill(torch.autograd.Function):
             encoded_softmax = None
             softmax_strides = (0, 0 , 0 , 0)
 
+        print("metadata", metadata.return_encoded_softmax)
+
+        # pdb.set_trace()
+
         M = torch.empty((batch, nheads_q, metadata.max_seqlens_q), device=q.device, dtype=torch.float32)
 
         # Seed the RNG so we get reproducible results for testing.
@@ -959,7 +975,7 @@ class _attention_prefill(torch.autograd.Function):
                        MAX_SEQLENS_K=metadata.max_seqlens_k, IS_CAUSAL=metadata.causal, VARLEN=metadata.varlen,
                        BLOCK_DMODEL=padded_d_model, USE_BIAS=False if metadata.bias is None else True,
                        USE_ALIBI=False if metadata.alibi_slopes is None else True, ENABLE_DROPOUT=metadata.dropout_p
-                       > 0.0, RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax, BLOCK_M=64, BLOCK_N=128, PRE_LOAD_V=False)
+                       > 0.0, RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax, BLOCK_M=128, BLOCK_N=64, PRE_LOAD_V=True)
 
         ctx.save_for_backward(q, k, v, o, M)
         ctx.grid = grid
