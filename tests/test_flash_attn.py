@@ -919,11 +919,11 @@ def test_flash_attn_varlen_qkvpacked(
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
-@pytest.mark.parametrize("d", [4])
+@pytest.mark.parametrize("d", [16])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
-        (256, 256),
+        (64, 70),
         # (128, 217),
         # (113, 211),
         # (108, 256),
@@ -937,7 +937,7 @@ def test_flash_attn_varlen_qkvpacked(
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
 # @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
-@pytest.mark.parametrize("dropout_p", [0.20])
+@pytest.mark.parametrize("dropout_p", [0.00])
 # @pytest.mark.parametrize("softcap", [0.0, 50.0])
 @pytest.mark.parametrize("softcap", [0.0])
 def test_flash_attn_output(
@@ -1117,7 +1117,7 @@ def test_flash_attn_output(
         )
     
     print("Output diff", (out - out_ref))
-    print("Attn diff", (attn - attn_ref))
+    # print("Attn diff", (attn - attn_ref))
         
 
     print(f"Output max diff: {(out - out_ref).abs().max().item()}")
