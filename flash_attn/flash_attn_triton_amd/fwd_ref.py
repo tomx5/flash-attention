@@ -1,94 +1,97 @@
-import math
 import torch
+import math
 
-DEBUG = False
-
-def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_exp2):
-    """compute reference output and softmax_lse using PyTorch's built-in function"""
-
-    # ensure the layout is 'bhsd'
-    if layout == "bshd":
-        if DEBUG:
-            print("Changing layout to bhsd!")
-        q = q.transpose(1, 2).contiguous()
-        k = k.transpose(1, 2).contiguous()
-        v = v.transpose(1, 2).contiguous()
-    elif layout == "bhsd":
-        pass
-    else:
-        raise ValueError(f"Unknown layout {layout}")
-
-    # compute attention scores
+def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
+    # Compute attention scores
     attention_scores = torch.matmul(q.to(torch.float32), k.transpose(-2, -1).to(torch.float32))
 
-
-    # scale score
+    # Scale scores
     attention_scaled_scores = sm_scale * attention_scores
 
-    # ===========================  Softmax ========================================
-    # compute max for numerical stability
+    # Apply causal mask if necessary
+    if causal:
+        L_q, L_k = q.shape[1], k.shape[1]
+        causal_mask = torch.triu(
+            torch.ones((L_q, L_k), device=q.device, dtype=torch.bool), diagonal=1
+        )
+        attention_scaled_scores = attention_scaled_scores.masked_fill(
+            causal_mask.unsqueeze(0), float('-inf')
+        )
+
+    # Compute max for numerical stability
     max_scores = torch.max(attention_scaled_scores, dim=-1, keepdim=True)[0]
 
-    # shift scores to by subtracing max
+    # Shift scores
     attention_shifted_scaled_scores = attention_scaled_scores - max_scores
 
-    # subtract max and exponentiate
+    # Exponentiate
     if use_exp2:
-        RCP_LN = 1/ math.log(2)
-        exp2_scores = torch.exp2(RCP_LN * attention_shifted_scaled_scores)
+        RCP_LN = 1 / math.log(2)
+        exp_scores = torch.exp2(RCP_LN * attention_shifted_scaled_scores)
     else:
         exp_scores = torch.exp(attention_shifted_scaled_scores)
 
-    # sum of exponentials
-    if use_exp2:
-        sum_exp2_scores = torch.sum(exp2_scores, dim=-1, keepdim=True)
-    else:
-        sum_exp_scores = torch.sum(exp_scores, dim=-1, keepdim=True)
+    # Sum of exponentials
+    sum_exp_scores = torch.sum(exp_scores, dim=-1, keepdim=True)
 
-    # softmax probabilities
-    if use_exp2:
-        softmax_exp2 = exp2_scores / sum_exp2_scores
-    else:
-        softmax = exp_scores / sum_exp_scores
-    
-    # compute log-sum-exp and squeeze final dim which will be 1
+    # Compute softmax probabilities
+    softmax = exp_scores / sum_exp_scores
+
+    # Compute log-sum-exp
     if use_exp2:
         LN2 = math.log(2)
-        RCP_LN = 1/ math.log(2)
-        # compute log-sum-exp in base 2 units
+        RCP_LN = 1 / math.log(2)
         max_scores_base2 = max_scores * RCP_LN
-        softmax_exp2_lse_base2 = max_scores_base2 + torch.log2(sum_exp2_scores)
-        # Convert back to natural units
-        softmax_exp2_lse = softmax_exp2_lse_base2 * LN2
-        softmax_exp2_lse.squeeze_(-1)
+        softmax_lse_base2 = max_scores_base2 + torch.log2(sum_exp_scores)
+        softmax_lse = softmax_lse_base2 * LN2
+        softmax_lse.squeeze_(-1)
     else:
         softmax_lse = max_scores + torch.log(sum_exp_scores)
-        softmax_lse.squeeze_(-1)
-    
-    # compute output
-    if use_exp2:
-        o_exp2 = torch.matmul(softmax_exp2, v.to(torch.float32)).to(torch.float16)
-    else:
-        o = torch.matmul(softmax, v.to(torch.float32)).to(torch.float16)
+        softmax_lse = softmax_lse.squeeze(-1)
 
+    # Compute output
+    o = torch.matmul(softmax, v.to(torch.float32)).to(torch.float16)
 
-    # go back to original layout
+    return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scores
+
+def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_exp2):
+    """Compute reference output and softmax_lse using PyTorch's built-in function"""
+
+    # Ensure the layout is 'bhsd'
     if layout == "bshd":
-        if DEBUG:
-            print("Changing back to bshd!")
-        if use_exp2:
-            o_exp2 = o_exp2.transpose(1, 2)
-        else:
-            o = o.transpose(1, 2)
-    elif layout == "bhsd":
-        pass
-    else:
+        q = q.transpose(1, 2).contiguous()
+        k = k.transpose(1, 2).contiguous()
+        v = v.transpose(1, 2).contiguous()
+    elif layout != "bhsd":
         raise ValueError(f"Unknown layout {layout}")
 
-    if use_exp2:
-        return o_exp2, softmax_exp2_lse, exp2_scores, softmax_exp2, attention_shifted_scaled_scores, attention_scores
-    else:
-        return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scores
+    # Prepare tensors in [batch_size * num_heads, seq_len, head_dim] format
+    batch_size, num_heads, seq_len_q, head_dim = q.shape
+    seq_len_k = k.shape[2]
+
+    # Merge batch and heads dimensions
+    q = q.reshape(batch_size * num_heads, seq_len_q, head_dim)
+    k = k.reshape(batch_size * num_heads, seq_len_k, head_dim)
+    v = v.reshape(batch_size * num_heads, seq_len_k, head_dim)
+
+    # Call the core attention function
+    o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scores = attention_forward_core_ref_impl(
+        q, k, v, sm_scale, causal, use_exp2
+    )
+
+    # Reshape outputs back to [batch_size, num_heads, seq_len, head_dim]
+    o = o.reshape(batch_size, num_heads, seq_len_q, head_dim)
+    softmax_lse = softmax_lse.reshape(batch_size, num_heads, seq_len_q)
+    attention_scores = attention_scores.reshape(batch_size, num_heads, seq_len_q, seq_len_k)
+    attention_shifted_scaled_scores = attention_shifted_scaled_scores.reshape(batch_size, num_heads, seq_len_q, seq_len_k)
+    exp_scores = exp_scores.reshape(batch_size, num_heads, seq_len_q, seq_len_k)
+    softmax = softmax.reshape(batch_size, num_heads, seq_len_q, seq_len_k)
+
+    # Restore original layout if necessary
+    if layout == "bshd":
+        o = o.transpose(1, 2)
+
+    return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scores
 
 def attention_varlen_forward_pytorch_ref_impl(
     q,
@@ -101,7 +104,7 @@ def attention_varlen_forward_pytorch_ref_impl(
     cu_seqlens_k,
     max_seqlen_q,
     max_seqlen_k,
-    use_exp2  
+    use_exp2
 ):
     # Ensure the layout is 'thd'
     if layout != 'thd':
@@ -134,74 +137,34 @@ def attention_varlen_forward_pytorch_ref_impl(
         L_q_i = end_q - start_q
         L_k_i = end_k - start_k
 
-        # Transpose to [num_heads, L_q_i, head_dim]
-        q_i = q_i.permute(1, 0, 2).to(torch.float32)  # [num_heads, L_q_i, head_dim]
-        k_i = k_i.permute(1, 0, 2).to(torch.float32)  # [num_heads, L_k_i, head_dim]
-        v_i = v_i.permute(1, 0, 2).to(torch.float32)  # [num_heads, L_k_i, head_dim]
+        # Permute to [num_heads, L_q_i, head_dim]
+        q_i = q_i.permute(1, 0, 2)
+        k_i = k_i.permute(1, 0, 2)
+        v_i = v_i.permute(1, 0, 2)
 
-        # Compute attention scores: [num_heads, L_q_i, L_k_i]
-        attention_scores = torch.bmm(q_i, k_i.transpose(1, 2))
-
-        # Scale scores
-        attention_scaled_scores = sm_scale * attention_scores
-
-        # Apply causal mask if necessary
-        if causal:
-            causal_mask = torch.triu(
-                torch.ones(L_q_i, L_k_i, dtype=torch.bool, device=attention_scaled_scores.device),
-                diagonal=1
-            )
-            attention_scaled_scores = attention_scaled_scores.masked_fill(
-                causal_mask.unsqueeze(0), float('-inf')
-            )
-
-        # Compute max_scores for numerical stability
-        max_scores = torch.max(attention_scaled_scores, dim=-1, keepdim=True)[0]
-
-        # Shift scores
-        attention_shifted_scaled_scores = attention_scaled_scores - max_scores
-
-        # Exponentiate
-        if use_exp2:
-            RCP_LN = 1 / math.log(2)
-            exp_scores = torch.exp2(RCP_LN * attention_shifted_scaled_scores)
-        else:
-            exp_scores = torch.exp(attention_shifted_scaled_scores)
-
-        # Sum of exponentials
-        sum_exp_scores = torch.sum(exp_scores, dim=-1, keepdim=True)
-
-        # Compute softmax probabilities
-        softmax = exp_scores / sum_exp_scores
-
-        # Compute log-sum-exp
-        if use_exp2:
-            LN2 = math.log(2)
-            RCP_LN = 1 / math.log(2)
-            max_scores_base2 = max_scores * RCP_LN
-            softmax_lse_base2 = max_scores_base2 + torch.log2(sum_exp_scores)
-            softmax_lse = softmax_lse_base2 * LN2  # [num_heads, L_q_i, 1]
-            softmax_lse = softmax_lse.squeeze(-1)  # [num_heads, L_q_i]
-        else:
-            softmax_lse = max_scores + torch.log(sum_exp_scores)  # [num_heads, L_q_i, 1]
-            softmax_lse = softmax_lse.squeeze(-1)  # [num_heads, L_q_i]
-
-        # Compute output
-        o_i = torch.bmm(softmax, v_i)  # [num_heads, L_q_i, head_dim]
+        # Call the core attention function for this sequence
+        (
+            o_i,
+            softmax_lse_i,
+            exp_scores_i,
+            softmax_i,
+            attention_shifted_scaled_scores_i,
+            attention_scores_i,
+        ) = attention_forward_core_ref_impl(q_i, k_i, v_i, sm_scale, causal, use_exp2)
 
         # Convert back to 'thd' layout and float16
         o_i = o_i.permute(1, 0, 2).to(torch.float16)  # [L_q_i, num_heads, head_dim]
 
         # Collect outputs
         o_list.append(o_i)
-        softmax_lse_list.append(softmax_lse.unsqueeze(0))
-        exp_scores_list.append(exp_scores.unsqueeze(0))
-        softmax_list.append(softmax.unsqueeze(0))
-        attention_shifted_scaled_scores_list.append(attention_shifted_scaled_scores.unsqueeze(0))
-        attention_scores_list.append(attention_scores.unsqueeze(0))
+        softmax_lse_list.append(softmax_lse_i.unsqueeze(0))
+        exp_scores_list.append(exp_scores_i.unsqueeze(0))
+        softmax_list.append(softmax_i.unsqueeze(0))
+        attention_shifted_scaled_scores_list.append(attention_shifted_scaled_scores_i.unsqueeze(0))
+        attention_scores_list.append(attention_scores_i.unsqueeze(0))
 
     # Concatenate outputs
-    o = torch.cat(o_list, dim=0) 
+    o = torch.cat(o_list, dim=0)
     softmax_lse = torch.cat(softmax_lse_list, dim=0)
     exp_scores = torch.cat(exp_scores_list, dim=0)
     softmax = torch.cat(softmax_list, dim=0)
@@ -214,10 +177,8 @@ def attention_varlen_forward_pytorch_ref_impl(
         exp_scores,
         softmax,
         attention_shifted_scaled_scores,
-        attention_scores
+        attention_scores,
     )
-
-
 
 
 def compute_alibi_tensor_ref(alibi_slopes, seqlen_q, seqlen_k):
