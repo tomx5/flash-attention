@@ -9,7 +9,7 @@ from .bwd_prefill import attention_prefill_backward_triton_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
 from .fwd_decode import dequantize_kv_fp16, quantize_kv_int4
 
-DEBUG = True
+DEBUG = False
 
 # defailt fp16 tolerance is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
 ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 
@@ -331,6 +331,34 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
 
 
 
+def input_gen(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, layout, dtype, DEBUG_INPUT=False):
+    if DEBUG_INPUT:
+        if layout == 'bhsd':
+            q = torch.arange(N_CTX_Q, dtype=dtype, device="cuda").view(1, 1, N_CTX_Q, 1).expand(Z, H, N_CTX_Q, D_HEAD).contiguous().requires_grad_()
+            k = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(Z, H, N_CTX_K, D_HEAD).contiguous().requires_grad_()
+            v = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(Z, H, N_CTX_K, D_HEAD).contiguous().requires_grad_()
+        elif layout == "bshd":
+            q = torch.arange(N_CTX_Q, dtype=dtype, device="cuda").view(1, N_CTX_Q, 1, 1).expand(Z, N_CTX_Q, H, D_HEAD).contiguous().requires_grad_()
+            k = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, N_CTX_K, 1, 1).expand(Z, N_CTX_K, H, D_HEAD).contiguous().requires_grad_()
+            v = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, N_CTX_K, 1, 1).expand(Z, N_CTX_K, H, D_HEAD).contiguous().requires_grad_()
+        else:
+            raise ValueError("Unknown layout")
+    else:
+        if layout == 'bhsd':
+            # Generate random inputs
+            q = torch.randn(Z, H, N_CTX_Q, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
+            k = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
+            v = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
+        elif layout == 'bshd':
+             # Generate random inputs
+            q = torch.randn(Z, N_CTX_Q, H, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
+            k = torch.randn(Z, N_CTX_K, H, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
+            v = torch.randn(Z, N_CTX_K, H, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
+        else:
+            raise ValueError("Unknown layout")
+        
+    return q, k, v
+
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
     (1, 1, 1, 1, 1),
@@ -362,33 +390,11 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
     alibi_slopes = None
     dropout_p = 0.0
 
+    q, k, v = input_gen(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, layout, dtype, DEBUG_INPUT)
     if DEBUG_INPUT:
-        if layout == 'bhsd':
-            q = torch.arange(N_CTX_Q, dtype=dtype, device="cuda").view(1, 1, N_CTX_Q, 1).expand(Z, H, N_CTX_Q, D_HEAD).contiguous().requires_grad_()
-            k = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(Z, H, N_CTX_K, D_HEAD).contiguous().requires_grad_()
-            v = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(Z, H, N_CTX_K, D_HEAD).contiguous().requires_grad_()
-            o = torch.zeros_like(q).contiguous()
-        elif layout == "bshd":
-            q = torch.arange(N_CTX_Q, dtype=dtype, device="cuda").view(1, N_CTX_Q, 1, 1).expand(Z, N_CTX_Q, H, D_HEAD).contiguous().requires_grad_()
-            k = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, N_CTX_K, 1, 1).expand(Z, N_CTX_K, H, D_HEAD).contiguous().requires_grad_()
-            v = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, N_CTX_K, 1, 1).expand(Z, N_CTX_K, H, D_HEAD).contiguous().requires_grad_()
-            o = torch.zeros_like(q).contiguous()
-        else:
-            raise ValueError("Unknown layout")
+        o = torch.zeros_like(q).contiguous()
     else:
-        if layout == 'bhsd':
-            # Generate random inputs
-            q = torch.randn(Z, H, N_CTX_Q, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-            k = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-            v = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-            o = torch.empty_like(q)
-        elif layout == 'bshd':
-            q = torch.randn(Z, N_CTX_Q, H, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-            k = torch.randn(Z, N_CTX_K, H, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-            v = torch.randn(Z, N_CTX_K, H, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-            o = torch.empty_like(q)
-        else:
-            raise ValueError("Unknown layout")
+        o = torch.empty_like(q)
 
     # Set up metadata
     input_metadata = MetaData(sm_scale=sm_scale)
@@ -469,40 +475,38 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    # (1, 1, 1, 1, 1),
-    # (1, 1, 4, 4, 4),
-    # (1, 1, 4, 4, 16),
-    # (1, 1, 16, 16, 16),
-    # (1, 1, 32, 32, 16),
-    # (1, 1, 64, 64, 16), # pass # smallest head_size = 16
-    # (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
-    # (1, 1, 128, 128, 64),
-    # (1, 1, 128, 256, 45),
-    # (1, 1, 256, 256, 64),
-    # (1, 1, 256, 512, 16),
-    # (1, 1, 512, 512, 64), 
-    # (1, 1, 1024, 1024, 64),
+    (1, 1, 1, 1, 1),
+    (1, 1, 4, 4, 4),
+    (1, 1, 4, 4, 16),
+    (1, 1, 16, 16, 16),
+    (1, 1, 32, 32, 16),
+    (1, 1, 64, 64, 16), # pass # smallest head_size = 16
+    (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
+    (1, 1, 128, 128, 64),
+    (1, 1, 128, 256, 45),
+    (1, 1, 256, 256, 64),
+    (1, 1, 256, 512, 16),
+    (1, 1, 512, 512, 64), 
+    (1, 1, 1024, 1024, 64),
     # fa configs
-    # (2, 2, 128, 128, 65),
+    (2, 2, 128, 128, 65),
     (2, 2, 128, 128, 224),
-    # (2, 2, 128, 128, 224),
-    # (2, 2, 108, 256, 224),
-    # (4, 6, 108, 256, 224),
-    # (1, 1, 256, 512, 16),
-    # # old tests that work
-    # (4, 48, 1024, 1024, 73),
-    # (4, 48, 1024, 1024, 64),
-    # (4, 48, 2048, 2048, 64),
-    # (1, 24, 4096, 4096, 64),
-    # (1, 16, 1024, 1024, 64),
-    # (1, 16, 1024, 1024, 128),
+    (4, 6, 108, 256, 224),
+    (1, 1, 256, 512, 16),
+    # old tests that work
+    (4, 48, 1024, 1024, 73),
+    (4, 48, 1024, 1024, 64),
+    (4, 48, 2048, 2048, 64),
+    (1, 24, 4096, 4096, 64),
+    (1, 16, 1024, 1024, 64),
+    (1, 16, 1024, 1024, 128),
     # # old tests that were commented out
     # (1, 16, 8192, 8192, 63),
     # (1, 16, 1022, 1022, 64),
 ])
 @pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('use_exp2', [False])
-@pytest.mark.parametrize('bwd_preprocessing_use_o', [False])
+@pytest.mark.parametrize('bwd_preprocessing_use_o', [True])
 @pytest.mark.parametrize('layout', ["bhsd"])
 @pytest.mark.parametrize('use_new', [True])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
@@ -516,34 +520,11 @@ def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, b
         sm_scale =  D_HEAD ** -0.5
     alibi_slopes = None
 
+    q, k, v = input_gen(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, layout, dtype, DEBUG_INPUT)
     if DEBUG_INPUT:
-        if layout == 'bhsd':
-            q = torch.arange(N_CTX_Q, dtype=dtype, device="cuda").view(1, 1, N_CTX_Q, 1).expand(Z, H, N_CTX_Q, D_HEAD).contiguous().requires_grad_()
-            k = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(Z, H, N_CTX_K, D_HEAD).contiguous().requires_grad_()
-            v = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(Z, H, N_CTX_K, D_HEAD).contiguous().requires_grad_()
-            do = torch.ones_like(q).contiguous()
-        elif layout == "bshd":
-            q = torch.arange(N_CTX_Q, dtype=dtype, device="cuda").view(1, N_CTX_Q, 1, 1).expand(Z, N_CTX_Q, H, D_HEAD).contiguous().requires_grad_()
-            k = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, N_CTX_K, 1, 1).expand(Z, N_CTX_K, H, D_HEAD).contiguous().requires_grad_()
-            v = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, N_CTX_K, 1, 1).expand(Z, N_CTX_K, H, D_HEAD).contiguous().requires_grad_()
-            do = torch.ones_like(q).contiguous()
-        else:
-            raise ValueError("Unknown layout")
+        do = torch.ones_like(q).contiguous()
     else:
-        if layout == 'bhsd':
-            # Generate random inputs
-            q = torch.randn(Z, H, N_CTX_Q, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-            k = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-            v = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-            do = torch.randn_like(q)
-        elif layout == 'bshd':
-             # Generate random inputs
-            q = torch.randn(Z, N_CTX_Q, H, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-            k = torch.randn(Z, N_CTX_K, H, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-            v = torch.randn(Z, N_CTX_K, H, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-            do = torch.randn_like(q)
-        else:
-            raise ValueError("Unknown layout")
+        do = torch.randn_like(q)
 
     # =============================================== Reference ==============================================================
     q_ref = q.clone() 
