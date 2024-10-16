@@ -153,9 +153,9 @@ def max_fn(x, y):
 def dropout_offsets(philox_seed, philox_offset, dropout_p, m, n, stride):
     ms = tl.arange(0, m)
     ns = tl.arange(0, n)
-    # pdb.set_trace()
+    # # pdb.set_trace()
     res = philox_offset + ms[:, None] * stride + ns[None, :]
-    # pdb.set_trace()
+    # # pdb.set_trace()
     return res
 
 
@@ -177,7 +177,7 @@ def dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride):
 # "First" is the major dim, "second" is the minor dim.
 @triton.jit
 def load_fn(ptrs, offset_first, offset_second, boundary_first, boundary_second):
-    # pdb.set_trace()
+    # # pdb.set_trace()
     if offset_first is not None and offset_second is not None:
         mask = (offset_first[:, None] < boundary_first) & \
                (offset_second[None, :] < boundary_second)
@@ -190,7 +190,7 @@ def load_fn(ptrs, offset_first, offset_second, boundary_first, boundary_second):
         tensor = tl.load(ptrs, mask=mask, other=0.0)
     else:
         tensor = tl.load(ptrs)
-    # pdb.set_trace()
+    # # pdb.set_trace()
     return tensor
 
 
@@ -306,17 +306,19 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
             philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n - BLOCK_N
             keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, actual_seqlen_k)
             if RETURN_ENCODED_SOFTMAX:
-                tl.store(encoded_sm_ptrs, tl.where(keep, p, -p))
-            pdb.set_trace()
+                score_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
+                tl.store(encoded_sm_ptrs, tl.where(keep, p, -p), mask=score_mask)
+            # pdb.set_trace()
             p = tl.where(keep, p, 0.0)
-            pdb.set_trace()
+            # pdb.set_trace()
         elif RETURN_ENCODED_SOFTMAX:
-            tl.store(encoded_sm_ptrs, p)
+            score_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
+            tl.store(encoded_sm_ptrs, p, mask=score_mask)
         # -- update output accumulator --
         alpha = tl.math.exp2(m_i - m_ij)
         acc = acc * alpha[:, None]
         if not PRE_LOAD_V:
-            # pdb.set_trace()
+            # # pdb.set_trace()
             v = load_fn(v_ptrs, k_offs_n, k_offs_k, actual_seqlen_k, ACTUAL_BLOCK_DMODEL)
         # -- update m_i and l_i
         l_i = l_i * alpha + l_ij
@@ -329,9 +331,9 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         if bias_ptrs is not None:
             bias_ptrs += BLOCK_N * stride_bn
         if RETURN_ENCODED_SOFTMAX:
-            # pdb.set_trace()
+            # # pdb.set_trace()
             encoded_sm_ptrs += BLOCK_N
-            # pdb.set_trace()
+            # # pdb.set_trace()
     return acc, l_i, m_i
 
 
@@ -948,7 +950,7 @@ class _attention_prefill(torch.autograd.Function):
 
         print("metadata", metadata.return_encoded_softmax)
 
-        # pdb.set_trace()
+        # # pdb.set_trace()
 
         M = torch.empty((batch, nheads_q, metadata.max_seqlens_q), device=q.device, dtype=torch.float32)
 
