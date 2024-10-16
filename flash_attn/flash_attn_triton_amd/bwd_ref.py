@@ -3,24 +3,9 @@ import math
 
 DEBUG = False
 
-def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, bwd_preprocessing_use_o):
-    # ensure the layout is 'bhsd'
-    if layout == "bshd":
-        if DEBUG:
-            print()
-            print("Changing layout to bhsd!")
-        do = do.transpose(1, 2).contiguous()
-        q = q.transpose(1, 2).contiguous()
-        k = k.transpose(1, 2).contiguous()
-        v = v.transpose(1, 2).contiguous()
-        o = o.transpose(1, 2).contiguous()
-        # softmax_lse = softmax_lse.transpose(1, 2).contiguous()
-        # TODO: does L/M need to be transposed. possible to use strides
-    elif layout == "bhsd":
-        pass
-    else:
-        raise ValueError(f"Unknown layout {layout}")
-    
+def attention_backward_core_ref_impl(
+    do, q, k, v, o, softmax_lse, sm_scale, causal, use_exp2, bwd_preprocessing_use_o
+):
     # recompute attention_scores
     attention_scores = torch.matmul(q, k.transpose(-2, -1))
     if DEBUG:
@@ -50,7 +35,7 @@ def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, c
 
     # calculate ds
     if bwd_preprocessing_use_o:
-        delta = torch.sum(o * do, axis=-1).unsqueeze(-1).to(torch.float32) # what oai kernel uses
+        delta = torch.sum(o * do, axis=-1).unsqueeze(-1).to(torch.float32)  # what OAI kernel uses
     else:
         delta = torch.sum(p * dp, axis=-1).unsqueeze(-1) # what the math says you should use
     ds = (p * (dp - delta)) * sm_scale
@@ -66,7 +51,136 @@ def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, c
     dk = dk.to(k.dtype)
     dv = dv.to(v.dtype)
 
-    # go back to original layout
+    return dq, dk, dv, delta.squeeze(-1)
+
+def attention_varlen_backward_pytorch_ref_impl(
+    do,
+    q,
+    k,
+    v,
+    o,
+    softmax_lse,
+    sm_scale,
+    causal,
+    layout,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    use_exp2,
+    bwd_preprocessing_use_o,
+):
+    # Ensure the layout is 'thd'
+    if layout != 'thd':
+        raise ValueError(f"Unsupported layout {layout}. Expected 'thd'.")
+
+    batch_size = cu_seqlens_q.shape[0] - 1
+    num_heads = q.shape[1]
+    head_dim = q.shape[2]
+
+    # Prepare lists to collect outputs
+    dq_list = []
+    dk_list = []
+    dv_list = []
+    delta_list = []
+
+    for i in range(batch_size):
+        # Get the start and end indices for the current sequence
+        start_q = cu_seqlens_q[i].item()
+        end_q = cu_seqlens_q[i + 1].item()
+        start_k = cu_seqlens_k[i].item()
+        end_k = cu_seqlens_k[i + 1].item()
+
+        # Extract q_i, k_i, v_i, do_i, o_i, softmax_lse_i
+        q_i = q[start_q:end_q, :, :]  # [L_q_i, num_heads, head_dim]
+        k_i = k[start_k:end_k, :, :]  # [L_k_i, num_heads, head_dim]
+        v_i = v[start_k:end_k, :, :]  # [L_k_i, num_heads, head_dim]
+        do_i = do[start_q:end_q, :, :]  # [L_q_i, num_heads, head_dim]
+        o_i = o[start_q:end_q, :, :]  # [L_q_i, num_heads, head_dim]
+        softmax_lse_i = softmax_lse[i, :, :]  # [num_heads, L_q_i]
+
+        # Permute to [num_heads, L_q_i, head_dim]
+        q_i = q_i.permute(1, 0, 2)
+        k_i = k_i.permute(1, 0, 2)
+        v_i = v_i.permute(1, 0, 2)
+        do_i = do_i.permute(1, 0, 2)
+        o_i = o_i.permute(1, 0, 2)
+        softmax_lse_i = softmax_lse_i  # Already in [num_heads, L_q_i]
+
+        # Call the core backward function for this sequence
+        dq_i, dk_i, dv_i, delta_i = attention_backward_core_ref_impl(
+            do_i,
+            q_i,
+            k_i,
+            v_i,
+            o_i,
+            softmax_lse_i,
+            sm_scale,
+            causal,
+            use_exp2,
+            bwd_preprocessing_use_o,
+        )
+
+        # Convert back to 'thd' layout and float16
+        dq_i = dq_i.permute(1, 0, 2)  # [L_q_i, num_heads, head_dim]
+        dk_i = dk_i.permute(1, 0, 2)  # [L_k_i, num_heads, head_dim]
+        dv_i = dv_i.permute(1, 0, 2)  # [L_k_i, num_heads, head_dim]
+
+        # Collect outputs
+        dq_list.append(dq_i)
+        dk_list.append(dk_i)
+        dv_list.append(dv_i)
+        delta_list.append(delta_i.unsqueeze(0))
+
+    # Concatenate outputs
+    dq = torch.cat(dq_list, dim=0)
+    dk = torch.cat(dk_list, dim=0)
+    dv = torch.cat(dv_list, dim=0)
+    delta = torch.cat(delta_list, dim=0)  # Shape: [batch_size, num_heads, L_q_i]
+
+    return dq, dk, dv, delta
+
+def attention_vanilla_backward_pytorch_ref_impl(
+    do,
+    q,
+    k,
+    v,
+    o,
+    softmax_lse,
+    sm_scale,
+    causal,
+    layout,
+    use_exp2,
+    bwd_preprocessing_use_o,
+):
+    if layout == "bshd":
+        if DEBUG:
+            print()
+            print("Changing layout to bhsd!")
+        do = do.transpose(1, 2).contiguous()
+        q = q.transpose(1, 2).contiguous()
+        k = k.transpose(1, 2).contiguous()
+        v = v.transpose(1, 2).contiguous()
+        o = o.transpose(1, 2).contiguous()
+    elif layout == "bhsd":
+        pass
+    else:
+        raise ValueError(f"Unknown layout {layout}")
+
+    dq, dk, dv, delta = attention_backward_core_ref_impl(
+        do,
+        q,
+        k,
+        v,
+        o,
+        softmax_lse,
+        sm_scale,
+        causal,
+        use_exp2,
+        bwd_preprocessing_use_o,
+    )
+
+    # Go back to original layout
     if layout == "bshd":
         if DEBUG:
             print()
@@ -79,4 +193,59 @@ def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, c
     else:
         raise ValueError(f"Unknown layout {layout}")
 
-    return dq, dk, dv, delta.squeeze(-1)
+    return dq, dk, dv, delta
+
+
+def attention_backward_pytorch_ref_impl(
+    do,
+    q,
+    k,
+    v,
+    o,
+    softmax_lse,
+    sm_scale,
+    causal,
+    layout,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    use_exp2,
+    bwd_preprocessing_use_o,
+):
+    
+    if layout == "thd":
+        dq, dk, dv, delta = attention_varlen_backward_pytorch_ref_impl(
+            do,
+            q,
+            k,
+            v,
+            o,
+            softmax_lse,
+            sm_scale,
+            causal,
+            layout,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            use_exp2,
+            bwd_preprocessing_use_o,
+        )
+    else:
+        dq, dk, dv, delta = attention_vanilla_backward_pytorch_ref_impl(
+            do,
+            q,
+            k,
+            v,
+            o,
+            softmax_lse,
+            sm_scale,
+            causal,
+            layout,
+            use_exp2,
+            bwd_preprocessing_use_o,
+        )
+        
+
+    return dq, dk, dv, delta

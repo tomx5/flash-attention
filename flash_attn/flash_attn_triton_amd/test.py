@@ -490,9 +490,9 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
     # (1, 16, 1022, 1022, 64),
 ])
 @pytest.mark.parametrize('causal', [False])
-@pytest.mark.parametrize('use_exp2', [False])
-@pytest.mark.parametrize('bwd_preprocessing_use_o', [True])
-@pytest.mark.parametrize('layout', ["bhsd"])
+@pytest.mark.parametrize('use_exp2', [True, False])
+@pytest.mark.parametrize('bwd_preprocessing_use_o', [True, False])
+@pytest.mark.parametrize('layout', ["bhsd", "bshd"])
 @pytest.mark.parametrize('use_new', [True])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
 def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, bwd_preprocessing_use_o, layout,  use_new, DEBUG_INPUT):
@@ -560,6 +560,10 @@ def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, b
         metadata.sm_scale,
         causal,
         layout,
+        metadata.cu_seqlens_q,
+        metadata.cu_seqlens_k,
+        metadata.max_seqlens_q,
+        metadata.max_seqlens_k,
         use_exp2,
         bwd_preprocessing_use_o, 
     )
@@ -581,10 +585,10 @@ def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, b
         alibi_slopes,
         causal,
         layout,
-        None,
-        None,
-        None,
-        None,
+        metadata.cu_seqlens_q,
+        metadata.cu_seqlens_k,
+        metadata.max_seqlens_q,
+        metadata.max_seqlens_k,
         use_exp2,
         bwd_preprocessing_use_o=bwd_preprocessing_use_o,
         use_new=use_new,
