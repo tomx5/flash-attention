@@ -86,7 +86,6 @@ def get_shape_from_layout(q, k, layout, cu_seqlens_q = None, cu_seqlens_k = None
     
     # assert
     assert batch_q == batch_k
-    assert nheads_q == nheads_k # might not be true in mqa and gqa. Keep for now
     assert head_size_q == head_size_k
 
     return batch_q, nheads_q, nheads_k, head_size_q, seqlen_q, seqlen_k
