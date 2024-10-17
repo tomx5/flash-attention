@@ -440,8 +440,13 @@ def _bwd_kernel(
     k_offset = K + off_z * stride_kz + off_h * stride_kh + k_start * stride_kn
     v_offset = V + off_z * stride_vz + off_h * stride_vh + k_start * stride_vn
     do_offset = DO + off_z * stride_qz + off_h * stride_qh + q_start * stride_qm
-    l_offset = L + off_hz * N_CTX_Q + q_start # softmax lse from forward pass. used to recompute attention from forward
-    d_offset = D + off_hz * N_CTX_Q + q_start # delta(o*do summed for each row) TODO: explain delta
+    if IS_VARLEN:
+        delta_offset = tl.load(cu_seqlens_q + off_z) * H + off_h * N_CTX_Q
+        l_offset = L + delta_offset
+        d_offset = D + delta_offset
+    else:
+        l_offset = L + off_hz * N_CTX_Q 
+        d_offset = D + off_hz * N_CTX_Q
 
     # output tensor offsets
     dk_offset = DK + off_z * stride_kz + off_h * stride_kh + k_start * stride_kn
