@@ -207,8 +207,8 @@ def _bwd_kernel_one_col_block(
     dq_offset,
     dk_offset,
     dv_offset,
-    d_ptrs,
-    l_ptrs,
+    d_offset,
+    l_offset,
     stride_dq_all,
     stride_qz,
     stride_qh,
@@ -295,7 +295,8 @@ def _bwd_kernel_one_col_block(
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk += tl.dot(q, tl.trans(k))
         # print("qk:", qk)
-        l_i = tl.load(l_ptrs + offs_m, mask=mask_m)
+        l_ptrs = l_offset + offs_m
+        l_i = tl.load(l_ptrs, mask=mask_m)
         # print("l_i:", l_i)
 
         # compute p
@@ -323,7 +324,8 @@ def _bwd_kernel_one_col_block(
 
         # compute ds , ds = p * (dp - delta[:, None])
         if True:
-            Di = tl.load(d_ptrs + offs_m, mask=mask_m)
+            d_ptrs = d_offset + offs_m
+            Di = tl.load(d_ptrs, mask=mask_m)
             ds = (p * (dp - Di[:, None])) * sm_scale
         else:
             delta = tl.sum(p * dp, axis=1)
@@ -396,10 +398,12 @@ def _bwd_kernel(
     stride_vk,
     Z,
     H,
-    N_CTX_Q,
-    N_CTX_K,
     num_block_m,
     num_block_n,
+    cu_seqlens_q,  
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
     BLOCK_M: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     ACTUAL_BLOCK_DMODEL: tl.constexpr,
@@ -407,6 +411,7 @@ def _bwd_kernel(
     SEQUENCE_PARALLEL: tl.constexpr,
     CAUSAL: tl.constexpr,
     USE_EXP2: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
 ):
     # program ids
     off_hz = tl.program_id(0)
@@ -415,21 +420,38 @@ def _bwd_kernel(
     off_z = off_hz // H
     off_h = off_hz % H
 
+    if IS_VARLEN:
+        # Compute sequence lengths for the current batch
+        q_start = tl.load(cu_seqlens_q + off_z)
+        q_end = tl.load(cu_seqlens_q + off_z + 1)
+        k_start = tl.load(cu_seqlens_k + off_z)
+        k_end = tl.load(cu_seqlens_k + off_z + 1)
+
+        # Compute actual sequence lengths
+        N_CTX_Q = q_end - q_start
+        N_CTX_K = k_end - k_start
+    else:
+        q_start = 0
+        k_start = 0
+        N_CTX_Q = max_seqlen_q
+        N_CTX_K = max_seqlen_k
+    
+
     # input tensor offsets
-    q_offset = Q + off_z * stride_qz + off_h * stride_qh
-    k_offset = K + off_z * stride_kz + off_h * stride_kh
-    v_offset = V + off_z * stride_vz + off_h * stride_vh
-    do_offset = DO + off_z * stride_qz + off_h * stride_qh
-    l_ptrs = L + off_hz * N_CTX_Q # softmax lse from forward pass. used to recompute attention from forward
-    d_ptrs = D + off_hz * N_CTX_Q # delta(o*do summed for each row) TODO: explain delta
+    q_offset = Q + off_z * stride_qz + off_h * stride_qh + q_start * stride_qm
+    k_offset = K + off_z * stride_kz + off_h * stride_kh + k_start * stride_kn
+    v_offset = V + off_z * stride_vz + off_h * stride_vh + k_start * stride_vn
+    do_offset = DO + off_z * stride_qz + off_h * stride_qh + q_start * stride_qm
+    l_offset = L + off_hz * N_CTX_Q + q_start # softmax lse from forward pass. used to recompute attention from forward
+    d_offset = D + off_hz * N_CTX_Q + q_start # delta(o*do summed for each row) TODO: explain delta
 
     # output tensor offsets
-    dk_offset = DK + off_z * stride_kz + off_h * stride_kh
-    dv_offset = DV + off_z * stride_vz + off_h * stride_vh
+    dk_offset = DK + off_z * stride_kz + off_h * stride_kh + k_start * stride_kn
+    dv_offset = DV + off_z * stride_vz + off_h * stride_vh + k_start * stride_kn
     if SEQUENCE_PARALLEL:
-        dq_offset = DQ + stride_dq_all * start_n + off_z * stride_qz + off_h * stride_qh
+        dq_offset = DQ + stride_dq_all * start_n + off_z * stride_qz + off_h * stride_qh + q_start * stride_qm
     else:
-        dq_offset = DQ + off_z * stride_qz + off_h * stride_qh
+        dq_offset = DQ + off_z * stride_qz + off_h * stride_qh + q_start * stride_qm
 
     # inner loop
     if SEQUENCE_PARALLEL:
@@ -452,8 +474,8 @@ def _bwd_kernel(
             dq_offset,
             dk_offset,
             dv_offset,
-            d_ptrs,
-            l_ptrs,
+            d_offset,
+            l_offset,
             stride_dq_all,
             stride_qz,
             stride_qh,
@@ -506,8 +528,8 @@ def _bwd_kernel(
                 dq_offset,
                 dk_offset,
                 dv_offset,
-                d_ptrs,
-                l_ptrs,
+                d_offset,
+                l_offset,
                 stride_dq_all,
                 stride_qz,
                 stride_qh,
@@ -593,7 +615,7 @@ def attention_prefill_backward_triton_new_impl(
 
     # get strides and shape
     if True:
-        batch, nheads_q, nheads_k, head_size, seqlen_q, seqlen_k = get_shape_from_layout(q, k, layout, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
+        batch, nheads_q, nheads_k, head_size, max_seqlen_q, max_seqlen_k = get_shape_from_layout(q, k, layout, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
         q_strides, k_strides, v_strides, o_strides = get_strides_from_layout(q, k, v, o, layout)
         stride_qz, stride_qh, stride_qm, stride_qk =  q_strides
         stride_kz, stride_kh, stride_kn, stride_kk = k_strides
@@ -614,8 +636,8 @@ def attention_prefill_backward_triton_new_impl(
     causal = False
 
     # divide up the problem
-    num_blocks_m = triton.cdiv(seqlen_q, BLOCK_M)
-    num_blocks_n = triton.cdiv(seqlen_k, BLOCK_N)
+    num_blocks_m = triton.cdiv(max_seqlen_q, BLOCK_M)
+    num_blocks_n = triton.cdiv(max_seqlen_k, BLOCK_N)
 
     # get closest power of 2 over or equal to 32.
     padded_d_model = 1 << (head_size - 1).bit_length()
@@ -676,6 +698,8 @@ def attention_prefill_backward_triton_new_impl(
     else:
         delta = torch.empty_like(softmax_lse)
 
+    is_varlen = layout == "thd"
+
     if bwd_preprocessing_use_o:
         if False:
             _bwd_preprocess_use_o_old[(batch_headsize * num_blocks_m,)](
@@ -697,7 +721,7 @@ def attention_prefill_backward_triton_new_impl(
                 BLOCK_M=BLOCK_M,
                 BLOCK_DMODEL=BLOCK_DMODEL,
                 ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
-                N_CTX_Q=seqlen_q,
+                N_CTX_Q=max_seqlen_q,
                 Z=batch,
                 H=nheads_q,
             )
@@ -725,8 +749,8 @@ def attention_prefill_backward_triton_new_impl(
             stride_vk,
             Z=batch,
             H=nheads_q,
-            N_CTX_Q=seqlen_q,
-            N_CTX_K=seqlen_k,
+            N_CTX_Q=max_seqlen_q,
+            N_CTX_K=max_seqlen_k,
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
             BLOCK_DMODEL=BLOCK_DMODEL,
@@ -752,8 +776,8 @@ def attention_prefill_backward_triton_new_impl(
         print("stride_vz, stride_vh, stride_vn, stride_vk:",  stride_vz, stride_vh, stride_vn, stride_vk)
         print("batch_q:", batch)
         print("heads_q:",nheads_q)
-        print("seqlen_q:",seqlen_q)
-        print("seqlen_k:",seqlen_k)
+        print("max_seqlen_q:",max_seqlen_q)
+        print("max_seqlen_k:",max_seqlen_k)
         print("BLOCK_M:",BLOCK_M)
         print("BLOCK_N:",BLOCK_M)
         print("BLOCK_DMODEL:",BLOCK_DMODEL)
@@ -782,10 +806,12 @@ def attention_prefill_backward_triton_new_impl(
         stride_vz, stride_vh, stride_vn, stride_vk,
         batch,
         nheads_q,
-        seqlen_q,
-        seqlen_k,
         num_blocks_m,
         num_blocks_n,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_DMODEL=BLOCK_DMODEL,
@@ -795,6 +821,7 @@ def attention_prefill_backward_triton_new_impl(
         USE_EXP2=use_exp2,
         num_warps=num_warps,
         num_stages=num_stages,
+        IS_VARLEN=is_varlen
     )
 
     if len(dq.shape) == 5:

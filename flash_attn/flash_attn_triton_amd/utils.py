@@ -73,14 +73,14 @@ def varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, equal_seqlen
 
 def get_shape_from_layout(q, k, layout, cu_seqlens_q = None, cu_seqlens_k = None, max_seqlen_q=None, max_seqlen_k=None):
     if layout == 'bhsd':
-        batch_q, nheads_q, seqlen_q, head_size_q = q.shape
-        batch_k, nheads_k, seqlen_k, head_size_k = k.shape
+        batch_q, nheads_q, max_seqlen_q, head_size_q = q.shape
+        batch_k, nheads_k, max_seqlen_k, head_size_k = k.shape
     elif layout == 'bshd':
-        batch_q, seqlen_q, nheads_q, head_size_q = q.shape
-        batch_k, seqlen_k, nheads_k, head_size_k = k.shape
+        batch_q, max_seqlen_q, nheads_q, head_size_q = q.shape
+        batch_k, max_seqlen_k, nheads_k, head_size_k = k.shape
     elif  layout == 'thd':
-        batch_q, seqlen_q, nheads_q,  head_size_q = len(cu_seqlens_q) - 1, max_seqlen_q, q.shape[1], q.shape[2]
-        batch_k, seqlen_k, nheads_k,  head_size_k = len(cu_seqlens_k) - 1, max_seqlen_k, k.shape[1], k.shape[2]
+        batch_q, max_seqlen_q, nheads_q,  head_size_q = len(cu_seqlens_q) - 1, max_seqlen_q, q.shape[1], q.shape[2]
+        batch_k, max_seqlen_k, nheads_k,  head_size_k = len(cu_seqlens_k) - 1, max_seqlen_k, k.shape[1], k.shape[2]
     else:
         assert False, "Got unsupported layout."
     
@@ -88,7 +88,7 @@ def get_shape_from_layout(q, k, layout, cu_seqlens_q = None, cu_seqlens_k = None
     assert batch_q == batch_k
     assert head_size_q == head_size_k
 
-    return batch_q, nheads_q, nheads_k, head_size_q, seqlen_q, seqlen_k
+    return batch_q, nheads_q, nheads_k, head_size_q, max_seqlen_q, max_seqlen_k
 
 def get_strides_from_layout(q, k, v, o, layout):
     if layout == 'thd':
