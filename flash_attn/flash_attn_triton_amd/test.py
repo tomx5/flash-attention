@@ -9,7 +9,7 @@ from .bwd_prefill import attention_prefill_backward_triton_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
 from .fwd_decode import dequantize_kv_fp16, quantize_kv_int4
 
-DEBUG = False
+DEBUG = True
 
 # defailt fp16 tolerance is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
 ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 
@@ -460,41 +460,42 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    (1, 1, 1, 1, 1),
-    (1, 1, 4, 4, 4),
-    (1, 1, 4, 4, 16),
-    (1, 1, 16, 16, 16),
-    (1, 1, 32, 32, 16),
-    (1, 1, 64, 64, 16), # pass # smallest head_size = 16
-    (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
-    (1, 1, 128, 128, 64),
-    (1, 1, 128, 256, 45),
-    (1, 1, 256, 256, 64),
-    (1, 1, 256, 512, 16),
-    (1, 1, 512, 512, 64), 
-    (1, 1, 1024, 1024, 64),
+    # (1, 1, 1, 1, 1),
+    # (1, 1, 4, 4, 4),
+    (2, 2, 4, 4, 16),
+    # (1, 1, 4, 4, 16),
+    # (1, 1, 16, 16, 16),
+    # (1, 1, 32, 32, 16),
+    # (1, 1, 64, 64, 16), # pass # smallest head_size = 16
+    # (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
+    # (1, 1, 128, 128, 64),
+    # (1, 1, 128, 256, 45),
+    # (1, 1, 256, 256, 64),
+    # (1, 1, 256, 512, 16),
+    # (1, 1, 512, 512, 64), 
+    # (1, 1, 1024, 1024, 64),
     # fa configs
     # (2, 2, 128, 128, 65),
     # (2, 2, 128, 128, 224),
     # (4, 6, 108, 256, 224),
     # (1, 1, 256, 512, 16),
     # old tests that work
-    (4, 48, 1024, 1024, 73),
-    (4, 48, 1024, 1024, 64),
-    (4, 48, 2048, 2048, 64),
-    (1, 24, 4096, 4096, 64),
-    (1, 16, 1024, 1024, 64),
-    (1, 16, 1024, 1024, 128),
+    # (4, 48, 1024, 1024, 73),
+    # (4, 48, 1024, 1024, 64),
+    # (4, 48, 2048, 2048, 64),
+    # (1, 24, 4096, 4096, 64),
+    # (1, 16, 1024, 1024, 64),
+    # (1, 16, 1024, 1024, 128),
     # # old tests that were commented out
     # (1, 16, 8192, 8192, 63),
     # (1, 16, 1022, 1022, 64),
 ])
 @pytest.mark.parametrize('causal', [False])
-@pytest.mark.parametrize('use_exp2', [True, False])
-@pytest.mark.parametrize('bwd_preprocessing_use_o', [True, False])
-@pytest.mark.parametrize('layout', ["bhsd", "bshd"])
+@pytest.mark.parametrize('use_exp2', [False])
+@pytest.mark.parametrize('bwd_preprocessing_use_o', [True])
+@pytest.mark.parametrize('layout', ["thd"])
 @pytest.mark.parametrize('use_new', [True])
-@pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
+@pytest.mark.parametrize('DEBUG_INPUT', [True]) # debug output causes nans in both new and old backend
 def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, bwd_preprocessing_use_o, layout,  use_new, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd

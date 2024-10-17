@@ -8,56 +8,46 @@ from .utils import get_shape_from_layout, get_strides_from_layout
 DEBUG = False
 
 @triton.jit
-def _bwd_preprocess_use_o_old(
-    Out,
-    DO,
-    Delta,
-    BLOCK_M: tl.constexpr,
-    BLOCK_DMODEL: tl.constexpr,
-    ACTUAL_BLOCK_DMODEL: tl.constexpr,
-    N_CTX_Q: tl.constexpr
-):
-    off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
-    off_d = tl.arange(0, BLOCK_DMODEL)
-    
-    # create masks
-    # mask_m = off_m < N_CTX_Q
-    mask_d = off_d < ACTUAL_BLOCK_DMODEL
-    # o_mask = None
-    # o_mask = mask_m[:, None]
-    o_mask = mask_d[None, :]
-    # o_mask = mask_m[:, None] & mask_d[None, :]
-
-    # load
-    o = tl.load(Out + off_m[:, None] * ACTUAL_BLOCK_DMODEL + off_d[None, :], mask=o_mask).to(tl.float32)
-    do = tl.load(DO + off_m[:, None] * ACTUAL_BLOCK_DMODEL + off_d[None, :], mask=o_mask).to(tl.float32)
-    # compute
-    delta = tl.sum(o * do, axis=1)
-    # write-back
-    tl.store(Delta + off_m, delta)
-
-
-
-@triton.jit
 def _bwd_preprocess_use_o(
     Out,
     DO,
     Delta,
     stride_oz, stride_oh, stride_om, stride_ok,
     stride_doz, stride_doh, stride_dom, stride_dok,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
     BLOCK_M: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     ACTUAL_BLOCK_DMODEL: tl.constexpr,
     N_CTX_Q: tl.constexpr,
     Z: tl.constexpr,
     H: tl.constexpr,
+    IS_VARLEN: tl.constexpr
 ):
     pid_m = tl.program_id(0)
     pid_bh = tl.program_id(1)
 
     # Compute batch and head indices
-    batch_idx = pid_bh // H
-    head_idx = pid_bh % H
+    off_z = pid_bh // H
+    off_h = pid_bh % H
+
+    if IS_VARLEN:
+        # Compute sequence lengths for the current batch
+        q_start = tl.load(cu_seqlens_q + off_z)
+        q_end = tl.load(cu_seqlens_q + off_z + 1)
+        k_start = tl.load(cu_seqlens_k + off_z)
+        k_end = tl.load(cu_seqlens_k + off_z + 1)
+
+        # Compute actual sequence lengths
+        N_CTX_Q = q_end - q_start
+        N_CTX_K = k_end - k_start
+    else:
+        q_start = 0
+        k_start = 0
+        N_CTX_Q = max_seqlen_q
+        N_CTX_K = max_seqlen_k
 
     off_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     off_d = tl.arange(0, BLOCK_DMODEL)
@@ -66,9 +56,13 @@ def _bwd_preprocess_use_o(
     mask_m = off_m < N_CTX_Q
     mask_d = off_d < ACTUAL_BLOCK_DMODEL
 
-    # compute pointers using strides
-    out_ptrs = Out + batch_idx * stride_oz + head_idx * stride_oh + off_m[:, None] * stride_om + off_d[None, :] * stride_ok
-    do_ptrs = DO + batch_idx * stride_doz + head_idx * stride_doh + off_m[:, None] * stride_dom + off_d[None, :] * stride_dok
+    # compute offsets
+    o_offset = Out + off_z * stride_oz + off_h * stride_oh + q_start * stride_om
+    do_offset = DO + off_z * stride_oz + off_h * stride_oh + q_start * stride_om
+
+    # compute pointers
+    out_ptrs = o_offset + off_m[:, None] * stride_om + off_d[None, :] * stride_ok
+    do_ptrs = do_offset + off_m[:, None] * stride_dom + off_d[None, :] * stride_dok
 
     # load
     o = tl.load(out_ptrs, mask=mask_m[:, None] & mask_d[None, :], other=0.0).to(tl.float32)
@@ -78,7 +72,11 @@ def _bwd_preprocess_use_o(
     delta = tl.sum(o * do, axis=1)
 
     # write-back delta
-    delta_ptrs = Delta + pid_bh * N_CTX_Q + off_m
+    if IS_VARLEN:
+        delta_offset = tl.load(cu_seqlens_q + off_z) * H + off_h * N_CTX_Q + off_m
+        delta_ptrs = Delta + delta_offset
+    else:
+        delta_ptrs = Delta + pid_bh * N_CTX_Q + off_m
     tl.store(delta_ptrs, delta, mask=mask_m)
 
 
@@ -447,7 +445,7 @@ def _bwd_kernel(
 
     # output tensor offsets
     dk_offset = DK + off_z * stride_kz + off_h * stride_kh + k_start * stride_kn
-    dv_offset = DV + off_z * stride_vz + off_h * stride_vh + k_start * stride_kn
+    dv_offset = DV + off_z * stride_vz + off_h * stride_vh + k_start * stride_vn
     if SEQUENCE_PARALLEL:
         dq_offset = DQ + stride_dq_all * start_n + off_z * stride_qz + off_h * stride_qh + q_start * stride_qm
     else:
@@ -701,30 +699,24 @@ def attention_prefill_backward_triton_new_impl(
     is_varlen = layout == "thd"
 
     if bwd_preprocessing_use_o:
-        if False:
-            _bwd_preprocess_use_o_old[(batch_headsize * num_blocks_m,)](
-                o,
-                do,
-                delta,
-                BLOCK_M=BLOCK_M,
-                BLOCK_DMODEL=BLOCK_DMODEL,
-                ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
-                N_CTX_Q=seqlen_q
-            )
-        else:
-            _bwd_preprocess_use_o[(num_blocks_m, batch_headsize)](
-                o,
-                do,
-                delta,
-                stride_oz, stride_oh, stride_om, stride_ok,
-                stride_oz, stride_oh, stride_om, stride_ok,
-                BLOCK_M=BLOCK_M,
-                BLOCK_DMODEL=BLOCK_DMODEL,
-                ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
-                N_CTX_Q=max_seqlen_q,
-                Z=batch,
-                H=nheads_q,
-            )
+        _bwd_preprocess_use_o[(num_blocks_m, batch_headsize)](
+            o,
+            do,
+            delta,
+            stride_oz, stride_oh, stride_om, stride_ok,
+            stride_oz, stride_oh, stride_om, stride_ok,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            BLOCK_M=BLOCK_M,
+            BLOCK_DMODEL=BLOCK_DMODEL,
+            ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
+            N_CTX_Q=max_seqlen_q,
+            Z=batch,
+            H=nheads_q,
+            IS_VARLEN=is_varlen
+        )
     else:
         _bwd_preprocess_use_p[(num_blocks_m, batch_headsize)](
             q,
