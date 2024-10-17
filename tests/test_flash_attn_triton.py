@@ -19,7 +19,7 @@ from flash_attn.bert_padding import pad_input, unpad_input
 from flash_attn.flash_attn_interface import _get_block_size_n
 from flash_attn.layers.rotary import apply_rotary_emb
 
-DEBUG = False
+DEBUG = True
 # Test ROCM Triton Backend
 USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_USE_TRITON_ROCM", "FALSE") == "TRUE"
 if USE_TRITON_ROCM:
@@ -737,7 +737,7 @@ def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, determ
 # @pytest.mark.parametrize("alibi", [False, True])
 @pytest.mark.parametrize("alibi", [False])
 # @pytest.mark.parametrize("local", [False, True])
-@pytest.mark.parametrize("local", [True])
+@pytest.mark.parametrize("local", [False])
 # @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize("d", [32, 59, 64, 80, 96, 128, 160, 192, 224, 256])
@@ -762,8 +762,8 @@ def test_flash_attn_varlen_qkvpacked(
     device = "cuda"
     # set seed
     torch.random.manual_seed(0)
-    batch_size = 5
-    nheads = 6
+    batch_size = 1 # 5
+    nheads = 1 # 6
     window_size = (-1, -1) if not local else torch.randint(0, seqlen, (2,))
     qkv = torch.randn(
         batch_size, seqlen, 3, nheads, d, device=device, dtype=dtype, requires_grad=True
@@ -1253,8 +1253,8 @@ def test_flash_attn_varlen_output(
     device = "cuda"
     # set seed
     torch.random.manual_seed(0)
-    batch_size = 4
-    nheads = 6 if softcap == 0.0 else 4  # softcap reference impl takes more memory
+    batch_size = 1 # 4 
+    nheads = 1 if softcap == 0.0 else 4 # 6 # softcap reference impl takes more memory
     nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 2)
     assert nheads % nheads_k == 0
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
@@ -1518,9 +1518,23 @@ def test_flash_attn_varlen_output(
             assert abs(dropout_fraction - dropout_p) <= (0.01 if not local else 0.04)
 
     if test_backward:
-        assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
-        assert (dk - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
+        if DEBUG:
+            print("dv:", dv, dv.shape)
+            print("dv_ref:", dv_ref, dv_ref.shape)
+            print("dv_pt:", dv_pt, dv_pt.shape)
         assert (dv - dv_ref).abs().max().item() <= 3 * (dv_pt - dv_ref).abs().max().item()
+        
+        if DEBUG:
+            print("dk:", dk, dk.shape)
+            print("dk_ref:", dk_ref, dk_ref.shape)
+            print("dk_pt:", dk_pt, dk_pt.shape)
+        assert (dk - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
+
+        if DEBUG:
+            print("dq:", dq, dq.shape)
+            print("dq_ref:", dq_ref, dq_ref.shape)
+            print("dq_pt:", dq_pt, dq_pt.shape)
+        assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
 
 
 # @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))

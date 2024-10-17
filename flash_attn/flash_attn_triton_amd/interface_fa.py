@@ -5,7 +5,7 @@ from .bwd_prefill import attention_prefill_backward_triton_impl
 from .fwd_decode import attention_decode_forward_triton_impl
 from .utils import MetaData, get_shape_from_layout
 
-DEBUG = False
+DEBUG = True
 
 def fwd(q,
         k,
@@ -192,6 +192,7 @@ def varlen_fwd(
 
     # Setup metadata
     input_metadata = MetaData(sm_scale=softmax_scale)
+    input_metadata.use_exp2 = False
     if return_softmax:
         input_metadata.return_encoded_softmax = True
     input_metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k)  # set layout to "thd" and other metdata
