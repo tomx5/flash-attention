@@ -13,6 +13,8 @@ def fwd(q,
         o,
         alibi_slopes,
         dropout_p,
+        dropout_philox_seed,
+        dropout_philox_offset,
         softmax_scale,
         causal,
         window_size_left,
@@ -30,6 +32,8 @@ def fwd(q,
         print("o:", o)
         print("alibi_slopes:", alibi_slopes)
         print("dropout_p:", dropout_p)
+        print("dropout_philox_seed:", dropout_philox_seed)
+        print("dropout_philox_offset:", dropout_philox_offset)
         print("softmax_scale:", softmax_scale)
         print("causal:", causal)
         print("window_size_left:", window_size_left)
@@ -59,7 +63,7 @@ def fwd(q,
         input_metadata.need_alibi(alibi_slopes, batch, nheads_q)
     
     if dropout_p > 0.0:
-        input_metadata.need_dropout(dropout_p, return_softmax)
+        input_metadata.need_dropout(dropout_p,  dropout_philox_seed, dropout_philox_offset, return_softmax)
     
     # Check arguments
     input_metadata.check_args(q, k, v, o)
@@ -79,6 +83,8 @@ def bwd(
     dv,
     alibi_slopes,
     dropout_p,
+    dropout_philox_seed,
+    dropout_philox_offset,
     softmax_scale,
     causal,
     window_size_left,
@@ -101,6 +107,8 @@ def bwd(
         print("dv:", dv, dv.shape)
         print("alibi_slopes:", alibi_slopes)
         print("dropout_p:", dropout_p)
+        print("dropout_philox_seed:", dropout_philox_seed)
+        print("dropout_philox_offset:", dropout_philox_offset)
         print("out:", out)
         print("softmax_scale:", softmax_scale)
         print("causal:", causal)
@@ -150,6 +158,8 @@ def varlen_fwd(
         max_seqlen_q,
         max_seqlen_k,
         dropout_p,
+        dropout_philox_seed,
+        dropout_philox_offset,
         softmax_scale,
         zero_tensors,
         causal,
@@ -171,6 +181,8 @@ def varlen_fwd(
         print("max_seqlen_q:", max_seqlen_q)
         print("max_seqlen_k:", max_seqlen_k)
         print("dropout_p:", dropout_p)
+        print("dropout_philox_seed:", dropout_philox_seed)
+        print("dropout_philox_offset:", dropout_philox_offset)
         print("softmax_scale:", softmax_scale)
         print("causal:", causal)
         print("window_size_left:", window_size_left)
@@ -200,7 +212,7 @@ def varlen_fwd(
         input_metadata.need_alibi(alibi_slopes, batch, nheads_q)
     
     if dropout_p > 0.0:
-        input_metadata.need_dropout(dropout_p, return_softmax)
+        input_metadata.need_dropout(dropout_p, dropout_philox_seed, dropout_philox_offset, return_softmax)
     
     # Check arguments
     input_metadata.check_args(q, k, v, o)
