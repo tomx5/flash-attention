@@ -38,10 +38,6 @@ def fwd(q,
         print("softcap:", softcap)
         print("return_softmax:", return_softmax)
 
-
-    if dropout_p != 0.0:
-        raise ValueError("dropout is not supported on AMD's Triton Backend yet")
-
     if o is None:
         o = torch.empty_like(q)
 
@@ -113,9 +109,6 @@ def bwd(
         print("deterministic:", deterministic)
         print("gen_:", gen_)
         print("rng_state:", rng_state)
-
-    if dropout_p != 0.0:
-        raise ValueError("dropout is not supported on AMD yet")
 
     _, _, _, _, _, _ = attention_prefill_backward_triton_impl(
         dout,

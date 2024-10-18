@@ -926,7 +926,7 @@ def test_flash_attn_varlen_qkvpacked(
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
 # @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
-@pytest.mark.parametrize("dropout_p", [0.0])
+@pytest.mark.parametrize("dropout_p", [0.00])
 # @pytest.mark.parametrize("softcap", [0.0, 50.0])
 @pytest.mark.parametrize("softcap", [0.0])
 def test_flash_attn_output(
@@ -934,8 +934,6 @@ def test_flash_attn_output(
 ):
     if USE_TRITON_ROCM:
         test_backward = True
-        if dropout_p != 0.0:
-            pytest.skip("Dropout not supported on AMD's Triton Backend yet")
 
         if softcap != 0.0:
             pytest.skip("softcap not supported on AMD's Triton Backend yet")
