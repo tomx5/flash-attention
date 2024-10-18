@@ -37,8 +37,8 @@ def rotary_kernel_splitk(
     INTERLEAVED: tl.constexpr,
 
     # Meta-parameters
-    BLOCK_M: tl.constexpr,          # block size to access chunks of tokens (# of tokens simultaneously)
-    BLOCK_DMODEL: tl.constexpr,     # block size to access chunks of headdim (# of dimensions processed)
+    BLOCK_M: tl.constexpr,     # block size to access chunks of tokens (# of tokens simultaneously)
+    BLOCK_K: tl.constexpr,     # block size to access chunks of headdim (# of dimensions processed)
 ):
     """
     Note: 
@@ -46,13 +46,13 @@ def rotary_kernel_splitk(
     """
     # pdb.set_trace()
     range_m = start_m + tl.arange(0, BLOCK_M)
-    range_d = tl.arange(0, BLOCK_DMODEL)
+    range_d = tl.arange(0, BLOCK_K)
 
     x_ptr = X + (batch_pid * stride_batch) + (group_pid * stride_group) + (head_pid * stride_head)   # pointer to x block
     x_mask = (range_m < seqlen_x)[:, None] & (range_d < rotary_dim)[None, :]
 
     ro_dim_half = rotary_dim // 2       # length of cos/sin
-    range_d_half = tl.arange(0, BLOCK_DMODEL // 2)
+    range_d_half = tl.arange(0, BLOCK_K // 2)
 
     # COS/SIN Range
     # cs_range = (SEQLEN_OFFSET + tl.arange(0, BLOCK_M))[:, None]*(ro_dim_half) + tl.arange(0, ro_dim_half)
@@ -69,7 +69,7 @@ def rotary_kernel_splitk(
         x0_mask = (range_m < seqlen_x)[:, None] & (range_d_half < rotary_dim)[None, :]                  # Mask for the first half
         x1_mask = (range_m < seqlen_x)[:, None] & (range_d_half + ro_dim_half < rotary_dim)[None, :]    # Mask for the second half
 
-        range_m_cos_sin = range_m + seqlen_offset
+        range_m_cos_sin = range_m + seqlen_offset # offsets cos and sin based on current m position range and seqlen offset
         COS = COS + (range_m_cos_sin[:, None] * ro_dim_half + range_d_half[None, :])
         SIN = SIN + (range_m_cos_sin[:, None] * ro_dim_half + range_d_half[None, :])
         cos = tl.load(
@@ -91,7 +91,7 @@ def rotary_kernel_splitk(
         # Concatenate the each dim_half to form full dim
         out = tl.join(o0, o1)
         out = tl.permute(out, 0, 2, 1)
-        out = tl.reshape(out, BLOCK_M, BLOCK_DMODEL)
+        out = tl.reshape(out, BLOCK_M, BLOCK_K)
 
         return out
         
@@ -108,7 +108,7 @@ def rotary_kernel_splitk(
         x1_mask = (range_m < seqlen_x)[:, None] & (range_d_swap < rotary_dim)[None, :]    # Mask for the second half
         
         # Load COS/SIN
-        range_d_repeat = tl.arange(0, BLOCK_DMODEL) // 2                # 0, 0, 1, 1, 2, 2, ...
+        range_d_repeat = tl.arange(0, BLOCK_K) // 2                # 0, 0, 1, 1, 2, 2, ...
 
         range_m_cos_sin = range_m + seqlen_offset
         COS = COS + (range_m_cos_sin[:, None] * ro_dim_half + range_d_repeat[None, :])
@@ -137,7 +137,7 @@ def rotary_kernel_splitk(
         return out
 
 @triton.jit
-def split(
+def main(
     # Dimensions of X
     X,              # tensor being rotated. Has shape (batch (z), seqlen (s), group (g), head (h), head_dim (d))
     seqlen_x,       # seqlen of the x dim. shape is (batch (z), )
@@ -166,8 +166,8 @@ def split(
     INTERLEAVED: tl.constexpr,
 
     # Meta-parameters
-    BLOCK_M: tl.constexpr,          # block size to access chunks of tokens (# of tokens simultaneously)
-    BLOCK_DMODEL: tl.constexpr,     # block size to access chunks of headdim (# of dimensions processed)
+    BLOCK_M: tl.constexpr,     # block size to access chunks of tokens (# of tokens simultaneously)
+    BLOCK_K: tl.constexpr,     # block size to access chunks of headdim (# of dimensions processed)
 
     # Split Parameters
     N_BLOCKS_PER_SPLIT: tl.constexpr,
@@ -199,14 +199,16 @@ def split(
                             stride_headdim=stride_headdim,
                             INTERLEAVED=False,
                             BLOCK_M=BLOCK_M,          
-                            BLOCK_DMODEL=BLOCK_DMODEL,
+                            BLOCK_K=BLOCK_K,
                             )
         # pdb.set_trace()
         print(x)
+        # x_ptrs = X + (tl.arange(0, BLOCK_M))
+        # tl.store(X, x, )
 
 
 def test_rotary_kernel_split():
-    batch = 4
+    batch = 1
     seqlen = 8
     group = 1
     head = 1
@@ -226,7 +228,7 @@ def test_rotary_kernel_split():
     theta = 1.0 / theta_base**(numerator / rotary_dim)
 
     # pos/index in the sequence
-    SEQLEN_OFFSET_IS_TENSOR = True
+    SEQLEN_OFFSET_IS_TENSOR = False
     if SEQLEN_OFFSET_IS_TENSOR:
         SEQLEN_OFFSET = torch.randint(low=0, high=4, size=(batch, ))
         max_offset = SEQLEN_OFFSET.max()
@@ -246,26 +248,30 @@ def test_rotary_kernel_split():
 
     # Define the grid and block sizes for the kernel launch
     BLOCK_M = seqlen
-    BLOCK_DMODEL = head_dim
-
+    BLOCK_K = head_dim
     BLOCK_N = 4
     num_splits = 2
     N_BLOCKS_PER_SPLIT = (seqlen // BLOCK_N) // num_splits
+
+    # for each chunk of tokens
     for start_m in range(0, seqlen, BLOCK_M):
 
 
         for off_zhg in range(0, batch*head*group):
             
             # zhg program ids
-            batch_pid = off_zhg // (head * group)      # batch
+            batch_pid = off_zhg // (head * group)   # batch
             head_pid = (off_zhg // group) % head    # head
             group_pid = off_zhg % group             # group (gca / mqa)
 
             print("start_m: ", start_m, "| batch: ", batch_pid, "| head: ", head_pid, "| group: ", group_pid)
 
-            for lo in range(0, seqlen, BLOCK_N*N_BLOCKS_PER_SPLIT):
+            # for each split
+            BLOCK_SPLIT = BLOCK_N*N_BLOCKS_PER_SPLIT
+
+            for lo in range(0, seqlen, BLOCK_SPLIT):
                 grid = (1, 1, 1)
-                split[grid](X=X,
+                main[grid](X=X,
                             seqlen_x=seqlen,
                             rotary_dim=rotary_dim,
                             COS=cos,
@@ -283,7 +289,7 @@ def test_rotary_kernel_split():
                             stride_headdim=X.stride(-1),
                             INTERLEAVED=False,
                             BLOCK_M=BLOCK_N,          
-                            BLOCK_DMODEL=BLOCK_DMODEL,
+                            BLOCK_K=BLOCK_K,
                             N_BLOCKS_PER_SPLIT=N_BLOCKS_PER_SPLIT
                             )
             print('\n')

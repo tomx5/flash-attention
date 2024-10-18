@@ -2089,15 +2089,15 @@ def test_flash_attn_kvcache(
     DEBUG_ENABLED = True
 
     if DEBUG_ENABLED:
-        q = torch.arange(seqlen_q, dtype=dtype, device="cuda").view(1, seqlen_q, 1, 1).expand(batch_size, seqlen_q, nheads, d).requires_grad_().contiguous().to(dtype=dtype)
+        q = torch.ones(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype)
     else:
         q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype)
 
     seqlen_new = seqlen_q if seqlen_new_eq_seqlen_q else torch.randint(1, seqlen_q + 1, (1,)).item()
     if new_kv:
         if DEBUG_ENABLED or True:
-            k = torch.arange(seqlen_new, dtype=dtype, device="cuda").view(1, seqlen_new, 1, 1).expand(batch_size, seqlen_new, nheads_k, d).requires_grad_().contiguous().to(dtype=dtype)
-            v = torch.arange(seqlen_new, dtype=dtype, device="cuda").view(1, seqlen_new, 1, 1).expand(batch_size, seqlen_new, nheads_k, d).requires_grad_().contiguous().to(dtype=dtype)
+            k = torch.ones(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
+            v = torch.ones(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
         else:
             k = torch.randn(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
             v = torch.randn(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
@@ -2105,8 +2105,8 @@ def test_flash_attn_kvcache(
         k, v = None, None
     if paged_kv_block_size is None:
         if DEBUG_ENABLED:
-            k_cache = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, seqlen_k, 1, 1).expand(batch_size_cache, seqlen_k, nheads_k, d).requires_grad_().contiguous()
-            v_cache = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, seqlen_k, 1, 1).expand(batch_size_cache, seqlen_k, nheads_k, d).requires_grad_().contiguous()
+            k_cache = torch.ones(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
+            v_cache = torch.ones(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
         else:
             k_cache = torch.randn(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
             v_cache = torch.randn(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
