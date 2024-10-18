@@ -363,11 +363,6 @@ def _fwd_kernel_splitK(
     USE_ALIBI: tl.constexpr,
     USE_ROTARY: tl.constexpr,
 ):
-    # Apply Rotary Positional Embedding to q
-    if USE_ROTARY:
-        # rotate q and k before dot product
-        pass
-
 
     # Padding
     PADDED_HEAD: tl.constexpr = (ACTUAL_BLOCK_DMODEL != BLOCK_DMODEL)
@@ -439,7 +434,7 @@ def _fwd_kernel_splitK(
                 other=0
             )
 
-            # pdb.set_trace()
+            pdb.set_trace()
 
             # apply rotary to k here
             if USE_ROTARY:
@@ -1055,6 +1050,8 @@ class _attention(torch.autograd.Function):
             if input_metadata.rotary_dim <= 32
             else (64 if input_metadata.rotary_dim <= 64 else (128 if input_metadata.rotary_dim <= 128 else 256))
         )
+
+        pdb.set_trace()
 
         # TODO: enable quantization
         _fwd_kernel_splitK[grid](

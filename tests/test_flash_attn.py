@@ -2088,10 +2088,15 @@ def test_flash_attn_kvcache(
 
     DEBUG_ENABLED = True
 
+    assert rotary_dim % 16 == 0, "Rotary dim must be a multiple of 16"
+    assert d >= 16, "Rotary dim must be a multiple of 16 and thus d must be at least 16"
+
     if DEBUG_ENABLED:
         q = torch.ones(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype)
     else:
         q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype)
+
+    breakpoint()
 
     seqlen_new = seqlen_q if seqlen_new_eq_seqlen_q else torch.randint(1, seqlen_q + 1, (1,)).item()
     if new_kv:
@@ -2193,6 +2198,7 @@ def test_flash_attn_kvcache(
         k_ro = apply_rotary_emb(
             k, cos, sin, seqlen_offsets=cache_seqlens, interleaved=rotary_interleaved
         )
+        breakpoint()
     else:
         cos, sin = None, None
         q_ro, k_ro = q, k
