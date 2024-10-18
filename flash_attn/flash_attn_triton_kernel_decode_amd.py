@@ -56,7 +56,7 @@ def rotary_kernel_splitk(
     Note: 
     - for K in splitk let BLOCK_M = BLOCK_N, and start_m=start_n
     """
-    pdb.set_trace()
+    # pdb.set_trace()
     range_m = start_m + tl.arange(0, BLOCK_M)
     range_d = tl.arange(0, BLOCK_K)
 
@@ -105,7 +105,7 @@ def rotary_kernel_splitk(
         out = tl.permute(out, 0, 2, 1)
         out = tl.reshape(out, BLOCK_M, BLOCK_K)
 
-        pdb.set_trace()
+        # pdb.set_trace()
 
         return out
         
@@ -148,7 +148,7 @@ def rotary_kernel_splitk(
 
         out = tl.where(range_d[None, :] % 2 == 0, x0_cos - x1_sin, x0_cos + x1_sin)
 
-        pdb.set_trace()
+        # pdb.set_trace()
 
         out = tl.trans(out)
 
@@ -334,7 +334,7 @@ def rotary_kernel(
         seqlen = tl.load(CU_SEQLENS + pid_batch + 1) - start_idx
         X = X + start_idx * stride_x_seqlen + pid_group * stride_x_group + pid_head * stride_x_nheads + pid_splitk * stride_x_splitk
 
-    pdb.set_trace()
+    # pdb.set_trace()
 
     if pid_m * BLOCK_M >= seqlen:
         return
@@ -370,7 +370,7 @@ def rotary_kernel(
         ).to(tl.float32)
         if CONJUGATE:
             sin = -sin
-        pdb.set_trace()
+        # pdb.set_trace()
         o0 = x0 * cos - x1 * sin
         o1 = x0 * sin + x1 * cos
         print("o0", o0)
@@ -573,11 +573,11 @@ def _fwd_kernel_splitK(
                 other=0
             )
 
-            pdb.set_trace()
+            # pdb.set_trace()
 
             # apply rotary to k here
             if USE_ROTARY:
-                pdb.set_trace()
+                # pdb.set_trace()
                 k_new_block = rotary_kernel_splitk_transpose(
                     X=K_new,
                     seqlen_x=N_CTX_NEW,
@@ -604,7 +604,7 @@ def _fwd_kernel_splitK(
                     BLOCK_M=BLOCK_N,
                     BLOCK_K=BLOCK_DMODEL
                 )
-                pdb.set_trace()
+                # pdb.set_trace()
             
             # Store to K
             tl.store(
@@ -689,7 +689,7 @@ def _fwd_kernel_splitK(
     if PADDED_HEAD:
         q = tl.where(d_mask[None, :], q, 0.0)
 
-    pdb.set_trace()
+    # pdb.set_trace()
     q = rotary_kernel_splitk(
                             X=Q,
                             seqlen_x=N_CTX_Q,
@@ -716,7 +716,7 @@ def _fwd_kernel_splitK(
                             BLOCK_M=BLOCK_M,
                             BLOCK_K=BLOCK_DMODEL
                             )
-    pdb.set_trace()
+    # pdb.set_trace()
 
     
     q = (q * qk_scale)
@@ -1072,9 +1072,6 @@ class _attention(torch.autograd.Function):
     def forward(cls, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, input_metadata: MetaData):
         original_layout = input_metadata.layout
 
-        pdb.set_trace()
-        print('check')
-
         # Rotary Embedding Implementation
         # if torch.is_tensor(input_metadata.rotary_cos) and torch.is_tensor(input_metadata.rotary_sin):
         #     if input_metadata.causal or input_metadata.local:
@@ -1192,8 +1189,6 @@ class _attention(torch.autograd.Function):
             if input_metadata.rotary_dim <= 32
             else (64 if input_metadata.rotary_dim <= 64 else (128 if input_metadata.rotary_dim <= 128 else 256))
         )
-
-        pdb.set_trace()
 
         # TODO: enable quantization
         _fwd_kernel_splitK[grid](

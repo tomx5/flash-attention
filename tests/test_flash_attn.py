@@ -1999,10 +1999,10 @@ def test_flash_attn_splitkv(
 # @pytest.mark.parametrize("has_batch_idx", [False])
 @pytest.mark.parametrize("has_batch_idx", [True])
 # @pytest.mark.parametrize("d", [2, 8, 16, 32, 59, 64, 80, 128, 256])
-# @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
+@pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
-@pytest.mark.parametrize("d", [16]) # 16 fails
+# @pytest.mark.parametrize("d", [16]) # 16 fails
 # @pytest.mark.parametrize("d", [2])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
@@ -2010,19 +2010,19 @@ def test_flash_attn_splitkv(
         # (1, 1),
         # (1, 2),
         # (2, 2),
-        (4, 4),
+        # (4, 4),
         # (1, 4),
-        # (1, 128),
-        # (1, 339),
-        # (3, 1024),
-        # (64, 800),
-        # (64, 256),
-        # (3, 799),
-        # (64, 2048),
-        # (16, 20000),
-        # (1, 128 * 1024),
-        # (16, 128 * 1024),
-        # (128, 128),
+        (1, 128),
+        (1, 339),
+        (3, 1024),
+        (64, 800),
+        (64, 256),
+        (3, 799),
+        (64, 2048),
+        (16, 20000),
+        (1, 128 * 1024),
+        (16, 128 * 1024),
+        (128, 128),
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
@@ -2086,7 +2086,7 @@ def test_flash_attn_kvcache(
     assert nheads % nheads_k == 0, "num heads cannot be evenly split into groups"
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
 
-    DEBUG_ENABLED = True
+    DEBUG_ENABLED = False
 
     assert rotary_dim % 16 == 0, "Rotary dim must be a multiple of 16"
     assert d >= 16, "Rotary dim must be a multiple of 16 and thus d must be at least 16"
@@ -2096,7 +2096,7 @@ def test_flash_attn_kvcache(
     else:
         q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype)
 
-    breakpoint()
+    # breakpoint()
 
     seqlen_new = seqlen_q if seqlen_new_eq_seqlen_q else torch.randint(1, seqlen_q + 1, (1,)).item()
     if new_kv:
@@ -2198,7 +2198,7 @@ def test_flash_attn_kvcache(
         k_ro = apply_rotary_emb(
             k, cos, sin, seqlen_offsets=cache_seqlens, interleaved=rotary_interleaved
         )
-        breakpoint()
+        # breakpoint()
     else:
         cos, sin = None, None
         q_ro, k_ro = q, k
