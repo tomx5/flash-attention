@@ -7,6 +7,28 @@ from .utils import get_shape_from_layout, get_strides_from_layout
 
 DEBUG = False
 
+
+@triton.jit
+def dropout_offsets(philox_seed, philox_offset, dropout_p, m, n, stride):
+    ms = tl.arange(0, m)
+    ns = tl.arange(0, n)
+    return philox_offset + ms[:, None] * stride + ns[None, :]
+
+
+@triton.jit
+def dropout_rng(philox_seed, philox_offset, dropout_p, m, n, stride):
+    rng_offsets = dropout_offsets(philox_seed, philox_offset, dropout_p, m, n, stride).to(tl.uint32)
+    # TODO: use tl.randint for better performance
+    return tl.rand(philox_seed, rng_offsets)
+
+
+@triton.jit
+def dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride):
+    rng_output = dropout_rng(philox_seed, philox_offset, dropout_p, m, n, stride)
+    rng_keep = rng_output > dropout_p
+    return rng_keep
+
+
 @triton.jit
 def _bwd_preprocess_use_o(
     Out,
@@ -187,56 +209,58 @@ def _bwd_preprocess_use_p(
 
 @triton.jit
 def _bwd_kernel_one_col_block(
-    Q,
-    K,
-    V,
-    sm_scale,
-    Out,
-    DO,
-    DQ,
-    DK,
-    DV,
-    L,
-    D,
-    q_offset,
-    k_offset,
-    v_offset,
-    do_offset,
-    dq_offset,
-    dk_offset,
-    dv_offset,
-    d_offset,
-    l_offset,
-    stride_dq_all,
-    stride_qz,
-    stride_qh,
-    stride_qm,
-    stride_qk,
-    stride_kz,
-    stride_kh,
-    stride_kn,
-    stride_kk,
-    stride_vz,
-    stride_vh,
-    stride_vn,
-    stride_vk,
-    Z,
-    H,
-    N_CTX_Q,
-    N_CTX_K,
-    off_h,
-    off_z,
-    off_hz,
-    start_n,
-    num_block_m,
-    num_block_n,
-    BLOCK_M: tl.constexpr,
-    BLOCK_DMODEL: tl.constexpr,
-    ACTUAL_BLOCK_DMODEL: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    SEQUENCE_PARALLEL: tl.constexpr,
-    CAUSAL: tl.constexpr,
-    USE_EXP2: tl.constexpr,
+        Q,
+        K,
+        V,
+        sm_scale,
+        Out,
+        DO,
+        DQ,
+        DK,
+        DV,
+        L,
+        D,
+        q_offset,
+        k_offset,
+        v_offset,
+        do_offset,
+        dq_offset,
+        dk_offset,
+        dv_offset,
+        d_offset,
+        l_offset,
+        stride_dq_all,
+        stride_qz,
+        stride_qh,
+        stride_qm,
+        stride_qk,
+        stride_kz,
+        stride_kh,
+        stride_kn,
+        stride_kk,
+        stride_vz,
+        stride_vh,
+        stride_vn,
+        stride_vk,
+        Z,
+        H,
+        N_CTX_Q,
+        N_CTX_K,
+        off_h,
+        off_z,
+        off_hz,
+        start_n,
+        num_block_m,
+        num_block_n,
+        dropout_p, philox_seed, philox_offset_base,
+        BLOCK_M: tl.constexpr,
+        BLOCK_DMODEL: tl.constexpr,
+        ACTUAL_BLOCK_DMODEL: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        SEQUENCE_PARALLEL: tl.constexpr,
+        CAUSAL: tl.constexpr,
+        USE_EXP2: tl.constexpr,
+        ENABLE_DROPOUT: tl.constexpr,          
 ):
     if CAUSAL:
         lo = start_n * BLOCK_M
@@ -332,6 +356,14 @@ def _bwd_kernel_one_col_block(
         # print("ds:", ds)
         ds = tl.where(p_mask, ds, 0.0).to(Q.dtype.element_ty)
         # print("ds masked:", ds)
+
+        # if dropout enabled, mask the scores and scale proportionally
+        if ENABLE_DROPOUT:
+            philox_offset = philox_offset_base + start_m * BLOCK_M * N_CTX_K + start_n - BLOCK_N
+            keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, N_CTX_K)
+            ds = tl.where(keep, ds, 0.0)
+
+            ds = ds / (1 - dropout_p) # scale ds based on dropout_p
         
         # compute dk = dot(ds.T, q)
         dk += tl.dot(tl.trans(ds), q)
@@ -396,6 +428,7 @@ def _bwd_kernel(
     stride_vk,
     Z,
     H,
+    dropout_p, philox_seed, philox_offset_base,
     num_block_m,
     num_block_n,
     cu_seqlens_q,  
@@ -410,6 +443,7 @@ def _bwd_kernel(
     CAUSAL: tl.constexpr,
     USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    ENABLE_DROPOUT: tl.constexpr,
 ):
     # program ids
     off_hz = tl.program_id(0)
@@ -502,6 +536,7 @@ def _bwd_kernel(
             start_n,
             num_block_m,
             num_block_n,
+            dropout_p, philox_seed, philox_offset_base,
             BLOCK_M=BLOCK_M,
             BLOCK_DMODEL=BLOCK_DMODEL,
             ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
@@ -509,6 +544,7 @@ def _bwd_kernel(
             SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,
             CAUSAL=CAUSAL,
             USE_EXP2=USE_EXP2,
+            ENABLE_DROPOUT=ENABLE_DROPOUT,          
         )
     else:
         for start_n in range(0, num_block_n):
@@ -556,6 +592,7 @@ def _bwd_kernel(
                 start_n,
                 num_block_m,
                 num_block_n,
+                dropout_p, philox_seed, philox_offset_base,
                 BLOCK_M=BLOCK_M,
                 BLOCK_DMODEL=BLOCK_DMODEL,
                 ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
@@ -563,6 +600,7 @@ def _bwd_kernel(
                 SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,
                 CAUSAL=CAUSAL,
                 USE_EXP2=USE_EXP2,
+                ENABLE_DROPOUT=ENABLE_DROPOUT,                
             )
 
 
@@ -663,7 +701,7 @@ def attention_prefill_backward_triton_new_impl(
         else:
             dq = dq.contiguous()
 
-    # NOTE: the kernel does inplace accumlation so dq has to be zeros. This avoids the case where we are passed empty dq and it is not all zeros
+    # NOTE: the kernel does inplace accumlation s  o dq has to be zeros. This avoids the case where we are passed empty dq and it is not all zeros
     dq.zero_()
 
     if dk is None:
