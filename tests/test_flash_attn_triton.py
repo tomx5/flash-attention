@@ -976,8 +976,8 @@ def test_flash_attn_output(
     else:
         alibi_slopes, attn_bias = None, None
 
-    dropout_philox_seed = 0x1BF52
-    dropout_philox_offset = 0x1D4B42
+    dropout_philox_seed = 0x1BF58
+    dropout_philox_offset = 0x1D4B49
 
     if kvpacked:
         out, lse, S_dmask = flash_attn_kvpacked_func(
