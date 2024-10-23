@@ -5,7 +5,7 @@ from .utils import MetaData, get_input_shapes, input_helper, varlen_input_helper
 from .interface_torch import attention_prefill, attention_decode
 from .fwd_ref import attention_forward_pytorch_ref_impl, compute_alibi_tensor_ref
 from .fwd_prefill import attention_prefill_forward_triton_impl
-from .bwd_prefill import attention_prefill_backward_triton_impl
+from .bwd_prefill import attention_prefill_backward_triton_impl, store_dropout_mask
 from .bwd_ref import attention_backward_pytorch_ref_impl
 from .fwd_decode import dequantize_kv_fp16, quantize_kv_int4
 
@@ -460,28 +460,28 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    # (1, 1, 1, 1, 1),
-    # (1, 1, 4, 4, 4),
-    # (2, 1, 4, 4, 16),
-    # (1, 2, 4, 4, 16),
-    # (2, 2, 4, 4, 16),
-    # (1, 1, 4, 4, 16),
-    (1, 1, 4, 4, 32)
-    # (1, 1, 16, 16, 16),
-    # (1, 1, 32, 32, 16),
-    # (1, 1, 64, 64, 16), # pass # smallest head_size = 16
-    # (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
-    # (1, 1, 128, 128, 64),
-    # (1, 1, 128, 256, 45),
+    (1, 1, 1, 1, 1),
+    (1, 1, 4, 4, 4),
+    (2, 1, 4, 4, 16),
+    (1, 2, 4, 4, 16),
+    (2, 2, 4, 4, 16),
+    (1, 1, 4, 4, 16),
+    (1, 1, 4, 4, 32),
+    (1, 1, 16, 16, 16),
+    (1, 1, 32, 32, 16),
+    (1, 1, 64, 64, 16), # pass # smallest head_size = 16
+    (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
+    (1, 1, 128, 128, 64),
+    (1, 1, 128, 256, 45),
     # (1, 1, 256, 256, 64),
     # (1, 1, 256, 512, 16),
     # (1, 1, 512, 512, 64), 
     # (1, 1, 1024, 1024, 64),
     # fa configs
-    # (2, 2, 128, 128, 65),
-    # (2, 2, 128, 128, 224),
+    (2, 2, 128, 128, 65),
+    (2, 2, 128, 128, 224),
     # (4, 6, 108, 256, 224),
-    # (1, 1, 256, 512, 16),
+    (1, 1, 256, 512, 16),
     # old tests that work
     # (4, 48, 1024, 1024, 73),
     # (4, 48, 1024, 1024, 64),
@@ -493,10 +493,10 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
     # (1, 16, 8192, 8192, 63),
     # (1, 16, 1022, 1022, 64),
 ])
-@pytest.mark.parametrize('causal', [False])
+@pytest.mark.parametrize('causal', [False, True])
 @pytest.mark.parametrize('use_exp2', [False])
 @pytest.mark.parametrize('bwd_preprocessing_use_o', [True])
-@pytest.mark.parametrize('layout', ["thd"])
+@pytest.mark.parametrize('layout', ["thd", "bhsd"])
 @pytest.mark.parametrize('use_new', [True])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
 def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, bwd_preprocessing_use_o, layout,  use_new, DEBUG_INPUT):
@@ -512,6 +512,14 @@ def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, b
         do = torch.ones_like(q).contiguous()
     else:
         do = torch.randn_like(q)
+
+    
+    dropout_philox_seed = 0x1BF51
+    dropout_philox_offset = 0x1D4B49
+
+    metadata.dropout_p = 0.5
+    metadata.dropout_philox_seed = dropout_philox_seed
+    metadata.dropout_philox_offset = dropout_philox_offset
 
     # =============================================== Reference ==============================================================
     q_ref = q.clone() 
@@ -553,6 +561,15 @@ def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, b
         dk = torch.empty_like(k, dtype=k.dtype)
         dv = torch.empty_like(v, dtype=v.dtype)
 
+    dropout_mask_ = torch.ones(metadata.max_seqlens_q, metadata.max_seqlens_k, device='cuda')
+    store_dropout_mask[(1, 1, 1)](dropout_mask_,
+                                metadata.dropout_philox_seed,
+                                metadata.dropout_philox_offset,
+                                metadata.dropout_p,
+                                metadata.max_seqlens_q,
+                                metadata.max_seqlens_k,
+                                metadata.max_seqlens_k)
+
     do_ref = do.clone()
     dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
         do_ref,
@@ -563,6 +580,8 @@ def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, b
         softmax_lse_ref,
         metadata.sm_scale,
         causal,
+        dropout_mask_,
+        metadata.dropout_p,
         layout,
         metadata.cu_seqlens_q,
         metadata.cu_seqlens_k,
@@ -593,6 +612,9 @@ def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, b
         metadata.cu_seqlens_k,
         metadata.max_seqlens_q,
         metadata.max_seqlens_k,
+        metadata.dropout_p,
+        metadata.dropout_philox_seed,
+        metadata.dropout_philox_offset,
         use_exp2,
         bwd_preprocessing_use_o=bwd_preprocessing_use_o,
         use_new=use_new,

@@ -4,7 +4,7 @@ import math
 DEBUG = False
 
 def attention_backward_core_ref_impl(
-    do, q, k, v, o, softmax_lse, sm_scale, causal, use_exp2, bwd_preprocessing_use_o
+    do, q, k, v, o, softmax_lse, sm_scale, causal, dropout_mask, dropout_p, use_exp2, bwd_preprocessing_use_o
 ):
     # recompute attention_scores
     attention_scores = torch.matmul(q, k.transpose(-2, -1))
@@ -40,6 +40,12 @@ def attention_backward_core_ref_impl(
         delta = torch.sum(p * dp, axis=-1).unsqueeze(-1) # what the math says you should use
     ds = (p * (dp - delta)) * sm_scale
 
+    # print('ds_before', ds)
+    # import pdb; pdb.set_trace()
+    ds = ds * dropout_mask
+    ds = ds / (1 - dropout_p)
+    # print('ds_after', ds)
+
     # compute gradient wrt k
     dk = torch.matmul(ds.transpose(-2, -1), q.to(torch.float32))
 
@@ -62,6 +68,8 @@ def attention_varlen_backward_pytorch_ref_impl(
     softmax_lse,
     sm_scale,
     causal,
+    dropout_mask,
+    dropout_p,
     layout,
     cu_seqlens_q,
     cu_seqlens_k,
@@ -117,6 +125,8 @@ def attention_varlen_backward_pytorch_ref_impl(
             softmax_lse_i,
             sm_scale,
             causal,
+            dropout_mask,
+            dropout_p,
             use_exp2,
             bwd_preprocessing_use_o,
         )
@@ -149,6 +159,8 @@ def attention_vanilla_backward_pytorch_ref_impl(
     softmax_lse,
     sm_scale,
     causal,
+    dropout_mask,
+    dropout_p,
     layout,
     use_exp2,
     bwd_preprocessing_use_o,
@@ -176,6 +188,8 @@ def attention_vanilla_backward_pytorch_ref_impl(
         softmax_lse,
         sm_scale,
         causal,
+        dropout_mask,
+        dropout_p,
         use_exp2,
         bwd_preprocessing_use_o,
     )
@@ -205,6 +219,8 @@ def attention_backward_pytorch_ref_impl(
     softmax_lse,
     sm_scale,
     causal,
+    dropout_mask,
+    dropout_p,
     layout,
     cu_seqlens_q,
     cu_seqlens_k,
@@ -224,6 +240,8 @@ def attention_backward_pytorch_ref_impl(
             softmax_lse,
             sm_scale,
             causal,
+            dropout_mask,
+            dropout_p,
             layout,
             cu_seqlens_q,
             cu_seqlens_k,
@@ -242,6 +260,8 @@ def attention_backward_pytorch_ref_impl(
             softmax_lse,
             sm_scale,
             causal,
+            dropout_mask,
+            dropout_p,
             layout,
             use_exp2,
             bwd_preprocessing_use_o,

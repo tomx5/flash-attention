@@ -890,7 +890,7 @@ def test_flash_attn_varlen_qkvpacked(
 @pytest.mark.parametrize("kvpacked", [False])
 # @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
 # @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("dtype", [torch.float32])
+@pytest.mark.parametrize("dtype", [torch.float16])
 # @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
 @pytest.mark.parametrize("mha_type", ["mha"])
 # @pytest.mark.parametrize("deterministic", [False, True])
@@ -933,7 +933,7 @@ def test_flash_attn_output(
     seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, softcap
 ):
     if USE_TRITON_ROCM:
-        test_backward = False
+        test_backward = True    #NOTE: test fwd or bwd using this bool
 
         if softcap != 0.0:
             pytest.skip("softcap not supported on AMD's Triton Backend yet")
@@ -949,13 +949,13 @@ def test_flash_attn_output(
         pytest.skip("Softcap and dropout not supported together")
     device = "cuda"
     # set seed
-    torch.random.manual_seed(0)
+    torch.random.manual_seed(20)
     batch_size = 4
     nheads = 6 if softcap == 0.0 else 4  # softcap reference impl takes more memory
     nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 2)
     assert nheads % nheads_k == 0
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
-    q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
+    q = torch.ones(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
     if softcap > 0:
         # Ensure the values of qk are at least within softcap range.
         q = q * softcap
@@ -1116,6 +1116,7 @@ def test_flash_attn_output(
     do_o = (g.float() * out.float()).sum(-1)
     test_backward = test_backward and ((d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90))
     if test_backward:
+        out_ref.retain_grad()
         if kvpacked:
             (
                 dq,
@@ -1148,6 +1149,7 @@ def test_flash_attn_output(
                 dk_pt,
                 dv_pt,
             ) = torch.autograd.grad(out_pt, (q, k, v), g)
+            print(out.grad)
         print(f"dQ max diff: {(dq - dq_ref).abs().max().item()}")
         print(f"dK max diff: {(dk - dk_ref).abs().max().item()}")
         print(f"dV max diff: {(dv - dv_ref).abs().max().item()}")

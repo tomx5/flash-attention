@@ -28,6 +28,14 @@ def dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride):
     rng_keep = rng_output > dropout_p
     return rng_keep
 
+@triton.jit
+def store_dropout_mask(X, philox_seed, philox_offset, dropout_p: tl.constexpr, m: tl.constexpr, n: tl.constexpr, stride: tl.constexpr):
+    x = tl.zeros((m, n), tl.float32)
+    # import pdb; pdb.set_trace()
+    x = dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride)
+    x_block = (tl.arange(0, m)[:, None]*n + tl.arange(0, n)[None, :])
+    tl.store(X+x_block, x, mask=((tl.arange(0, m)[:, None] < m) & (tl.arange(0, n)[None, :] < n)))
+
 
 @triton.jit
 def _bwd_preprocess_use_o(
@@ -358,13 +366,17 @@ def _bwd_kernel_one_col_block(
         # print("ds masked:", ds)
 
         # if dropout enabled, mask the scores and scale proportionally
+        # print('ds_before_triton\n', ds)
         if ENABLE_DROPOUT:
-            philox_offset = philox_offset_base + start_m * BLOCK_M * N_CTX_K + start_n - BLOCK_N
+            philox_offset = philox_offset_base + start_m * N_CTX_K + start_n * BLOCK_N
+            # import pdb; pdb.set_trace()
             keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, N_CTX_K)
             ds = tl.where(keep, ds, 0.0)
 
             ds = ds / (1 - dropout_p) # scale ds based on dropout_p
-        
+            ds = ds.to(Q.dtype.element_ty)
+        # print('ds_after_triton\n', ds)
+
         # compute dk = dot(ds.T, q)
         dk += tl.dot(tl.trans(ds), q)
         # print("dk:", dk)
@@ -623,6 +635,9 @@ def attention_prefill_backward_triton_new_impl(
     cu_seqlens_k,
     max_seqlen_q: int,
     max_seqlen_k: int,
+    dropout_p,
+    dropout_philox_seed,
+    dropout_philox_offset,
     use_exp2: bool,
     bwd_preprocessing_use_o: bool,
     BLOCK_M=64,
@@ -642,7 +657,14 @@ def attention_prefill_backward_triton_new_impl(
         print("dv:", dv, dv.shape if dv is not None else None)
         print("sm_scale:", sm_scale)
         print("alibi_slopes:", alibi_slopes)
-        print("layout:", layout)
+        print("layout:", layout)        
+        print("cu_seqlens_q:", cu_seqlens_q)
+        print("cu_seqlens_k:", cu_seqlens_k)
+        print("max_seqlen_q:", max_seqlen_q)
+        print("max_seqlen_k:", max_seqlen_k)
+        print("dropout_p:", dropout_p)
+        print("dropout_philox_seed:", dropout_philox_seed)
+        print("dropout_philox_offset:", dropout_philox_offset)
         print("use_exp2:", use_exp2)
         print("bwd_preprocessing_use_o:", bwd_preprocessing_use_o)
         print("BLOCK_M:", BLOCK_M)
@@ -841,6 +863,9 @@ def attention_prefill_backward_triton_new_impl(
         stride_vz, stride_vh, stride_vn, stride_vk,
         batch,
         nheads_q,
+        dropout_p,
+        dropout_philox_seed,
+        dropout_philox_offset,
         num_blocks_m,
         num_blocks_n,
         cu_seqlens_q,
@@ -856,7 +881,8 @@ def attention_prefill_backward_triton_new_impl(
         USE_EXP2=use_exp2,
         num_warps=num_warps,
         num_stages=num_stages,
-        IS_VARLEN=is_varlen
+        IS_VARLEN=is_varlen,
+        ENABLE_DROPOUT=dropout_p >= 0.0,
     )
 
     if len(dq.shape) == 5:
@@ -883,6 +909,9 @@ def attention_prefill_backward_triton_impl(
     cu_seqlens_k,
     max_seqlen_q: int,
     max_seqlen_k: int,
+    dropout_p,
+    dropout_philox_seed,
+    dropout_philox_offset,
     use_exp2: bool,
     bwd_preprocessing_use_o: bool,
     use_new,
@@ -906,13 +935,22 @@ def attention_prefill_backward_triton_impl(
             cu_seqlens_k,
             max_seqlen_q,
             max_seqlen_k,
+            dropout_p,
+            dropout_philox_seed,
+            dropout_philox_offset,
             use_exp2,
             bwd_preprocessing_use_o,
         )
     else:
         # test pytorch impl
+        
+        dropout_mask_ = torch.zeros(max_seqlen_q, max_seqlen_k)
+        store_dropout_mask[(1, 1, 1)](MASK=dropout_mask_, philox_seed=dropout_philox_seed, philox_offset=dropout_philox_offset, dropout_p=dropout_p, m=max_seqlen_q, n=max_seqlen_k, stride=max_seqlen_k)
+        print('dropout_mask', dropout_mask_)
+        
+        
         dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
-            do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, bwd_preprocessing_use_o
+            do, q, k, v, o, softmax_lse, sm_scale, causal, dropout_mask_, dropout_p, layout, use_exp2, bwd_preprocessing_use_o
         )
         if dq is not None:
             dq.copy_(dq_ref)
