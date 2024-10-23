@@ -78,7 +78,7 @@ def rotary_kernel_splitk(
         x0_range = range_m[:, None]*stride_m + range_d_half[None, :]*stride_headdim                # BLOCK_M x 1st half of headdim (fast to load)
         x1_range = range_m[:, None]*stride_m + range_d_half[None, :]*stride_headdim + ro_dim_half  # BLOCK_M x 2nd half of headdim (fast to load)
 
-        x0_mask = (range_m < seqlen_x)[:, None] & (range_d_half < rotary_dim)[None, :]                  # Mask for the first half
+        x0_mask = (range_m < seqlen_x)[:, None] & (range_d_half < ro_dim_half)[None, :]                  # Mask for the first half
         x1_mask = (range_m < seqlen_x)[:, None] & (range_d_half + ro_dim_half < rotary_dim)[None, :]    # Mask for the second half
 
         range_m_cos_sin = range_m + seqlen_offset # offsets cos and sin based on current m position range and seqlen offset
@@ -99,6 +99,18 @@ def rotary_kernel_splitk(
         # Rotate corresponding elements in each half
         o0 = x0 * cos - x1 * sin
         o1 = x0 * sin + x1 * cos
+
+        o0 = tl.join(o0, o0)
+        o0 = tl.permute(o0, 0, 2, 1)
+        o0 = tl.reshape(o0, BLOCK_M, BLOCK_K)
+
+        o1 = tl.join(o1, o1)
+        o1 = tl.permute(o1, 0, 2, 1)
+        o1 = tl.reshape(o1, BLOCK_M, BLOCK_K)
+
+        out = tl.where(range_d[None, :] // ro_dim_half == 0, o0, o1)
+        out = tl.reshape(out, BLOCK_M, BLOCK_K)
+        return out
 
         # Concatenate the each dim_half to form full dim
         out = tl.join(o0, o1)
@@ -213,7 +225,7 @@ def rotary_kernel_splitk_transpose(
         x0_range = range_m[:, None]*stride_m + range_d_half[None, :]*stride_headdim                # BLOCK_M x 1st half of headdim (fast to load)
         x1_range = range_m[:, None]*stride_m + range_d_half[None, :]*stride_headdim + ro_dim_half  # BLOCK_M x 2nd half of headdim (fast to load)
 
-        x0_mask = (range_m < seqlen_x)[:, None] & (range_d_half < rotary_dim)[None, :]                  # Mask for the first half
+        x0_mask = (range_m < seqlen_x)[:, None] & (range_d_half < ro_dim_half)[None, :]                  # Mask for the first half
         x1_mask = (range_m < seqlen_x)[:, None] & (range_d_half + ro_dim_half < rotary_dim)[None, :]    # Mask for the second half
 
         range_m_cos_sin = range_m + seqlen_offset # offsets cos and sin based on current m position range and seqlen offset
@@ -235,8 +247,22 @@ def rotary_kernel_splitk_transpose(
         o0 = x0 * cos - x1 * sin
         o1 = x0 * sin + x1 * cos
 
+        o0 = tl.join(o0, o0)
+        o0 = tl.permute(o0, 0, 2, 1)
+        o0 = tl.reshape(o0, BLOCK_M, BLOCK_K)
+
+        o1 = tl.join(o1, o1)
+        o1 = tl.permute(o1, 0, 2, 1)
+        o1 = tl.reshape(o1, BLOCK_M, BLOCK_K)
+
+        out = tl.where(range_d[None, :] // ro_dim_half == 0, o0, o1)
+        
+        out = tl.trans(out)
+        
+        return out
+
         # Concatenate the each dim_half to form full dim
-        out = tl.join(o0, o1)
+        out = tl.join(o0, o1) # NOTE: fails for rotary_dim not pow of 2 because o0 and o1 have dim size BLOCK_K and we are appending 
         out = tl.permute(out, 0, 2, 1)
         out = tl.reshape(out, BLOCK_M, BLOCK_K)
 
