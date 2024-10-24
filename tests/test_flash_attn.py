@@ -1985,10 +1985,10 @@ def test_flash_attn_splitkv(
 # @pytest.mark.parametrize("seqlen_new_eq_seqlen_q", [True, False])
 @pytest.mark.parametrize("seqlen_new_eq_seqlen_q", [True])
 # @pytest.mark.parametrize("rotary_interleaved", [False, True])
-@pytest.mark.parametrize("rotary_interleaved", [False])
+@pytest.mark.parametrize("rotary_interleaved", [False, True])
 # @pytest.mark.parametrize("rotary_fraction", [0.0, 0.5, 1.0])
-# @pytest.mark.parametrize("rotary_fraction", [0.5, 1.0])
-@pytest.mark.parametrize("rotary_fraction", [1.0])
+@pytest.mark.parametrize("rotary_fraction", [0.5, 1.0])
+# @pytest.mark.parametrize("rotary_fraction", [1.0])
 # @pytest.mark.parametrize("paged_kv_block_size", [None, 256])
 # @pytest.mark.parametrize("paged_kv_block_size", [256, 512])
 @pytest.mark.parametrize("paged_kv_block_size", [None])
@@ -2078,6 +2078,9 @@ def test_flash_attn_kvcache(
     nheads = 1
     # rotary_dim must be a multiple of 16, and must be <= d
     rotary_dim = math.floor(int(rotary_fraction * d) / 16) * 16
+
+    # breakpoint()
+
     nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 3)
 
     # in case of GCA and nhead is < 3 skip since nheads_k (group size) will be 3 and you don't have enough heads for a single group
@@ -2102,8 +2105,8 @@ def test_flash_attn_kvcache(
     seqlen_new = seqlen_q if seqlen_new_eq_seqlen_q else torch.randint(1, seqlen_q + 1, (1,)).item()
     if new_kv:
         if DEBUG_ENABLED:
-            k = torch.ones(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype) + 1
-            v = torch.ones(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
+            k = torch.ones(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
+            v = torch.randn(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
         else:
             k = torch.randn(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
             v = torch.randn(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
@@ -2111,8 +2114,8 @@ def test_flash_attn_kvcache(
         k, v = None, None
     if paged_kv_block_size is None:
         if DEBUG_ENABLED:
-            k_cache = torch.ones(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype) + 1
-            v_cache = torch.ones(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
+            k_cache = torch.ones(batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype)
+            v_cache = torch.ones(batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype)
         else:
             k_cache = torch.randn(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
             v_cache = torch.randn(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
@@ -2281,6 +2284,13 @@ def test_flash_attn_kvcache(
         reorder_ops=True,
         key_leftpad=cache_leftpad,
     )
+
+    print('out')
+    print(out)
+
+    print('\nout_ref')
+    print(out_ref)
+
     print(f"Output max diff: {(out - out_ref).abs().max().item()}")
     print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
     print(f"Pytorch max diff: {(out_pt - out_ref).abs().max().item()}")
@@ -2307,8 +2317,8 @@ def test_flash_attn_kvcache(
                 "(b nblocks) block_size ... -> b (nblocks block_size) ...",
                 b=batch_size,
             )[:, :seqlen_k]
-        print('k_cache_select', k_cache_select)
-        print('k_cache_ref', k_cache_ref)
+        # print('k_cache_select', k_cache_select)
+        # print('k_cache_ref', k_cache_ref)
         assert torch.allclose(k_cache_select, k_cache_ref, rtol=1e-3, atol=1e-3)
         assert torch.equal(v_cache_select, v_cache_ref)
     mult = 3 if not alibi else 5
