@@ -25,9 +25,9 @@ fmha_bwd_traits get_ck_fmha_bwd_traits(const mask_info &mask,
                            false, // s_randval
                            deterministic,
                            true, // uses_ext_asm
-                           false, // is_v3_atomic_fp32
-                           false, // is_v3_spec
-                           2}; // how_v3_bf16_cvt 0:RTNE; 1:RTNA; 2:RTZ
+                           true, // is_v3_atomic_fp32
+                           true, // is_v3_spec
+                           1}; // how_v3_bf16_cvt 0:RTNE; 1:RTNA; 2:RTZ
 }
 
 fmha_bwd_args get_ck_fmha_bwd_args(const mask_info &mask,
@@ -195,7 +195,7 @@ fmha_bwd_args get_ck_fmha_bwd_args(const mask_info &mask,
                          static_cast<ck_tile::index_t>(mask.type),
                          p_dropout,
                          p_undrop,
-                         {drop_seed, drop_offset}};
+                         std::make_pair(drop_seed, drop_offset)};
 }
 
 std::vector<at::Tensor>
