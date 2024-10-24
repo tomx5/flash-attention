@@ -48,6 +48,8 @@ def rotary_kernel_splitk(
 
     # Misc
     INTERLEAVED: tl.constexpr,
+    CONJUGATE: tl.constexpr,
+    TRANSPOSE: tl.constexpr,
 
     # Meta-parameters
     BLOCK_M: tl.constexpr,     # block size to access chunks of tokens (# of tokens simultaneously)
@@ -96,8 +98,8 @@ def rotary_kernel_splitk(
         sin = tl.load(
             SIN, mask=(range_m[:, None] < seqlen_x + seqlen_offset) & (range_d_half_duplicate[None, :] < ro_dim_half), other=0.0
         ).to(tl.float32)
-        # if CONJUGATE:
-        #     sin = -sin
+        if CONJUGATE:
+            sin = -sin
         
         x0 = tl.load(x_ptr + x0_range, mask=x0_mask).to(tl.float32)
         x1 = tl.load(x_ptr + x1_range, mask=x1_mask).to(tl.float32)
@@ -110,6 +112,10 @@ def rotary_kernel_splitk(
 
         # for all dim not in rotary_dim, leave untouched
         out = tl.where(range_d[None, :] < rotary_dim, out, x)
+
+        # transpose the rotated vector 
+        if TRANSPOSE:
+            out = tl.trans(out)
 
         return out
         
@@ -141,8 +147,8 @@ def rotary_kernel_splitk(
             mask=(range_m[:, None] < seqlen_x) & (range_d_repeat[None, :] < ro_dim_half),
             other=0.0,
         ).to(tl.float32)
-        # if CONJUGATE:
-        #     sin = -sin
+        if CONJUGATE:
+            sin = -sin
 
         x0 = tl.load(x_ptr + x0_range, mask=x0_mask)
         x1 = tl.load(x_ptr + x1_range, mask=x1_mask)
@@ -155,199 +161,10 @@ def rotary_kernel_splitk(
         # for all dim not in rotary_dim, leave untouched
         out = tl.where(range_d[None, :] < rotary_dim, out, x)
 
-        return out
+        # transpose the rotated vector 
+        if TRANSPOSE:
+            out = tl.trans(out)
 
-@triton.jit
-def rotary_kernel_splitk_transpose(
-    # Dimensions of X
-    X,              # tensor being rotated. Has shape (batch (z), seqlen (s), group (g), head (h), head_dim (d))
-    seqlen_x,       # seqlen of the x dim. shape is (batch (z), )
-    head_dim,
-    rotary_dim,     # size of embedding space we end up rotating
-
-    # COS/SIN and Offsetting Into It
-    COS,            # tensor of shape (seqlen (m), ro_dim // 2)
-    SIN,            # tensor of shape (seqlen (m), ro_dim // 2)
-    SEQLEN_OFFSET,  # we use this as an offset into COS and SIN to apply the correct rotation
-    SEQLEN_OFFSET_IS_TENSOR: tl.constexpr, # if seqlen_offset is a tensor it has shape (num_batch, )
-    
-    # PID Offsets
-    batch_pid: tl.constexpr,      # pid for batch
-    start_m: tl.constexpr,        # the token idx the current M_BLOCK starts at.
-    group_pid: tl.constexpr,      # pid for group
-    head_pid: tl.constexpr,       # pid to access head
-
-    # Strides
-    stride_batch: tl.constexpr,
-    stride_m: tl.constexpr,
-    stride_group: tl.constexpr,
-    stride_head: tl.constexpr,
-    stride_headdim: tl.constexpr,
-
-    # Misc
-    INTERLEAVED: tl.constexpr,
-
-    # Meta-parameters
-    BLOCK_M: tl.constexpr,     # block size to access chunks of tokens (# of tokens simultaneously)
-    BLOCK_K: tl.constexpr,     # block size to access chunks of headdim (# of dimensions processed)
-):
-    """
-    Note: 
-    - for K in splitk let BLOCK_M = BLOCK_N, and start_m=start_n
-    """
-    out = rotary_kernel_splitk(X,
-                            seqlen_x,
-                            head_dim,
-                            rotary_dim,
-                            COS,
-                            SIN,
-                            SEQLEN_OFFSET,
-                            SEQLEN_OFFSET_IS_TENSOR,
-                            batch_pid,
-                            start_m,
-                            group_pid,
-                            head_pid,
-                            stride_batch, stride_m, stride_group, stride_head, stride_headdim,
-                            INTERLEAVED,
-                            BLOCK_M, BLOCK_K)
-
-    out = tl.trans(out)
-
-    return out
-
-@triton.jit
-def rotary_kernel(
-    X,
-    COS,
-    SIN,
-    CU_SEQLENS,
-    SEQLEN_OFFSETS,  # this could be int or a pointer
-    # Matrix dimensions
-    seqlen,
-    rotary_dim,
-    seqlen_ro,
-    # pid offsets
-    start_m,
-    off_batch,   # batch
-    off_head,    # head
-    off_group,   # group (gca / mqa)
-    splitk_idx,
-    # strides
-    stride_x_batch,
-    stride_x_seqlen,
-    stride_x_group,
-    stride_x_nheads,
-    stride_x_splitk,
-    stride_x_headdim,
-    # Meta-parameters
-    BLOCK_K: tl.constexpr,
-    IS_SEQLEN_OFFSETS_TENSOR: tl.constexpr,
-    IS_VARLEN: tl.constexpr,
-    INTERLEAVED: tl.constexpr,
-    CONJUGATE: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-):
-    pid_m = start_m
-    pid_batch = off_batch
-    pid_group = off_group
-    pid_head = off_head
-    pid_splitk = splitk_idx
-    
-    rotary_dim_half = rotary_dim // 2
-
-    if not IS_VARLEN:
-        X = X + pid_batch * stride_x_batch + pid_group * stride_x_group + pid_head * stride_x_nheads + pid_splitk * stride_x_splitk
-    else:
-        start_idx = tl.load(CU_SEQLENS + pid_batch)
-        seqlen = tl.load(CU_SEQLENS + pid_batch + 1) - start_idx
-        X = X + start_idx * stride_x_seqlen + pid_group * stride_x_group + pid_head * stride_x_nheads + pid_splitk * stride_x_splitk
-
-    # pdb.set_trace()
-
-    if pid_m * BLOCK_M >= seqlen:
-        return
-    rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    if not IS_SEQLEN_OFFSETS_TENSOR:
-        rm_cs = rm + SEQLEN_OFFSETS
-    else:
-        rm_cs = rm + tl.load(SEQLEN_OFFSETS + pid_batch)
-
-    rk = tl.arange(0, BLOCK_K)
-    rk_half = tl.arange(0, BLOCK_K // 2)
-
-    if not INTERLEAVED:
-        # Load the 1st and 2nd halves of X, do calculation, then store to 1st and 2nd halves of OUT
-        X = X + (rm[:, None] * stride_x_seqlen + rk_half[None, :] * stride_x_headdim) # this needs to change
-        COS = COS + (rm_cs[:, None] * rotary_dim_half + rk_half[None, :])
-        SIN = SIN + (rm_cs[:, None] * rotary_dim_half + rk_half[None, :])
-        cos = tl.load(
-            COS, mask=(rm_cs[:, None] < seqlen_ro) & (rk_half[None, :] < rotary_dim_half), other=1.0
-        ).to(tl.float32)
-        sin = tl.load(
-            SIN, mask=(rm_cs[:, None] < seqlen_ro) & (rk_half[None, :] < rotary_dim_half), other=0.0
-        ).to(tl.float32)
-        # first half of x
-        x0 = tl.load(
-            X, mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half), other=0.0
-        ).to(tl.float32)
-        # second half of x
-        x1 = tl.load(
-            X + rotary_dim_half * stride_x_headdim,
-            mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half),
-            other=0.0,
-        ).to(tl.float32)
-        if CONJUGATE:
-            sin = -sin
-        # pdb.set_trace()
-        o0 = x0 * cos - x1 * sin
-        o1 = x0 * sin + x1 * cos
-        print("o0", o0)
-        print("o1", o1)
-        # write back result
-        # OUT = OUT + (rm[:, None] * stride_out_seqlen + rk_half[None, :] * stride_out_headdim)
-        # tl.store(OUT, o0, mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half))
-        # tl.store(
-        #     OUT + rotary_dim_half * stride_out_headdim,
-        #     o1,
-        #     mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half),
-        # )
-        out = tl.cat(o0, o1) # both need to be 1D?
-        return out
-    else:
-        # We don't want to load X[0, 2, 4, ...] and X[1, 3, 5, ...] separately since both are slow.
-        # Instead, we load x0 = X[0, 1, 2, 3, ...] and x1 = X[1, 0, 3, 2, ...].
-        # Loading x0 will be fast but x1 will be slow.
-        # Then we load cos = COS[0, 0, 1, 1, ...] and sin = SIN[0, 0, 1, 1, ...].
-        # Then we do the calculation and use tl.where to pick put the right outputs for the even
-        # and for the odd indices.
-        rk_swap = rk + ((rk + 1) % 2) * 2 - 1  # 1, 0, 3, 2, 5, 4, ...
-        rk_repeat = tl.arange(0, BLOCK_K) // 2
-        # these need to change
-        X0 = X + (rm[:, None] * stride_x_seqlen + rk[None, :] * stride_x_headdim)
-        X1 = X + (rm[:, None] * stride_x_seqlen + rk_swap[None, :] * stride_x_headdim)
-        COS = COS + (rm_cs[:, None] * rotary_dim_half + rk_repeat[None, :])
-        SIN = SIN + (rm_cs[:, None] * rotary_dim_half + rk_repeat[None, :])
-        cos = tl.load(
-            COS,
-            mask=(rm_cs[:, None] < seqlen_ro) & (rk_repeat[None, :] < rotary_dim_half),
-            other=1.0,
-        ).to(tl.float32)
-        sin = tl.load(
-            SIN,
-            mask=(rm_cs[:, None] < seqlen_ro) & (rk_repeat[None, :] < rotary_dim_half),
-            other=0.0,
-        ).to(tl.float32)
-        x0 = tl.load(X0, mask=(rm[:, None] < seqlen) & (rk[None, :] < rotary_dim), other=0.0).to(
-            tl.float32
-        )
-        x1 = tl.load(
-            X1, mask=(rm[:, None] < seqlen) & (rk_swap[None, :] < rotary_dim), other=0.0
-        ).to(tl.float32)
-        if CONJUGATE:
-            sin = -sin
-        x0_cos = x0 * cos
-        x1_sin = x1 * sin
-        out = tl.where(rk[None, :] % 2 == 0, x0_cos - x1_sin, x0_cos + x1_sin)
         return out
 
 @triton.jit
@@ -506,7 +323,7 @@ def _fwd_kernel_splitK(
             # apply rotary to k here
             if USE_ROTARY:
                 # pdb.set_trace()
-                k_new_block = rotary_kernel_splitk_transpose(
+                k_new_block = rotary_kernel_splitk(
                     X=K_new,
                     seqlen_x=N_CTX_NEW,
                     head_dim=BLOCK_DMODEL,
@@ -529,6 +346,8 @@ def _fwd_kernel_splitK(
                     stride_headdim=stride_kd,
 
                     INTERLEAVED=Rotary_interleaved,
+                    CONJUGATE=Rotary_conjugate,
+                    TRANSPOSE=True,
 
                     BLOCK_M=BLOCK_N,
                     BLOCK_K=BLOCK_DMODEL
@@ -642,6 +461,8 @@ def _fwd_kernel_splitK(
                             stride_headdim=stride_kd,
 
                             INTERLEAVED=Rotary_interleaved,
+                            CONJUGATE=Rotary_conjugate,
+                            TRANSPOSE=False,
 
                             BLOCK_M=BLOCK_M,
                             BLOCK_K=BLOCK_DMODEL
