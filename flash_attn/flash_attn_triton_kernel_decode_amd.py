@@ -67,7 +67,6 @@ def rotary_kernel_splitk(
     x_mask = (range_m < seqlen_x)[:, None] & (range_d < rotary_dim)[None, :]
 
     ro_dim_half = rotary_dim // 2       # length of cos/sin
-    range_d_half = tl.arange(0, BLOCK_K // 2)
 
     if SEQLEN_OFFSET_IS_TENSOR:
         seqlen_offset = tl.load(SEQLEN_OFFSET + batch_pid) # a tensor
