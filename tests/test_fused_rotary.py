@@ -12,8 +12,8 @@ def rotary_kernel_splitk(
     # Dimensions of X
     X,              # tensor being rotated. Has shape (batch (z), seqlen (s), group (g), head (h), head_dim (d))
     seqlen_x,       # seqlen of the x dim. shape is (batch (z), )
-    head_dim: tl.constexpr, # full head dim size
-    rotary_dim: tl.constexpr,     # size of embedding space we end up rotating
+    head_dim,
+    rotary_dim,     # size of embedding space we end up rotating
 
     # COS/SIN and Offsetting Into It
     COS,            # tensor of shape (seqlen (m), ro_dim // 2)
@@ -36,6 +36,8 @@ def rotary_kernel_splitk(
 
     # Misc
     INTERLEAVED: tl.constexpr,
+    CONJUGATE: tl.constexpr,
+    TRANSPOSE: tl.constexpr,
 
     # Meta-parameters
     BLOCK_M: tl.constexpr,     # block size to access chunks of tokens (# of tokens simultaneously)
@@ -53,34 +55,23 @@ def rotary_kernel_splitk(
     x_mask = (range_m < seqlen_x)[:, None] & (range_d < rotary_dim)[None, :]
 
     ro_dim_half = rotary_dim // 2       # length of cos/sin
-    range_d_half = tl.arange(0, BLOCK_K // 2)
-
-    # COS/SIN Range
-    # cs_range = (SEQLEN_OFFSET + tl.arange(0, BLOCK_M))[:, None]*(ro_dim_half) + tl.arange(0, ro_dim_half)
 
     if SEQLEN_OFFSET_IS_TENSOR:
         seqlen_offset = tl.load(SEQLEN_OFFSET + batch_pid) # a tensor
     else:
         seqlen_offset = SEQLEN_OFFSET # an int
 
-    
     # load full x (puts values in cache)
     x_range = range_m[:, None]*stride_m + range_d[None, :]
     x_mask = (range_m < seqlen_x)[:, None] & (range_d < head_dim)[None, :]
     x = tl.load(x_ptr + x_range, mask=x_mask)
+
 
     if not INTERLEAVED:
         range_d_half_duplicate = range_d % (rotary_dim // 2)
 
         x0_range = range_m[:, None]*stride_m + range_d_half_duplicate[None, :]*stride_headdim                # BLOCK_M x 1st half of headdim (fast to load)
         x1_range = range_m[:, None]*stride_m + range_d_half_duplicate[None, :]*stride_headdim + ro_dim_half  # BLOCK_M x 2nd half of headdim (fast to load)
-
-        
-        # print('range_m', range_m)
-        # print('x0_range', x0_range)
-        # print('x1_range', x1_range)
-
-        # print('range_d_half_duplicate', range_d_half_duplicate)
 
         x0_mask = (range_m < seqlen_x)[:, None] & (range_d_half_duplicate < rotary_dim)[None, :]                  # Mask for the first half
         x1_mask = (range_m < seqlen_x)[:, None] & (range_d_half_duplicate + ro_dim_half < rotary_dim)[None, :]    # Mask for the second half
@@ -94,40 +85,24 @@ def rotary_kernel_splitk(
         sin = tl.load(
             SIN, mask=(range_m[:, None] < seqlen_x + seqlen_offset) & (range_d_half_duplicate[None, :] < ro_dim_half), other=0.0
         ).to(tl.float32)
-        # if CONJUGATE:
-        #     sin = -sin
+        if CONJUGATE:
+            sin = -sin
         
         x0 = tl.load(x_ptr + x0_range, mask=x0_mask).to(tl.float32)
         x1 = tl.load(x_ptr + x1_range, mask=x1_mask).to(tl.float32)
-
-        # print('x0', x0)
-        # print('x1', x1)
-
-        # print('sin', sin)
-        # print('cos', cos)
 
         # Rotate corresponding elements in each half
         o0 = x0 * cos - x1 * sin
         o1 = x0 * sin + x1 * cos
 
-        # o0 = tl.join(o0, o0)
-        # o0 = tl.permute(o0, 0, 2, 1)
-        # o0 = tl.reshape(o0, BLOCK_M, BLOCK_K)
-
-        # o1 = tl.join(o1, o1)
-        # o1 = tl.permute(o1, 0, 2, 1)
-        # o1 = tl.reshape(o1, BLOCK_M, BLOCK_K)
-
-        # print('o0', o0)
-        # print('o1', o1)
-
-        # print('ro_dim_half: ', ro_dim_half)
-        # print('range_d: ', range_d[None, :])
-        # print('bool', range_d[None, :] // ro_dim_half == 0)
         out = tl.where(range_d[None, :] // ro_dim_half == 0, o0, o1)
+
+        # for all dim not in rotary_dim, leave untouched
         out = tl.where(range_d[None, :] < rotary_dim, out, x)
 
-        pdb.set_trace()
+        # transpose the rotated vector 
+        if TRANSPOSE:
+            out = tl.trans(out)
 
         return out
         
@@ -159,8 +134,8 @@ def rotary_kernel_splitk(
             mask=(range_m[:, None] < seqlen_x) & (range_d_repeat[None, :] < ro_dim_half),
             other=0.0,
         ).to(tl.float32)
-        # if CONJUGATE:
-        #     sin = -sin
+        if CONJUGATE:
+            sin = -sin
 
         x0 = tl.load(x_ptr + x0_range, mask=x0_mask)
         x1 = tl.load(x_ptr + x1_range, mask=x1_mask)
@@ -171,9 +146,11 @@ def rotary_kernel_splitk(
         out = tl.where(range_d[None, :] % 2 == 0, x0_cos - x1_sin, x0_cos + x1_sin)
 
         # for all dim not in rotary_dim, leave untouched
-        out - tl.where(range_d[None, :] < rotary_dim, out, x)
+        out = tl.where(range_d[None, :] < rotary_dim, out, x)
 
-        pdb.set_trace()
+        # transpose the rotated vector 
+        if TRANSPOSE:
+            out = tl.trans(out)
 
         return out
 
@@ -206,6 +183,8 @@ def main(
 
     # Misc
     INTERLEAVED: tl.constexpr,
+    CONJUGATE: tl.constexpr,
+    TRANSPOSE: tl.constexpr,
 
     # Meta-parameters
     BLOCK_M: tl.constexpr,     # block size to access chunks of tokens (# of tokens simultaneously)
@@ -240,14 +219,13 @@ def main(
                             stride_group=stride_group,
                             stride_head=stride_head,
                             stride_headdim=stride_headdim,
-                            INTERLEAVED=False,
+                            INTERLEAVED=INTERLEAVED,
+                            CONJUGATE=CONJUGATE,
+                            TRANSPOSE=TRANSPOSE,
                             BLOCK_M=BLOCK_M,          
                             BLOCK_K=BLOCK_K,
                             )
-        # pdb.set_trace()
         print(x)
-        # x_ptrs = X + (tl.arange(0, BLOCK_M))
-        # tl.store(X, x, )
 
 
 def test_rotary_kernel_split():
@@ -343,6 +321,8 @@ def test_rotary_kernel_split():
                             stride_head=X.stride(-2),
                             stride_headdim=X.stride(-1),
                             INTERLEAVED=True,
+                            CONJUGATE=False,
+                            TRANSPOSE=False,
                             BLOCK_M=BLOCK_N,          
                             BLOCK_K=BLOCK_K,
                             N_BLOCKS_PER_SPLIT=N_BLOCKS_PER_SPLIT
