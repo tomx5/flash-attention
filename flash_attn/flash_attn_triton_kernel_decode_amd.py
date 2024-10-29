@@ -366,6 +366,8 @@ def _fwd_kernel_splitK(
         # Copy new Values
         vnew_base = V_new + v_head_idx * stride_vn_h + off_z * stride_vn_z + off_g_q * stride_vn_g
         for i in range(0, N_CTX_NEW, BLOCK_N):
+
+            # import pdb; pdb.set_trace()
             # Load from V_new
             v_new_block = tl.load(
                 vnew_base +
@@ -427,6 +429,8 @@ def _fwd_kernel_splitK(
     log2_e = 1.44269504
     qk_scale = sm_scale * log2_e
 
+    # import pdb; pdb.set_trace()
+
     # load q: it will stay in SRAM throughout
     q = tl.load(  # noqa: F821
         tl.advance(Q_block_ptr, (0, 0)),
@@ -437,35 +441,36 @@ def _fwd_kernel_splitK(
         q = tl.where(d_mask[None, :], q, 0.0)
 
     # pdb.set_trace()
-    q = rotary_kernel_splitk(
-                            X=Q,
-                            seqlen_x=N_CTX_Q,
-                            head_dim=BLOCK_DMODEL,
-                            rotary_dim=Rotary_dim,
+    if USE_ROTARY:
+        q = rotary_kernel_splitk(
+                                X=Q,
+                                seqlen_x=N_CTX_Q,
+                                head_dim=BLOCK_DMODEL,
+                                rotary_dim=Rotary_dim,
 
-                            COS=Rotary_cos,
-                            SIN=Rotary_sin,
-                            SEQLEN_OFFSET=Cache_seqlens,
-                            SEQLEN_OFFSET_IS_TENSOR=IS_SEQLEN_OFFSETS_TENSOR,
+                                COS=Rotary_cos,
+                                SIN=Rotary_sin,
+                                SEQLEN_OFFSET=Cache_seqlens,
+                                SEQLEN_OFFSET_IS_TENSOR=IS_SEQLEN_OFFSETS_TENSOR,
 
-                            batch_pid=off_z,
-                            start_m=start_m*BLOCK_M,
-                            group_pid=off_g_q,
-                            head_pid=off_h_q,
+                                batch_pid=off_z,
+                                start_m=start_m*BLOCK_M,
+                                group_pid=off_g_q,
+                                head_pid=off_h_q,
 
-                            stride_batch= (stride_kz if not IS_VARLEN else 0),  # batch_strides if not varlen else 0
-                            stride_m=stride_kn,
-                            stride_group=stride_kg,
-                            stride_head=stride_kh,
-                            stride_headdim=stride_kd,
+                                stride_batch= (stride_kz if not IS_VARLEN else 0),  # batch_strides if not varlen else 0
+                                stride_m=stride_kn,
+                                stride_group=stride_kg,
+                                stride_head=stride_kh,
+                                stride_headdim=stride_kd,
 
-                            INTERLEAVED=Rotary_interleaved,
-                            CONJUGATE=Rotary_conjugate,
-                            TRANSPOSE=False,
+                                INTERLEAVED=Rotary_interleaved,
+                                CONJUGATE=Rotary_conjugate,
+                                TRANSPOSE=False,
 
-                            BLOCK_M=BLOCK_M,
-                            BLOCK_K=BLOCK_DMODEL
-                            )
+                                BLOCK_M=BLOCK_M,
+                                BLOCK_K=BLOCK_DMODEL
+                                )
     # pdb.set_trace()
 
     
@@ -939,6 +944,8 @@ class _attention(torch.autograd.Function):
             if input_metadata.rotary_dim <= 32
             else (64 if input_metadata.rotary_dim <= 64 else (128 if input_metadata.rotary_dim <= 128 else 256))
         )
+
+        # import pdb; pdb.set_trace()
 
         # TODO: enable quantization
         _fwd_kernel_splitK[grid](

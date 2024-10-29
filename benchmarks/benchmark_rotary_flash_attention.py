@@ -19,6 +19,26 @@ from flash_attn.bert_padding import pad_input, unpad_input
 from flash_attn.flash_attn_interface import _get_block_size_n
 from flash_attn.layers.rotary import apply_rotary_emb
 
+# Install the newest triton version with
+# pip install "git+https://github.com/openai/triton.git#egg=triton&subdirectory=python"
+import pickle
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from einops import rearrange, repeat
+
+from flash_attn.utils.benchmark import benchmark_all, benchmark_forward, benchmark_backward
+from flash_attn.utils.benchmark import benchmark_fwd_bwd, benchmark_combined
+
+from flash_attn import flash_attn_with_kvcache
+# from tests.test_flash_attn import attention_ref, _generate_block_kvcache, attn_bias_from_alibi_slopes
+
+from flash_attn.layers.rotary import apply_rotary_emb
+import pytest
+
+
 
 # Test ROCM Triton Backend
 USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_USE_TRITON_ROCM", "FALSE") == "TRUE"
@@ -2763,3 +2783,591 @@ def test_flash_attn_varlen_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, caus
             assert torch.equal(dv, dv0)
             assert torch.equal(dk, dk0)
             assert torch.equal(dq, dq0)
+
+def flops(batch, seqlen, headdim, nheads, causal, mode="fwd"):
+    assert mode in ["fwd", "bwd", "fwd_bwd"]
+    f = 4 * batch * seqlen**2 * nheads * headdim // (2 if causal else 1)
+    return f if mode == "fwd" else (2.5 * f if mode == "bwd" else 3.5 * f)
+
+def efficiency(flop, time):
+    return (flop / time / 10**12) if not math.isnan(time) else 0.0
+
+def setup(
+    seqlen_q,
+    seqlen_k,
+    d,
+    has_batch_idx,
+    has_leftpad,
+    paged_kv_block_size,
+    rotary_fraction,
+    rotary_interleaved,
+    seqlen_new_eq_seqlen_q,
+    causal,
+    local,
+    alibi,
+    new_kv,
+    mha_type,
+    num_splits,
+    dtype,
+):
+    device = "cuda"
+    # set seed
+    torch.random.manual_seed(0)
+    batch_size = 1
+    batch_size_cache = batch_size if not has_batch_idx else batch_size * 2
+    nheads = 1
+    # rotary_dim must be a multiple of 16, and must be <= d
+    rotary_dim = math.floor(int(rotary_fraction * d) / 16) * 16
+
+    # breakpoint()
+
+    nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 3)
+
+    # in case of GCA and nhead is < 3 skip since nheads_k (group size) will be 3 and you don't have enough heads for a single group
+    if mha_type == "gqa" and nheads < 3:
+        pytest.skip()
+
+    assert nheads % nheads_k == 0, "num heads cannot be evenly split into groups"
+    window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
+
+    DEBUG_ENABLED = False
+
+    assert rotary_dim % 16 == 0, "Rotary dim must be a multiple of 16"
+    assert d >= 16, "Rotary dim must be a multiple of 16 and thus d must be at least 16"
+
+    if DEBUG_ENABLED:
+        q = torch.ones(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype)
+    else:
+        q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype)
+
+    # breakpoint()
+
+    seqlen_new = seqlen_q if seqlen_new_eq_seqlen_q else torch.randint(1, seqlen_q + 1, (1,)).item()
+    if new_kv:
+        if DEBUG_ENABLED:
+            k = torch.ones(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
+            v = torch.randn(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
+        else:
+            k = torch.randn(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
+            v = torch.randn(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
+    else:
+        k, v = None, None
+    if paged_kv_block_size is None:
+        if DEBUG_ENABLED:
+            k_cache = torch.ones(batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype)
+            v_cache = torch.ones(batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype)
+        else:
+            k_cache = torch.randn(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
+            v_cache = torch.randn(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
+        block_table = None
+    else:
+        (
+            k_cache,
+            v_cache,
+            block_table,
+            k_cache_paged,
+            v_cache_paged,
+            num_blocks,
+        ) = _generate_block_kvcache(
+            seqlen_k, paged_kv_block_size, batch_size, nheads_k, d, device, dtype
+        )
+    cache_seqlens = torch.randint(
+        0 if new_kv else 1,
+        # If we don't use seqlen_q in the case of causal and rotary, cos/sin won't be long enough
+        (
+            (seqlen_k - (seqlen_q if (causal or local) and rotary_dim > 1 else seqlen_new) + 1)
+            if new_kv
+            else (seqlen_k + 1)
+        ),
+        (batch_size,),
+        dtype=torch.int32,
+        device=device,
+    )
+    if has_leftpad:
+        cache_leftpad = torch.cat([torch.randint(0, cache_seqlens[i].item(), (1,), dtype=torch.int32, device=device)
+                                   if cache_seqlens[i].item() > 0 else torch.zeros(1, dtype=torch.int32, device=device)
+                                   for i in range(batch_size)])
+    else:
+        cache_leftpad = None
+    arange = rearrange(torch.arange(seqlen_k, device=device), "s -> 1 s")
+    cache_seqlens_expanded = rearrange(cache_seqlens, "b -> b 1")
+    key_padding_mask = arange < cache_seqlens_expanded + (seqlen_new if new_kv else 0)
+    if has_leftpad:
+        key_padding_mask = torch.logical_and(
+            key_padding_mask, arange >= cache_leftpad.unsqueeze(-1).expand(-1, seqlen_k)
+        )
+    if has_batch_idx:
+        cache_batch_idx = torch.randperm(batch_size_cache, dtype=torch.int32, device=device)[
+            :batch_size
+        ]
+    else:
+        cache_batch_idx = None
+    if alibi:
+        alibi_slopes = torch.rand(batch_size, nheads, device=device, dtype=torch.float32) * 0.3
+        attn_bias = attn_bias_from_alibi_slopes(
+            alibi_slopes, seqlen_q, seqlen_k, None, key_padding_mask, causal=causal, key_leftpad=cache_leftpad
+        )
+    else:
+        alibi_slopes, attn_bias = None, None
+    # cache_seqlens = torch.tensor([64], dtype=torch.int32, device=device)
+    if rotary_dim > 0:
+        angle = (
+            torch.rand(
+                seqlen_k if paged_kv_block_size is None else num_blocks * paged_kv_block_size,
+                rotary_dim // 2,
+                device=device,
+            )
+            * 2
+            * math.pi
+        )
+        cos = torch.cos(angle).to(dtype=dtype)
+        sin = torch.sin(angle).to(dtype=dtype)
+        if causal or local:
+            q_ro = apply_rotary_emb(
+                q, cos, sin, seqlen_offsets=cache_seqlens, interleaved=rotary_interleaved
+            )
+        else:
+            q_ro = rearrange(
+                apply_rotary_emb(
+                    rearrange(q, "b s h d -> b 1 (s h) d"),
+                    cos,
+                    sin,
+                    seqlen_offsets=cache_seqlens,
+                    interleaved=rotary_interleaved,
+                ),
+                "b 1 (s h) d -> b s h d",
+                s=seqlen_q,
+            )
+        # q_ro = q
+        k_ro = apply_rotary_emb(
+            k, cos, sin, seqlen_offsets=cache_seqlens, interleaved=rotary_interleaved
+        )
+        # breakpoint()
+    else:
+        cos, sin = None, None
+        q_ro, k_ro = q, k
+    # k_cache[:, 64:] = -1
+    k_cache_ref = (
+        k_cache if not has_batch_idx else k_cache[cache_batch_idx.to(dtype=torch.long)]
+    ).clone()
+    v_cache_ref = (
+        v_cache if not has_batch_idx else v_cache[cache_batch_idx.to(dtype=torch.long)]
+    ).clone()
+    if new_kv:
+        update_mask = torch.logical_and(
+            cache_seqlens_expanded <= arange, arange < cache_seqlens_expanded + seqlen_new
+        )
+        k_cache_ref[update_mask] = rearrange(k_ro, "b s ... -> (b s) ...")
+        v_cache_ref[update_mask] = rearrange(v, "b s ... -> (b s) ...")
+    k_cache_rep = repeat(k_cache_ref, "b s h d -> b s (h g) d", g=nheads // nheads_k)
+    v_cache_rep = repeat(v_cache_ref, "b s h d -> b s (h g) d", g=nheads // nheads_k)
+
+    return q, k, k_cache, v_cache, v, d, batch_size, nheads_k, seqlen_q, cache_seqlens, cache_batch_idx, cache_leftpad, block_table, cos, sin, rotary_dim, rotary_interleaved, causal, local, window_size, alibi_slopes, num_splits
+
+def get_cos_sin(d, rotary_fraction, seqlen, device, dtype):
+    # rotary_dim must be a multiple of 16, and must be <= d
+    rotary_dim = math.floor(int(rotary_fraction * d) / 16) * 16
+    if rotary_dim > 0:
+        angle = (
+            torch.rand(
+                seqlen,
+                rotary_dim // 2,
+                device=device,
+            )
+            * 2
+            * math.pi
+        )
+        cos = torch.cos(angle).to(dtype=dtype)
+        sin = torch.sin(angle).to(dtype=dtype)
+    else:
+        cos, sin = None, None
+    return cos, sin, rotary_dim
+
+def apply_rotary_benchmark(
+    q,
+    k,
+    cache_seqlens,
+    seqlen_q,
+    seqlen_k,
+    paged_kv_block_size,
+    rotary_dim,
+    rotary_interleaved,
+    causal,
+    local,
+    num_blocks,
+    device,
+    dtype,
+):
+    # print(rotary_dim, q.shape, seqlen_k)
+    # breakpoint()
+    if rotary_dim > 0:
+        angle = (
+            torch.rand(
+                seqlen_k if paged_kv_block_size is None else num_blocks * paged_kv_block_size,
+                rotary_dim // 2,
+                device=device,
+            )
+            * 2
+            * math.pi
+        )
+        cos = torch.cos(angle).to(dtype=dtype)
+        sin = torch.sin(angle).to(dtype=dtype)
+        # print(cos.shape, q.shape)
+        if causal or local:
+            q_ro = apply_rotary_emb(
+                q, cos, sin, seqlen_offsets=cache_seqlens, interleaved=rotary_interleaved
+            )
+        else:
+            q_ro = rearrange(
+                apply_rotary_emb(
+                    rearrange(q, "b s h d -> b 1 (s h) d"),
+                    cos,
+                    sin,
+                    seqlen_offsets=cache_seqlens,
+                    interleaved=rotary_interleaved,
+                ),
+                "b 1 (s h) d -> b s h d",
+                s=seqlen_q,
+            )
+        # q_ro = q
+        k_ro = apply_rotary_emb(
+            k, cos, sin, seqlen_offsets=cache_seqlens, interleaved=rotary_interleaved
+        )
+        # breakpoint()
+    else:
+        cos, sin = None, None
+        q_ro, k_ro = q, k
+    
+    return q, k, q_ro, k_ro, cos, sin
+
+# def attention_rotary_pytorch(
+#     q,
+#     k,
+#     v,
+#     query_padding_mask=None,
+#     key_padding_mask=None,
+#     attn_bias=None,
+#     dropout_p=0.0,
+#     dropout_mask=None,
+#     causal=False,
+#     window_size=(-1, -1),  # -1 means infinite window size
+#     softcap=0.0,
+#     upcast=True,
+#     reorder_ops=False,
+#     key_leftpad=None,
+# ):
+#     """
+#     Arguments:
+#         qkv: (batch_size, seqlen, 3, nheads, head_dim)
+#         dropout_p: float
+#     Output:
+#         output: (batch_size, seqlen, nheads, head_dim)
+#     """
+#     batch_size, seqlen_new, _, nheads, d = qkv.shape
+#     q, k, v = qkv.unbind(dim=2)
+
+#     cache_seqlens = setup()
+
+#     q, k, q_ro, k_ro = apply_rotary(q, k, cache_seqlens, seqlen_new, seqlen_new, False, rotary_dim, rotary_interleaved, causal, local, 0, q.device, q.dtype)
+
+#     return attention_ref(q_ro, k_ro, v, query_padding_mask, key_padding_mask, attn_bias, dropout_p, dropout_mask, causal, window_size, softcap, upcast, reorder_ops, key_leftpad)
+
+def attention_rotary_triton(
+    q,
+    k_cache,
+    v_cache,
+    k,
+    v,
+    d,
+    batch_size,
+    nheads,
+    seqlen_new,
+    cache_seqlens,
+    cache_batch_idx,
+    cache_leftpad,
+    block_table,
+    cos,
+    sin,
+    rotary_dim,
+    rotary_interleaved,
+    causal,
+    local,
+    window_size,
+    alibi_slopes,
+    num_splits
+):
+    q, k, q_ro, k_ro, _, _ = apply_rotary_benchmark(q, k, cache_seqlens, seqlen_new, seqlen_new, None, rotary_dim, rotary_interleaved, causal, local, 0, q.device, q.dtype)
+
+    out = flash_attn_with_kvcache(
+        q_ro,
+        k_cache,
+        v_cache,
+        k_ro,
+        v,
+        rotary_cos=None,    # set to None since rotation has already been applied
+        rotary_sin=None,    # set to None since rotation has already been applied
+        rotary_cos_k=None,
+        rotary_sin_k=None,
+        rotary_dim=0,   # set to 0 since rotation has already been applied
+        rotary_seqlen=0,    # set to 0 since rotation has already been applied
+        rotary_interleaved=False,
+        rotary_inplace=False,
+        rotary_conjugate=False,
+        cache_seqlens=cache_seqlens,
+        cache_batch_idx=cache_batch_idx,
+        cache_leftpad=cache_leftpad,
+        block_table=block_table,
+        causal=causal,
+        local=local,
+        window_size=window_size,
+        alibi_slopes=alibi_slopes,
+        num_splits=num_splits,
+    )
+    return out.to(dtype=q.dtype)
+
+def attention_fused_rotary_triton(
+    q,
+    k_cache,
+    v_cache,
+    k,
+    v,
+    d,
+    batch_size,
+    nheads,
+    seqlen_new,
+    cache_seqlens,
+    cache_batch_idx,
+    cache_leftpad,
+    block_table,
+    cos,
+    sin,
+    rotary_dim,
+    rotary_interleaved,
+    causal,
+    local,
+    window_size,
+    alibi_slopes,
+    num_splits,
+):
+
+    out = flash_attn_with_kvcache(
+        q,
+        k_cache,
+        v_cache,
+        k,
+        v,
+        rotary_cos=cos,    # set to None since rotation has already been applied
+        rotary_sin=sin,    # set to None since rotation has already been applied
+        rotary_cos_k=None,
+        rotary_sin_k=None,
+        rotary_dim=rotary_dim,   # set to 0 since rotation has already been applied
+        rotary_seqlen=seqlen_new,    # set to 0 since rotation has already been applied
+        rotary_interleaved=rotary_interleaved,
+        rotary_inplace=False,
+        rotary_conjugate=False,
+        cache_seqlens=cache_seqlens,
+        cache_batch_idx=cache_batch_idx,
+        cache_leftpad=cache_leftpad,
+        block_table=block_table,
+        causal=causal,
+        local=local,
+        window_size=window_size,
+        alibi_slopes=alibi_slopes,
+        num_splits=num_splits,
+    )
+    return out.to(dtype=q.dtype)
+
+
+def time_fwd(func, *args, **kwargs):
+    time_f = benchmark_forward(func, *args, **kwargs)
+    return time_f[1].mean
+
+def time_fwd_bwd(func, *args, **kwargs):
+    time_f, time_b = benchmark_fwd_bwd(func, *args, **kwargs)
+    return time_f[1].mean, time_b[1].mean
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+# @pytest.mark.parametrize("num_splits", [1, 0])
+@pytest.mark.parametrize("num_splits", [0])
+# @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
+@pytest.mark.parametrize("mha_type", ["mha"])
+# @pytest.mark.parametrize("new_kv", [False, True])
+# @pytest.mark.parametrize("new_kv", [False])
+@pytest.mark.parametrize("new_kv", [True])
+# @pytest.mark.parametrize("alibi", [False, True])
+@pytest.mark.parametrize("alibi", [False])
+# @pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("local", [False])
+# @pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("causal", [False])
+# @pytest.mark.parametrize("seqlen_new_eq_seqlen_q", [True, False])
+@pytest.mark.parametrize("seqlen_new_eq_seqlen_q", [True])
+# @pytest.mark.parametrize("rotary_interleaved", [False, True])
+@pytest.mark.parametrize("rotary_interleaved", [False, True])
+# @pytest.mark.parametrize("rotary_fraction", [0.0, 0.5, 1.0])
+@pytest.mark.parametrize("rotary_fraction", [0.5, 1.0])
+# @pytest.mark.parametrize("rotary_fraction", [1.0])
+# @pytest.mark.parametrize("paged_kv_block_size", [None, 256])
+# @pytest.mark.parametrize("paged_kv_block_size", [256, 512])
+@pytest.mark.parametrize("paged_kv_block_size", [None])
+# @pytest.mark.parametrize("has_leftpad", [False, True])
+# @pytest.mark.parametrize("has_leftpad", [True])
+@pytest.mark.parametrize("has_leftpad", [False])
+# @pytest.mark.parametrize("has_batch_idx", [False, True])
+@pytest.mark.parametrize("has_batch_idx", [False])
+# @pytest.mark.parametrize("has_batch_idx", [True])
+# @pytest.mark.parametrize("d", [2, 8, 16, 32, 59, 64, 80, 128, 256])
+@pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
+# @pytest.mark.parametrize("d", [96, 160, 192, 224])
+# @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
+# @pytest.mark.parametrize('d', [56, 80])
+# @pytest.mark.parametrize("d", [16]) # 16 fails
+# @pytest.mark.parametrize("d", [2])
+@pytest.mark.parametrize(
+    "seqlen_q,seqlen_k",
+    [
+        # (1, 1),
+        # (1, 2),
+        # (2, 2),
+        # (4, 4),
+        # (1, 4),
+        (1, 128),
+        (1, 339),
+        (3, 1024),
+        (64, 800),
+        (64, 256),
+        (3, 799),
+        (64, 2048),
+        (16, 20000),
+        (1, 128 * 1024),
+        (16, 128 * 1024),
+        (128, 128),
+    ],
+)
+def test_attention_benchmark(
+    seqlen_q,
+    seqlen_k,
+    d,
+    has_batch_idx,
+    has_leftpad,
+    paged_kv_block_size,
+    rotary_fraction,
+    rotary_interleaved,
+    seqlen_new_eq_seqlen_q,
+    causal,
+    local,
+    alibi,
+    new_kv,
+    mha_type,
+    num_splits,
+    dtype,
+    repeats = 100,
+    device = 'cuda'
+):
+
+    method_map = {
+        "Triton_Rotary": attention_rotary_triton,
+        "Triton_Rotary_Fused": attention_fused_rotary_triton,
+        # "Pytorch": attention_rotary_pytorch
+    }
+
+    time_f = {}
+    time_b = {}
+    time_f_b = {}
+    speed_f = {}
+    speed_b = {}
+    speed_f_b = {}
+
+    # Initialize kv cache
+    q, k, k_cache, v_cache, v, d, batch_size, nheads_k, seqlen_q, cache_seqlens, cache_batch_idx, cache_leftpad, block_table, cos, sin, rotary_dim, rotary_interleaved, causal, local, window_size, alibi_slopes, num_splits = setup(
+        seqlen_q=seqlen_q,
+        seqlen_k=seqlen_k,
+        d=d,
+        has_batch_idx=has_batch_idx,
+        has_leftpad=has_leftpad,
+        paged_kv_block_size=paged_kv_block_size,
+        rotary_fraction=rotary_fraction,
+        rotary_interleaved=rotary_interleaved,
+        seqlen_new_eq_seqlen_q=seqlen_new_eq_seqlen_q,
+        causal=causal,
+        local=local,
+        alibi=alibi,
+        new_kv=True,
+        mha_type=mha_type,
+        num_splits=num_splits,
+        dtype=dtype,
+    )
+# q,
+#     k_cache,
+#     v_cache,
+#     k,
+#     v,
+#     d,
+#     batch_size,
+#     nheads,
+#     seqlen_new,
+#     cache_seqlens,
+#     cache_batch_idx,
+#     cache_leftpad,
+#     block_table,
+#     cos,
+#     sin,
+#     rotary_dim,
+#     rotary_interleaved,
+#     causal,
+#     local,
+#     window_size,
+#     alibi_slopes,
+#     num_splits
+    args = (q, k_cache, v_cache, k, v, d, batch_size, nheads_k, seqlen_q, cache_seqlens, cache_batch_idx, cache_leftpad, block_table, cos, sin, rotary_dim, rotary_interleaved, causal, local, window_size, alibi_slopes, num_splits)
+
+    # print('k.shape', k.shape)
+    # breakpoint()
+    # args = (q, 
+    #         k_cache, v_cache, 
+    #         k, v, 
+    #         d, batch_size, nheads_k, seqlen_q, 
+    #         cache_seqlens, cache_batch_idx, cache_leftpad, 
+    #         block_table, 
+    #         cos, sin, rotary_dim, rotary_interleaved, 
+    #         causal, local, window_size, alibi_slopes, num_splits)
+
+    headdim = d // nheads_k
+    batch_size = q.shape[0]
+    seqlen = q.shape[1]
+
+    config = (causal, headdim, batch_size, seqlen, dtype, d, rotary_fraction, rotary_interleaved)
+
+    for method, fn in method_map.items():
+        f = time_fwd(fn, *args, repeats=repeats, verbose=False)
+        time_f[config, method] = f
+        time_b[config, method] = 100
+
+    print(f"### causal={causal}, headdim={headdim}, batch_size={batch_size}, seqlen={seqlen}, dtype={dtype}, dim={d}, rotary_fraction={rotary_fraction}, rotary_interleaved={rotary_interleaved} ###")
+    for method in method_map.keys():
+        time_f_b[config, method] = time_f[config, method] + time_b[config, method]
+        speed_f[config, method] = efficiency(
+            flops(batch_size, seqlen, headdim, nheads_k, causal, mode="fwd"),
+            time_f[config, method]
+        )
+        speed_b[config, method] = efficiency(
+            flops(batch_size, seqlen, headdim, nheads_k, causal, mode="bwd"),
+            time_b[config, method]
+        )
+        speed_f_b[config, method] = efficiency(
+            flops(batch_size, seqlen, headdim, nheads_k, causal, mode="fwd_bwd"),
+            time_f_b[config, method]
+        )
+        print(
+            f"{method} fwd: {speed_f[config, method]:.5f} TFLOPs/s, "
+            f"bwd: {speed_b[config, method]:.5f} TFLOPs/s, "
+            f"fwd + bwd: {speed_f_b[config, method]:.5f} TFLOPs/s"
+        )
+
+
+# with open('flash2_attn_time.plk', 'wb') as fp:
+#     pickle.dump((speed_f, speed_b, speed_f_b), fp, protocol=pickle.HIGHEST_PROTOCOL)
+
+if __name__ == "__main__":
+    test_attention_benchmark(seqlen_q=1024, seqlen_k=1024, d=256, has_batch_idx=False, has_leftpad=False, paged_kv_block_size=None, rotary_fraction=1.00, rotary_interleaved=False, seqlen_new_eq_seqlen_q=True, causal=True, local=False, alibi=False, new_kv=True, mha_type='mha', num_splits=0, dtype=torch.float16)

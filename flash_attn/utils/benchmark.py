@@ -11,7 +11,7 @@ def benchmark_forward(
     """Use Pytorch Benchmark on the forward pass of an arbitrary function."""
     if verbose:
         print(desc, "- Forward pass")
-
+        
     def amp_wrapper(*inputs, **kwinputs):
         with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp):
             fn(*inputs, **kwinputs)

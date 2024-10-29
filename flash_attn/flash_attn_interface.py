@@ -1304,5 +1304,5 @@ def flash_attn_with_kvcache(
         softcap,
         num_splits,
     )
-    print(out)
+    # print(out)
     return (out, softmax_lse) if return_softmax_lse else out
