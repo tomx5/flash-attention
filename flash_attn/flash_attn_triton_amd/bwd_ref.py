@@ -3,7 +3,7 @@ import math
 from .utils import DEBUG
 
 def attention_backward_core_ref_impl(
-    do, q, k, v, o, softmax_lse, sm_scale, causal, use_exp2
+    do, q, k, v, o, softmax_lse, sm_scale, causal, dropout_mask, dropout_p, use_exp2
 ):
     if DEBUG:
         print()
@@ -91,6 +91,12 @@ def attention_backward_core_ref_impl(
         print("ds:", ds, ds.shape)
    
 
+    # print('ds_before', ds)
+    # import pdb; pdb.set_trace()
+    ds = ds * dropout_mask
+    ds = ds / (1 - dropout_p)
+    # print('ds_after', ds)
+
     # compute gradient wrt k
     dk = torch.matmul(ds.transpose(-2, -1), q.to(torch.float32))
     if DEBUG:
@@ -127,6 +133,8 @@ def attention_varlen_backward_pytorch_ref_impl(
     softmax_lse,
     sm_scale,
     causal,
+    dropout_mask,
+    dropout_p,
     layout,
     cu_seqlens_q,
     cu_seqlens_k,
@@ -187,6 +195,8 @@ def attention_varlen_backward_pytorch_ref_impl(
             softmax_lse_i,
             sm_scale,
             causal,
+            dropout_mask,
+            dropout_p,
             use_exp2
         )
 
@@ -214,6 +224,8 @@ def attention_vanilla_backward_pytorch_ref_impl(
     softmax_lse,
     sm_scale,
     causal,
+    dropout_mask,
+    dropout_p,
     layout,
     use_exp2,
 ):
@@ -252,6 +264,8 @@ def attention_vanilla_backward_pytorch_ref_impl(
         softmax_lse,
         sm_scale,
         causal,
+        dropout_mask,
+        dropout_p,
         use_exp2
     )
 
@@ -286,6 +300,8 @@ def attention_backward_pytorch_ref_impl(
     softmax_lse,
     sm_scale,
     causal,
+    dropout_mask,
+    dropout_p,
     layout,
     cu_seqlens_q,
     cu_seqlens_k,
@@ -303,6 +319,8 @@ def attention_backward_pytorch_ref_impl(
             softmax_lse,
             sm_scale,
             causal,
+            dropout_mask,
+            dropout_p,
             layout,
             cu_seqlens_q,
             cu_seqlens_k,
@@ -320,6 +338,8 @@ def attention_backward_pytorch_ref_impl(
             softmax_lse,
             sm_scale,
             causal,
+            dropout_mask,
+            dropout_p,
             layout,
             use_exp2,
         )

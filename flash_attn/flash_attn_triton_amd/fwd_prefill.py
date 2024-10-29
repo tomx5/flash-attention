@@ -27,6 +27,13 @@ def dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride):
     rng_keep = rng_output > dropout_p
     return rng_keep
 
+@triton.jit
+def store_dropout_mask(X, philox_seed, philox_offset, dropout_p: tl.constexpr, m: tl.constexpr, n: tl.constexpr, stride: tl.constexpr):
+    x = tl.zeros((m, n), tl.float32)
+    # import pdb; pdb.set_trace()
+    x = dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride)
+    x_block = (tl.arange(0, m)[:, None]*n + tl.arange(0, n)[None, :])
+    tl.store(X+x_block, x, mask=((tl.arange(0, m)[:, None] < m) & (tl.arange(0, n)[None, :] < n)))
 
 # Convenience function to load with optional boundary checks.
 # "First" is the major dim, "second" is the minor dim.
@@ -163,7 +170,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         # CAVEAT: Must update l_ij before applying dropout
         l_ij = tl.sum(p, 1)
         if ENABLE_DROPOUT:
-            philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n - BLOCK_N
+            philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n
             keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, actual_seqlen_k)
             if RETURN_SCORES:
                 # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that

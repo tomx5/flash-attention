@@ -5,7 +5,7 @@ from .utils import MetaData, get_input_shapes, input_helper, varlen_input_helper
 from .interface_torch import attention_prefill, attention_decode
 from .fwd_ref import attention_forward_pytorch_ref_impl, compute_alibi_tensor_ref
 from .fwd_prefill import attention_prefill_forward_triton_impl
-from .bwd_prefill import attention_prefill_backward_triton_impl
+from .bwd_prefill import attention_prefill_backward_triton_impl, store_dropout_mask
 from .bwd_ref import attention_backward_pytorch_ref_impl
 from .fwd_decode import dequantize_kv_fp16, quantize_kv_int4
 
@@ -546,6 +546,14 @@ def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, l
     else:
         do = torch.randn_like(q)
 
+    
+    dropout_philox_seed = 0x1BF51
+    dropout_philox_offset = 0x1D4B49
+
+    metadata.dropout_p = 0.5
+    metadata.dropout_philox_seed = dropout_philox_seed
+    metadata.dropout_philox_offset = dropout_philox_offset
+
     # =============================================== Reference ==============================================================
     q_ref = q.clone() 
     k_ref = k.clone()
@@ -580,6 +588,15 @@ def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, l
         dk = torch.empty_like(k, dtype=k.dtype)
         dv = torch.empty_like(v, dtype=v.dtype)
 
+    dropout_mask_ = torch.ones(metadata.max_seqlens_q, metadata.max_seqlens_k, device='cuda')
+    store_dropout_mask[(1, 1, 1)](dropout_mask_,
+                                metadata.dropout_philox_seed,
+                                metadata.dropout_philox_offset,
+                                metadata.dropout_p,
+                                metadata.max_seqlens_q,
+                                metadata.max_seqlens_k,
+                                metadata.max_seqlens_k)
+
     do_ref = do.clone()
     dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
         do_ref,
@@ -590,6 +607,8 @@ def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, l
         softmax_lse_ref,
         metadata.sm_scale,
         causal,
+        dropout_mask_,
+        metadata.dropout_p,
         layout,
         metadata.cu_seqlens_q,
         metadata.cu_seqlens_k,
@@ -619,7 +638,10 @@ def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, l
         metadata.cu_seqlens_k,
         metadata.max_seqlens_q,
         metadata.max_seqlens_k,
-        use_exp2
+        metadata.dropout_p,
+        metadata.dropout_philox_seed,
+        metadata.dropout_philox_offset,
+        use_exp2,
     )
 
     # =============================================== Check ==============================================================

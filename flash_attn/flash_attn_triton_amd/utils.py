@@ -23,7 +23,7 @@ class MetaData():
     seqlen_new = None
     k_new = None
     v_new = None
-    dropout_p, return_scores= 0.0, False
+    dropout_p, dropout_philox_seed, dropout_philox_offset, return_scores= 0.0, 0x1BF52, 0x1D4B42, False
     # NOTE: scale sm_scale by log_2(e) and use 2^x in the loop as we do not have native e^x support in HW.
     use_exp2 = False
     
@@ -48,6 +48,8 @@ class MetaData():
                 f"  k_new={self.k_new},\n"
                 f"  v_new={self.v_new},\n"
                 f"  dropout_p={self.dropout_p},\n"
+                f"  dropout_philox_seed={self.dropout_philox_seed},\n"
+                f"  dropout_philox_offset={self.dropout_philox_offset},\n"
                 f"  return_scores={self.return_scores}\n"
                 f")")
 
@@ -84,8 +86,10 @@ class MetaData():
     def need_causal(self):
         self.causal = True
 
-    def need_dropout(self, dropout_p, return_scores):
+    def need_dropout(self, dropout_p, dropout_philox_seed, dropout_philox_offset, return_scores):
         self.dropout_p = dropout_p
+        self.dropout_philox_seed = dropout_philox_seed
+        self.dropout_philox_offset = dropout_philox_offset
         self.return_scores = return_scores
 
     def check_args(self, q, k, v, o):
