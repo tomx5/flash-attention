@@ -2813,7 +2813,7 @@ def setup(
     device = "cuda"
     # set seed
     torch.random.manual_seed(0)
-    batch_size = 1
+    batch_size = 16
     batch_size_cache = batch_size if not has_batch_idx else batch_size * 2
     nheads = 1
     # rotary_dim must be a multiple of 16, and must be <= d
@@ -3293,7 +3293,7 @@ def test_attention_benchmark(
         causal=causal,
         local=local,
         alibi=alibi,
-        new_kv=True,
+        new_kv=new_kv,
         mha_type=mha_type,
         num_splits=num_splits,
         dtype=dtype,
@@ -3360,9 +3360,7 @@ def test_attention_benchmark(
             time_f_b[config, method]
         )
         print(
-            f"{method} fwd: {speed_f[config, method]:.5f} TFLOPs/s, "
-            f"bwd: {speed_b[config, method]:.5f} TFLOPs/s, "
-            f"fwd + bwd: {speed_f_b[config, method]:.5f} TFLOPs/s"
+            f"{method} fwd: {(time_f[config, method]*1000):.5f} ms"
         )
 
 
@@ -3370,4 +3368,4 @@ def test_attention_benchmark(
 #     pickle.dump((speed_f, speed_b, speed_f_b), fp, protocol=pickle.HIGHEST_PROTOCOL)
 
 if __name__ == "__main__":
-    test_attention_benchmark(seqlen_q=1024, seqlen_k=1024, d=256, has_batch_idx=False, has_leftpad=False, paged_kv_block_size=None, rotary_fraction=1.00, rotary_interleaved=False, seqlen_new_eq_seqlen_q=True, causal=True, local=False, alibi=False, new_kv=True, mha_type='mha', num_splits=0, dtype=torch.float16)
+    test_attention_benchmark(seqlen_q=1024, seqlen_k=1024, d=128, has_batch_idx=False, has_leftpad=False, paged_kv_block_size=None, rotary_fraction=1.00, rotary_interleaved=False, seqlen_new_eq_seqlen_q=True, causal=True, local=False, alibi=False, new_kv=True, mha_type='mha', num_splits=0, dtype=torch.float16)

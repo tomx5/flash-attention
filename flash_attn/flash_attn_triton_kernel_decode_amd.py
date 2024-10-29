@@ -907,8 +907,8 @@ class _attention(torch.autograd.Function):
 
         # context
         cls.SPLIT_K: Optional[int] = None
-        cls.BLOCK_M = 16
-        cls.BLOCK_N = 16
+        cls.BLOCK_M = 32
+        cls.BLOCK_N = 32
 
         cls.NUM_QUANT_GROUPS = 1  # Default quantization is row-wise
 
