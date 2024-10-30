@@ -3,6 +3,8 @@ import torch
 import os
 import triton
 
+from .fwd_prefill import store_dropout_mask
+
 AUTOTUNE = os.environ.get('FLASH_ATTENTION_TRITON_AMD_AUTOTUNE', '1').lower() in ('1', 'true', 'yes')
 DEBUG = os.environ.get('FLASH_ATTENTION_TRITON_AMD_DEBUG', '0').lower() in ('1', 'true', 'yes')
 
@@ -23,7 +25,7 @@ class MetaData():
     seqlen_new = None
     k_new = None
     v_new = None
-    dropout_p, dropout_philox_seed, dropout_philox_offset, return_scores= 0.0, 0x1BF52, 0x1D4B42, False
+    dropout_p, dropout_philox_seed, dropout_philox_offset, dropout_mask, return_scores= 0.0, 0x1BF52, 0x1D4B42, torch.zeros(0, 0), False
     # NOTE: scale sm_scale by log_2(e) and use 2^x in the loop as we do not have native e^x support in HW.
     use_exp2 = False
     
@@ -50,6 +52,7 @@ class MetaData():
                 f"  dropout_p={self.dropout_p},\n"
                 f"  dropout_philox_seed={self.dropout_philox_seed},\n"
                 f"  dropout_philox_offset={self.dropout_philox_offset},\n"
+                f"  dropout_mask={self.dropout_mask.shape},\n"
                 f"  return_scores={self.return_scores}\n"
                 f")")
 
@@ -86,10 +89,22 @@ class MetaData():
     def need_causal(self):
         self.causal = True
 
-    def need_dropout(self, dropout_p, dropout_philox_seed, dropout_philox_offset, return_scores):
+    def need_dropout(self, dropout_p, dropout_philox_seed, dropout_philox_offset, return_scores=False):
         self.dropout_p = dropout_p
         self.dropout_philox_seed = dropout_philox_seed
         self.dropout_philox_offset = dropout_philox_offset
+
+        assert self.max_seqlens_q != 0 and self.max_seqlens_k, "max_seqlens_q OR max_seqlens_k is 0. Must be non-zero."
+
+        self.dropout_mask = torch.zeros(self.max_seqlens_q, self.max_seqlens_k)
+        store_dropout_mask[(1, 1, 1)](self.dropout_mask,
+                                      self.dropout_philox_seed,
+                                      self.dropout_philox_offset,
+                                      self.dropout_p,
+                                      self.max_seqlens_q,
+                                      self.max_seqlens_k,
+                                      self.max_seqlens_k)
+
         self.return_scores = return_scores
 
     def check_args(self, q, k, v, o):

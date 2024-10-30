@@ -16,6 +16,7 @@ def attention_backward_core_ref_impl(
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
         print("sm_scale:", sm_scale)
         print("causal:", causal)
+        print("dropout_p:", dropout_p)
         print("use_exp2:", use_exp2)
     
     # cast to float32

@@ -234,7 +234,7 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
 @pytest.mark.parametrize('causal', [False])
 # @pytest.mark.parametrize('use_alibi', [False, True])
 @pytest.mark.parametrize('use_alibi', [False])
-def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_alibi, dtype=torch.float16):
+def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dropout_philox_seed, dropout_philox_offset, torch_sdpa_test, use_alibi, dtype=torch.float16):
     torch.manual_seed(20)
 
     DEBUG_INPUT = False
@@ -253,7 +253,6 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
     input_metadata.max_seqlens_k = seqlen_k
     input_metadata.layout = "bhsd"
 
-    dropout_p = 0
     if DEBUG_INPUT:
         q = torch.arange(seqlen_q, dtype=dtype, device="cuda").view(1, 1, seqlen_q, 1).expand(Z, H, seqlen_q, D_HEAD).requires_grad_()
         k = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, 1, seqlen_k, 1).expand(Z, H, seqlen_k, D_HEAD).requires_grad_()
@@ -268,6 +267,9 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
 
     if causal:
         input_metadata.need_causal()
+
+    if dropout_p > 0.0:
+        input_metadata.need_dropout(dropout_p, dropout_philox_seed, dropout_philox_offset)
 
     if use_alibi and not torch_sdpa_test:
         # for n heads the set of slopes is the geometric sequence that starts 2^(-8/n)
@@ -588,14 +590,14 @@ def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, l
         dk = torch.empty_like(k, dtype=k.dtype)
         dv = torch.empty_like(v, dtype=v.dtype)
 
-    dropout_mask_ = torch.ones(metadata.max_seqlens_q, metadata.max_seqlens_k, device='cuda')
-    store_dropout_mask[(1, 1, 1)](dropout_mask_,
-                                metadata.dropout_philox_seed,
-                                metadata.dropout_philox_offset,
-                                metadata.dropout_p,
-                                metadata.max_seqlens_q,
-                                metadata.max_seqlens_k,
-                                metadata.max_seqlens_k)
+    # dropout_mask_ = torch.ones(metadata.max_seqlens_q, metadata.max_seqlens_k, device='cuda')
+    # store_dropout_mask[(1, 1, 1)](dropout_mask_,
+    #                             metadata.dropout_philox_seed,
+    #                             metadata.dropout_philox_offset,
+    #                             metadata.dropout_p,
+    #                             metadata.max_seqlens_q,
+    #                             metadata.max_seqlens_k,
+    #                             metadata.max_seqlens_k)
 
     do_ref = do.clone()
     dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
@@ -607,7 +609,7 @@ def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, l
         softmax_lse_ref,
         metadata.sm_scale,
         causal,
-        dropout_mask_,
+        metadata.dropout_mask,
         metadata.dropout_p,
         layout,
         metadata.cu_seqlens_q,
