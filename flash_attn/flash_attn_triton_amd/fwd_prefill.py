@@ -131,9 +131,6 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         # -- compute qk ----
         qk += tl.dot(q, k)
         qk_scaled =  qk * SM_SCALE
-        if RETURN_SCORES:
-            score_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
-            tl.store(score_ptrs, qk_scaled, mask=score_mask)
 
         if IS_CAUSAL:
             causal_boundary = start_n + offs_n_causal
@@ -151,6 +148,19 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
             alibi_block = compute_alibi_block(alibi_slope, actual_seqlen_q, actual_seqlen_k, global_m_positions,
                                               global_n_positions)
             qk_scaled += alibi_block
+
+        # if dropout enabled, mask the scores and scale proportionally
+        if ENABLE_DROPOUT:
+            philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n
+            keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, actual_seqlen_k)
+            qk_scaled = tl.where(keep, qk_scaled, float('-inf'))
+            qk_scaled = qk_scaled / (1 - dropout_p)
+
+        # return scores after all masks
+        if RETURN_SCORES:
+            score_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
+            tl.store(score_ptrs, qk_scaled, mask=score_mask)
+
         # get max scores so far
         m_ij = tl.maximum(m_i, tl.max(qk_scaled, 1))
 
@@ -170,17 +180,18 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         # CAVEAT: Must update l_ij before applying dropout
         l_ij = tl.sum(p, 1)
         
-        # if dropout enabled, mask the scores and scale proportionally
-        if ENABLE_DROPOUT:
-            philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n
-            keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, actual_seqlen_k)
-            if RETURN_SCORES:
-                # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
-                exp_score_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
-                tl.store(exp_scores_ptrs, tl.where(keep, p, -p), mask=exp_score_mask)
-            p = tl.where(keep, p, 0.0)
-            p = p / (1 - dropout_p)
-        elif RETURN_SCORES:
+        # # if dropout enabled, mask the scores and scale proportionally
+        # if ENABLE_DROPOUT:
+        #     philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n
+        #     keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, actual_seqlen_k)
+        #     if RETURN_SCORES:
+        #         # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
+        #         exp_score_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
+        #         tl.store(exp_scores_ptrs, tl.where(keep, p, -p), mask=exp_score_mask)
+        #     p = tl.where(keep, p, 0.0)
+        #     p = p / (1 - dropout_p)
+
+        if RETURN_SCORES:
             # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
             exp_score_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
             tl.store(exp_scores_ptrs, p, mask=exp_score_mask)
