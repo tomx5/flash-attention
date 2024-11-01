@@ -113,6 +113,8 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_mask, dro
     if DEBUG:
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
 
+    print('v', v)
+
     # Compute output
     o = torch.matmul(softmax, v.to(torch.float32)).to(torch.float16)
     if DEBUG:
