@@ -113,6 +113,8 @@ def fwd(q,
                                                 metadata.causal, 
                                                 metadata.bias, 
                                                 metadata.dropout_p, 
+                                                metadata.dropout_philox_seed, 
+                                                metadata.dropout_philox_offset, 
                                                 metadata.layout, 
                                                 metadata.cu_seqlens_q, 
                                                 metadata.cu_seqlens_k,
@@ -195,13 +197,13 @@ def bwd(
             softmax_lse,
             softmax_scale,
             causal,
+            dropout_p,
+            dropout_mask,
             "bshd",
             None,
             None,
             None,
             None,
-            dropout_p,
-            dropout_mask,
             False,
         )
         dq.copy_(dq_ref)
@@ -287,9 +289,6 @@ def varlen_fwd(
         print("window_size_left:", window_size_left)
         print("window_size_right:", window_size_right)
         print("gen_:", gen_)
-
-    if dropout_p != 0.0:
-        raise ValueError("dropout is not supported on AMD's Triton Backend yet")
     
     if o is None:
         o = torch.empty_like(q)
@@ -332,6 +331,8 @@ def varlen_fwd(
                                                 v,
                                                 metadata.sm_scale, 
                                                 metadata.causal,
+                                                metadata.dropout_mask,
+                                                metadata.dropout_p,
                                                 metadata.layout, 
                                                 metadata.cu_seqlens_q, 
                                                 metadata.cu_seqlens_k,
@@ -360,6 +361,8 @@ def varlen_fwd(
                                                             metadata.causal, 
                                                             metadata.bias, 
                                                             metadata.dropout_p, 
+                                                            metadata.dropout_philox_seed, 
+                                                            metadata.dropout_philox_offset, 
                                                             metadata.layout, 
                                                             metadata.cu_seqlens_q, 
                                                             metadata.cu_seqlens_k,
@@ -397,7 +400,7 @@ def varlen_bwd(
     softmax_scale,
     zero_tensors,
     causal,
-    dropout_mask_,
+    dropout_mask,
     window_size_left,
     window_size_right,
     softcap,

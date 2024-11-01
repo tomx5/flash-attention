@@ -12,6 +12,8 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_mask, dro
         print("sm_scale:", sm_scale)
         print("causal:", causal)
         print("dropout_p:", dropout_p)
+        print("dropout_mask:", dropout_mask.shape)
+        print("dropout_mask[0]:", dropout_mask[0])
         print("use_exp2:", use_exp2)
     
     # Compute attention scores
@@ -43,7 +45,7 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_mask, dro
     # Apply dropout mask
     if dropout_p > 0.0:
         attention_scaled_scores = attention_scaled_scores.masked_fill(
-            dropout_mask, float('-inf')
+            torch.logical_not(dropout_mask), float('-inf')
         )
         attention_scaled_scores = attention_scaled_scores / (1 - dropout_p) # scale scores based on dropout
 
@@ -138,7 +140,7 @@ def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, dropou
 
     # Call the core attention function
     o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scaled_scores, attention_scores = attention_forward_core_ref_impl(
-        q, k, v, sm_scale, causal, use_exp2
+        q, k, v, sm_scale, causal, dropout_mask, dropout_p, use_exp2
     )
 
     # Reshape outputs back to [batch_size, num_heads, seq_len, head_dim]

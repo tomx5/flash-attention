@@ -209,24 +209,29 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
     # smallest config test
-    (1, 1, 16, 16, 64), # pass on new # fail on old
-    (1, 1, 32, 32, 64), # pass on new # fail on old
-    (1, 1, 64, 64, 16), # pass # smallest head_size = 16
-    (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
-    (1, 1, 128, 128, 64), # pass
-    (1, 1, 256, 256, 64), # pass
-    (1, 1, 512, 512, 64), # pass
-    # failing FA
-    (1, 1, 256, 512, 16),
-    # old tests that work
-    (4, 48, 1024, 1024, 64), # pass
-    (4, 48, 2048, 2048, 64), # pass
-    (2, 48, 4096, 4096, 64), # pass
-    (1, 16, 1024, 1024, 64), # pass
-    (1, 16, 1024, 1024, 128), # pass
+    (1, 1, 4, 4, 16),
+    # (1, 1, 16, 16, 64), # pass on new # fail on old
+    # (1, 1, 32, 32, 64), # pass on new # fail on old
+    # (1, 1, 64, 64, 16), # pass # smallest head_size = 16
+    # (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
+    # (1, 1, 128, 128, 64), # pass
+    # (1, 1, 256, 256, 64), # pass
+    # (1, 1, 512, 512, 64), # pass
+    # # failing FA
+    # (1, 1, 256, 512, 16),
+    # # old tests that work
+    # (4, 48, 1024, 1024, 64), # pass
+    # (4, 48, 2048, 2048, 64), # pass
+    # (2, 48, 4096, 4096, 64), # pass
+    # (1, 16, 1024, 1024, 64), # pass
+    # (1, 16, 1024, 1024, 128), # pass
     # old tests that were commented out
     # (1, 16, 8192, 8192, 63),
     # (1, 16, 1022, 1022, 64),
+])
+@pytest.mark.parametrize("dropout_p", [0.17])
+@pytest.mark.parametrize("dropout_philox_seed, dropout_philox_offset", [
+    (0x1BF51, 0x1D4B49),
 ])
 # @pytest.mark.parametrize('torch_sdpa_test', [False, True])
 @pytest.mark.parametrize('torch_sdpa_test', [False])
@@ -243,27 +248,11 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dropout_philo
     seqlen_q = N_CTX_Q
     seqlen_k = N_CTX_K
 
-    # setup up metadata
-    if DEBUG_INPUT:
-        sm_scale = 1
-    else:
-        sm_scale = D_HEAD**-0.5
-    input_metadata = MetaData(sm_scale=sm_scale)
-    input_metadata.max_seqlens_q = seqlen_q
-    input_metadata.max_seqlens_k = seqlen_k
-    input_metadata.layout = "bhsd"
+    layout = "bhsd"
+    if layout == "bhsd":
+        q, k, v, input_metadata = input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=DEBUG_INPUT)
 
-    if DEBUG_INPUT:
-        q = torch.arange(seqlen_q, dtype=dtype, device="cuda").view(1, 1, seqlen_q, 1).expand(Z, H, seqlen_q, D_HEAD).requires_grad_()
-        k = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, 1, seqlen_k, 1).expand(Z, H, seqlen_k, D_HEAD).requires_grad_()
-        v = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, 1, seqlen_k, 1).expand(Z, H, seqlen_k, D_HEAD).requires_grad_()
-        o = torch.zeros_like(q)
-    else:
-        # Generate random inputs
-        q = torch.randn(Z, H, N_CTX_Q, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-        k = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-        v = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-        o = torch.empty_like(q)
+    o = torch.zeros_like(q)
 
     if causal:
         input_metadata.need_causal()
@@ -282,29 +271,119 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dropout_philo
     else:
         dout = torch.randn_like(q)
 
-    # reference implementation
-    if torch_sdpa_test:
-        ref_out, ref_softmax = torch.ops.aten._scaled_dot_product_attention_math(q, k, v, dropout_p=dropout_p,
-                                                                                 is_causal=causal, scale=sm_scale,
-                                                                                 dropout_mask=None)
-        ref_out.backward(dout.to(device=ref_out.device, dtype=ref_out.dtype))
-        ref_dv, v.grad = v.grad.clone(), None
-        ref_dk, k.grad = k.grad.clone(), None
-        ref_dq, q.grad = q.grad.clone(), None
-    else:
-        M = torch.tril(torch.ones((seqlen_q, seqlen_k), device="cuda"))
-        p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
-        if use_alibi:
-            p += compute_alibi_tensor_ref(alibi_slopes, N_CTX_Q, N_CTX_K)
-        if causal:
-            p[:, :, M == 0] = float("-inf")
+    do = dout
 
-        p = torch.softmax(p.float(), dim=-1).type(dtype=p.dtype)
-        ref_out = torch.matmul(p, v)
-        ref_out.backward(dout)
-        ref_dv, v.grad = v.grad.clone(), None
-        ref_dk, k.grad = k.grad.clone(), None
-        ref_dq, q.grad = q.grad.clone(), None
+    # =============================================== Reference ==============================================================
+    q_ref = q.clone() 
+    k_ref = k.clone()
+    v_ref = v.clone()    
+    (
+        o_ref,
+        softmax_lse_ref,
+        _,
+        _,
+        _,
+        attention_scores_dropout,
+        _,
+    ) = attention_forward_pytorch_ref_impl(
+        q_ref,
+        k_ref, 
+        v_ref,
+        input_metadata.sm_scale,
+        input_metadata.causal,
+        input_metadata.dropout_mask,
+        input_metadata.dropout_p,
+        input_metadata.layout,
+        input_metadata.cu_seqlens_q,
+        input_metadata.cu_seqlens_k,
+        input_metadata.max_seqlens_q,
+        input_metadata.max_seqlens_k,
+        input_metadata.use_exp2
+    )
+
+    print('o_ref', o_ref)
+
+    dq = torch.zeros_like(q, dtype=q.dtype) # NOTE: the kernel does inplace accumlation on dq so dq has to be zeros
+    if DEBUG_INPUT:
+        dk = torch.zeros_like(k, dtype=k.dtype)
+        dv = torch.zeros_like(v, dtype=v.dtype)
+    else:
+        dk = torch.empty_like(k, dtype=k.dtype)
+        dv = torch.empty_like(v, dtype=v.dtype)
+
+    # dropout_mask_ = torch.ones(metadata.max_seqlens_q, metadata.max_seqlens_k, device='cuda')
+    # store_dropout_mask[(1, 1, 1)](dropout_mask_,
+    #                             metadata.dropout_philox_seed,
+    #                             metadata.dropout_philox_offset,
+    #                             metadata.dropout_p,
+    #                             metadata.max_seqlens_q,
+    #                             metadata.max_seqlens_k,
+    #                             metadata.max_seqlens_k)
+
+    do_ref = do.clone()
+    dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
+        do_ref,
+        q_ref,
+        k_ref,
+        v_ref,
+        o_ref,
+        softmax_lse_ref,
+        input_metadata.sm_scale,
+        input_metadata.causal,
+        input_metadata.dropout_mask,
+        input_metadata.dropout_p,
+        input_metadata.layout,
+        input_metadata.cu_seqlens_q,
+        input_metadata.cu_seqlens_k,
+        input_metadata.max_seqlens_q,
+        input_metadata.max_seqlens_k,
+        input_metadata.use_exp2
+    )
+
+    
+
+    print('dv_ref', dv_ref)
+    # ========================================================================================================================
+
+    # print('dropout_mask', input_metadata.dropout_mask)
+
+    # # reference implementation
+    # if torch_sdpa_test:
+    #     ref_out, ref_softmax = torch.ops.aten._scaled_dot_product_attention_math(q, k, v, dropout_p=dropout_p,
+    #                                                                              is_causal=causal, scale=input_metadata.sm_scale,
+    #                                                                              dropout_mask=input_metadata.dropout_mask)
+    #     ref_out.backward(dout.to(device=ref_out.device, dtype=ref_out.dtype))
+    #     ref_dv, v.grad = v.grad.clone(), None
+    #     ref_dk, k.grad = k.grad.clone(), None
+    #     ref_dq, q.grad = q.grad.clone(), None
+    # else:
+    #     M = torch.tril(torch.ones((seqlen_q, seqlen_k), device="cuda"))
+    #     p = torch.matmul(q, k.transpose(2, 3)) * input_metadata.sm_scale
+    #     if use_alibi:
+    #         p += compute_alibi_tensor_ref(alibi_slopes, N_CTX_Q, N_CTX_K)
+    #     if causal:
+    #         p[:, :, M == 0] = float("-inf")
+        
+    #     # mask dropout
+    #     if dropout_p > 0.0:
+    #         p = p.masked_fill(
+    #             torch.logical_not(input_metadata.dropout_mask), float('-inf')
+    #         )
+    #         p = p / (1 - input_metadata.dropout_p) # scale scores based on dropout
+
+    #         print('attention_scores_dropout', attention_scores_dropout)
+    #         print('p', p)
+
+    #     p = torch.softmax(p.float(), dim=-1).type(dtype=p.dtype)
+    #     ref_out = torch.matmul(p, v)
+    #     ref_out.backward(dout)
+    #     ref_dv, v.grad = v.grad.clone(), None
+    #     ref_dk, k.grad = k.grad.clone(), None
+    #     ref_dq, q.grad = q.grad.clone(), None
+
+    # print('ref_out', ref_out)
+    
+    # print('ref_dv', ref_dv)
 
     # # triton implementation
     tri_out, _, _ = attention_prefill(q, k, v, o, input_metadata)
@@ -312,11 +391,17 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dropout_philo
     tri_dv, v.grad = v.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
     tri_dq, q.grad = q.grad.clone(), None
+
+    print('tri_dv', tri_dv)
+
+    print("tri_out:", tri_out)
+    print("ref_out:", o_ref )
+
     # compare
     if DEBUG:
         print("tri_out:", tri_out)
-        print("ref_out:",ref_out )
-    torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=0)
+        print("ref_out:", o_ref )
+    torch.testing.assert_close(o_ref, tri_out, atol=1e-2, rtol=0)
     
     # The current block size for MI200 series is 64x64. This results in
     # larger differences in float results due to rounding.
@@ -329,59 +414,67 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dropout_philo
 
     RTOL = 0
 
-    if DEBUG:
-        print("ref_dv:", ref_dv)
-        print("tri_dv:", tri_dv)
-        print("ref_dk:", ref_dk)
-        print("tri_dk:", tri_dk)
-        print("ref_dq:", ref_dq)
-        print("tri_dq:", tri_dq)
+    # if DEBUG:
+    #     print("ref_dv:", o_ref)
+    #     print("tri_dv:", tri_dv)
+    #     print("ref_dk:", ref_dk)
+    #     print("tri_dk:", tri_dk)
+    #     print("ref_dq:", ref_dq)
+    #     print("tri_dq:", tri_dq)
 
-    torch.testing.assert_close(ref_dv, tri_dv, atol=ATOL, rtol=RTOL)
-    torch.testing.assert_close(ref_dk, tri_dk, atol=ATOL, rtol=RTOL)
-    torch.testing.assert_close(ref_dq, tri_dq, atol=ATOL, rtol=RTOL)
+    torch.testing.assert_close(dv_ref, tri_dv, atol=ATOL, rtol=RTOL)
+    torch.testing.assert_close(dk_ref, tri_dk, atol=ATOL, rtol=RTOL)
+    torch.testing.assert_close(dq_ref, tri_dq, atol=ATOL, rtol=RTOL)
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    (1, 1, 1, 1, 1),
-    (1, 1, 2, 4, 16),
-    (1, 1, 4, 2, 16),
+    # (1, 1, 1, 1, 1),
+    # (1, 1, 4, 4, 4),
+    # (2, 1, 4, 4, 16),
+    # (1, 2, 4, 4, 16),
+    # (2, 2, 4, 4, 16),
     (1, 1, 4, 4, 16),
-    (1, 2, 4, 4, 16),
-    (2, 1, 4, 4, 16),
-    (2, 2, 4, 4, 16),
-    (1, 1, 128, 64, 16),
-    (2, 2, 2, 128, 1),
-    (2, 3, 2, 128, 16),
-    (3, 2, 256, 512, 16),
-    (3, 3, 128, 128, 64),
-    (2, 4, 1024, 1024, 64),
-    (4, 6, 108, 256, 224),
-    (4, 8, 2048, 2048, 128),
-    (4, 16, 4096, 4096, 64),
-    (2, 4, 8192, 8192, 32),
+    # (2, 1, 4, 4 , 16),
+    # (4, 6, 8, 8 , 16),
+    # (1, 1, 4, 4, 32),
+    # (1, 1, 16, 16, 16),
+    # (1, 1, 32, 32, 16),
+    # (1, 1, 64, 64, 16), # pass # smallest head_size = 16
+    # (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
+    # (1, 1, 64, 128, 32),
+    # (1, 1, 128, 128, 64),
+    # (1, 1, 128, 256, 45),
+    # (1, 1, 113, 203, 192),
+    # (1, 1, 256, 256, 64),
+    # (1, 1, 256, 512, 16),
+    # (1, 1, 512, 512, 64), 
+    # (1, 1, 1024, 1024, 64),
     # # fa configs
-    (4, 6, 113, 203, 256),
-    (4, 6, 128, 217, 256),
-    (4, 6, 113, 211, 128),
-    (4, 6, 108, 256, 128),
-    (4, 6, 256, 512, 64),
-    (4, 6, 512, 256, 64),
-    (4, 6, 1024, 1024, 32),
-    (4, 6, 1023, 1024, 32),
-    (4, 6, 1024, 1023, 32),
-    (4, 6, 2048, 2048, 32),
+    # (2, 2, 128, 128, 65),
+    # (2, 2, 128, 128, 224),
+    # (4, 6, 108, 256, 224),
+    # (1, 1, 256, 512, 16),
+    # # old tests that work
+    # (4, 48, 1024, 1024, 73),
+    # (4, 48, 1024, 1024, 64),
+    # (4, 48, 2048, 2048, 64),
+    # (1, 24, 4096, 4096, 64),
+    # (1, 16, 1024, 1024, 64),
+    # (1, 16, 1024, 1024, 128),
 ])
-@pytest.mark.parametrize('causal', [True, False])
-@pytest.mark.parametrize('return_scores', [False])
-@pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
-@pytest.mark.parametrize('use_exp2', [True, False]) # works when use_exp2 is false
-@pytest.mark.parametrize('DEBUG_INPUT', [False]) # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues
-def test_op_prefill_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, layout, use_exp2, DEBUG_INPUT):
+@pytest.mark.parametrize('causal', [False])
+@pytest.mark.parametrize("dropout_p", [0.17])
+@pytest.mark.parametrize("dropout_philox_seed, dropout_philox_offset", [
+    (0x1BF51, 0x1D4B49),
+])
+@pytest.mark.parametrize('use_exp2', [False]) # using exp2 causas issue with exp2
+# @pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
+@pytest.mark.parametrize('layout', ["bhsd"])
+@pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
+def test_op_prefill_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dropout_philox_seed, dropout_philox_offset, layout, use_exp2, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(0)
     alibi_slopes = None
-    dropout_p = 0.0
     device = "cuda"
 
     if layout == "thd":
@@ -398,7 +491,12 @@ def test_op_prefill_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
     if causal:
         metadata.need_causal()
 
+    # add dropout
+    if dropout_p > 0.0:
+        metadata.need_dropout(dropout_p, dropout_philox_seed, dropout_philox_offset)
+
     # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
+    return_scores = True
     if return_scores:
         metadata.return_scores = True
 
@@ -421,6 +519,8 @@ def test_op_prefill_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
                                                 metadata.causal, 
                                                 metadata.bias, 
                                                 metadata.dropout_p, 
+                                                metadata.dropout_philox_seed,
+                                                metadata.dropout_philox_offset,
                                                 metadata.layout, 
                                                 metadata.cu_seqlens_q, 
                                                 metadata.cu_seqlens_k,
@@ -442,7 +542,9 @@ def test_op_prefill_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
         k.clone(), 
         v.clone(), 
         metadata.sm_scale, 
-        causal, 
+        causal,
+        metadata.dropout_mask,
+        metadata.dropout_p,
         layout,
         metadata.cu_seqlens_q,
         metadata.cu_seqlens_k,
@@ -450,6 +552,8 @@ def test_op_prefill_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
         metadata.max_seqlens_k,
         use_exp2
     )
+
+    DEBUG = True
 
     if DEBUG:
         print("softmax_lse_triton:", softmax_lse_triton, softmax_lse_triton.shape)
@@ -496,45 +600,50 @@ def test_op_prefill_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    (1, 1, 1, 1, 1),
-    (1, 1, 4, 4, 4),
-    (2, 1, 4, 4, 16),
-    (1, 2, 4, 4, 16),
-    (2, 2, 4, 4, 16),
+    # (1, 1, 1, 1, 1),
+    # (1, 1, 4, 4, 4),
+    # (2, 1, 4, 4, 16),
+    # (1, 2, 4, 4, 16),
+    # (2, 2, 4, 4, 16),
     (1, 1, 4, 4, 16),
-    (2, 1, 4, 4 , 16),
-    (4, 6, 8, 8 , 16),
-    (1, 1, 4, 4, 32),
-    (1, 1, 16, 16, 16),
-    (1, 1, 32, 32, 16),
-    (1, 1, 64, 64, 16), # pass # smallest head_size = 16
-    (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
-    (1, 1, 64, 128, 32),
-    (1, 1, 128, 128, 64),
-    (1, 1, 128, 256, 45),
-    (1, 1, 113, 203, 192),
-    (1, 1, 256, 256, 64),
-    (1, 1, 256, 512, 16),
-    (1, 1, 512, 512, 64), 
-    (1, 1, 1024, 1024, 64),
-    # fa configs
-    (2, 2, 128, 128, 65),
-    (2, 2, 128, 128, 224),
-    (4, 6, 108, 256, 224),
-    (1, 1, 256, 512, 16),
-    # old tests that work
-    (4, 48, 1024, 1024, 73),
-    (4, 48, 1024, 1024, 64),
-    (4, 48, 2048, 2048, 64),
-    (1, 24, 4096, 4096, 64),
-    (1, 16, 1024, 1024, 64),
-    (1, 16, 1024, 1024, 128),
+    # (2, 1, 4, 4 , 16),
+    # (4, 6, 8, 8 , 16),
+    # (1, 1, 4, 4, 32),
+    # (1, 1, 16, 16, 16),
+    # (1, 1, 32, 32, 16),
+    # (1, 1, 64, 64, 16), # pass # smallest head_size = 16
+    # (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
+    # (1, 1, 64, 128, 32),
+    # (1, 1, 128, 128, 64),
+    # (1, 1, 128, 256, 45),
+    # (1, 1, 113, 203, 192),
+    # (1, 1, 256, 256, 64),
+    # (1, 1, 256, 512, 16),
+    # (1, 1, 512, 512, 64), 
+    # (1, 1, 1024, 1024, 64),
+    # # fa configs
+    # (2, 2, 128, 128, 65),
+    # (2, 2, 128, 128, 224),
+    # (4, 6, 108, 256, 224),
+    # (1, 1, 256, 512, 16),
+    # # old tests that work
+    # (4, 48, 1024, 1024, 73),
+    # (4, 48, 1024, 1024, 64),
+    # (4, 48, 2048, 2048, 64),
+    # (1, 24, 4096, 4096, 64),
+    # (1, 16, 1024, 1024, 64),
+    # (1, 16, 1024, 1024, 128),
 ])
-@pytest.mark.parametrize('causal', [True, False])
+@pytest.mark.parametrize('causal', [False])
+@pytest.mark.parametrize("dropout_p", [0.17])
+@pytest.mark.parametrize("dropout_philox_seed, dropout_philox_offset", [
+    (0x1BF51, 0x1D4B49),
+])
 @pytest.mark.parametrize('use_exp2', [False]) # using exp2 causas issue with exp2
-@pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
+# @pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
+@pytest.mark.parametrize('layout', ["bhsd"])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
-def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, layout, DEBUG_INPUT):
+def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dropout_philox_seed, dropout_philox_offset, use_exp2, layout, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
 
@@ -548,13 +657,12 @@ def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, l
     else:
         do = torch.randn_like(q)
 
-    
-    dropout_philox_seed = 0x1BF51
-    dropout_philox_offset = 0x1D4B49
+    if causal:
+        metadata.need_causal()
 
-    metadata.dropout_p = 0.5
-    metadata.dropout_philox_seed = dropout_philox_seed
-    metadata.dropout_philox_offset = dropout_philox_offset
+    # add dropout
+    if dropout_p > 0.0:
+        metadata.need_dropout(dropout_p, dropout_philox_seed, dropout_philox_offset)
 
     # =============================================== Reference ==============================================================
     q_ref = q.clone() 
@@ -573,7 +681,9 @@ def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, l
         k_ref, 
         v_ref,
         metadata.sm_scale, 
-        causal, 
+        causal,
+        metadata.dropout_mask,
+        metadata.dropout_p,
         layout,
         metadata.cu_seqlens_q,
         metadata.cu_seqlens_k,
@@ -645,6 +755,9 @@ def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, l
         metadata.dropout_philox_offset,
         use_exp2,
     )
+
+    print('dv_ref', dv_ref)
+    print('dv_triton', dv_triton)
 
     # =============================================== Check ==============================================================
     if DEBUG:

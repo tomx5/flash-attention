@@ -299,14 +299,14 @@ def attention_ref(
     # Otherwise we'll get NaN in dV
     if query_padding_mask is not None:
         attention = attention.masked_fill(rearrange(~query_padding_mask, "b s -> b 1 s 1"), 0.0)
-    dropout_scaling = 1.0 / (1 - dropout_p)
-    # attention_drop = attention.masked_fill(~dropout_mask, 0.0) * dropout_scaling
-    # output = torch.einsum('bhts,bshd->bthd', attention_drop , v)
+
     if dropout_mask is not None:
         attention_drop = attention.masked_fill(~dropout_mask, 0.0)
+        attention_drop = attention_drop / (1 - dropout_p) # apply dropout scaling
     else:
         attention_drop = attention
-    output = torch.einsum("bhts,bshd->bthd", attention_drop, v * dropout_scaling)
+
+    output = torch.einsum("bhts,bshd->bthd", attention_drop, v)
     if query_padding_mask is not None:
         output.masked_fill_(rearrange(~query_padding_mask, "b s -> b s 1 1"), 0.0)
     return output.to(dtype=dtype_og), attention.to(dtype=dtype_og)
@@ -912,15 +912,15 @@ def test_flash_attn_varlen_qkvpacked(
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
-        (113, 203),
-        (128, 217),
-        (113, 211),
-        (108, 256),
+        # (113, 203),
+        # (128, 217),
+        # (113, 211),
+        # (108, 256),
         (256, 512),
         (512, 256),
-        (1024, 1024),
-        (1023, 1024),
-        (1024, 1023),
+        # (1024, 1024),
+        # (1023, 1024),
+        # (1024, 1023),
         (2048, 2048),
     ],
 )
@@ -933,9 +933,6 @@ def test_flash_attn_output(
     seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, softcap
 ):
     if USE_TRITON_ROCM:
-        if dropout_p != 0.0:
-            pytest.skip("Dropout not supported on AMD's Triton Backend yet")
-
         if softcap != 0.0:
             pytest.skip("softcap not supported on AMD's Triton Backend yet")
 

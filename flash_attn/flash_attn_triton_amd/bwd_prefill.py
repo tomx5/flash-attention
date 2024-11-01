@@ -140,6 +140,9 @@ def _bwd_kernel_one_col_block(
         stride_vh,
         stride_vn,
         stride_vk,
+        stride_deltaz, 
+        stride_deltah, 
+        stride_deltam,
         Z,
         H,
         N_CTX_Q,
@@ -576,7 +579,7 @@ def attention_prefill_backward_triton_impl(
 
     is_qkvpacked = False
     if dq is None or dk is None or dv is None: 
-        dq = torch.zeros(dq_shape, device=q.device, dtype=q.dtype)
+        dq = torch.zeros_like(q, dtype=q.dtype)
         dk = torch.empty_like(k)
         dv = torch.empty_like(v)
     elif (not dq.is_contiguous()) or (not dq.is_contiguous()) or (not dq.is_contiguous()):

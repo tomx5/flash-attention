@@ -84,6 +84,8 @@ def _flash_attn_forward(
     k: torch.Tensor,
     v: torch.Tensor,
     dropout_p: float,
+    dropout_philox_seed,
+    dropout_philox_offset,
     softmax_scale: float,
     causal: bool,
     window_size_left: int,
@@ -100,6 +102,8 @@ def _flash_attn_forward(
         None,
         alibi_slopes,
         dropout_p,
+        dropout_philox_seed,
+        dropout_philox_offset,
         softmax_scale,
         causal,
         window_size_left,
@@ -154,6 +158,8 @@ def _flash_attn_varlen_forward(
     max_seqlen_q: int,
     max_seqlen_k: int,
     dropout_p: float,
+    dropout_philox_seed,
+    dropout_philox_offset,
     softmax_scale: float,
     causal: bool,
     window_size_left: int = -1,
@@ -179,7 +185,9 @@ def _flash_attn_varlen_forward(
         alibi_slopes,
         max_seqlen_q,
         max_seqlen_k,
-        dropout_p,
+        dropout_p,    
+        dropout_philox_seed,
+        dropout_philox_offset,
         softmax_scale,
         False,
         causal,
@@ -249,6 +257,8 @@ def _flash_attn_backward(
     dk: Optional[torch.Tensor],
     dv: Optional[torch.Tensor],
     dropout_p: float,
+    dropout_philox_seed,
+    dropout_philox_offset,
     softmax_scale: float,
     causal: bool,
     window_size_left: int,
@@ -277,6 +287,8 @@ def _flash_attn_backward(
         dv,
         alibi_slopes,
         dropout_p,
+        dropout_philox_seed,
+        dropout_philox_offset,
         softmax_scale,
         causal,
         window_size_left,
@@ -345,6 +357,8 @@ def _flash_attn_varlen_backward(
     max_seqlen_q: int,
     max_seqlen_k: int,
     dropout_p: float,
+    dropout_philox_seed,
+    dropout_philox_offset,
     softmax_scale: float,
     causal: bool,
     window_size_left: int,
@@ -377,6 +391,8 @@ def _flash_attn_varlen_backward(
         max_seqlen_q,
         max_seqlen_k,
         dropout_p,
+        dropout_philox_seed,
+        dropout_philox_offset,
         softmax_scale,
         False,
         causal,
@@ -444,6 +460,8 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
         ctx,
         qkv,
         dropout_p,
+        dropout_philox_seed,
+        dropout_philox_offset,
         softmax_scale,
         causal,
         window_size,
@@ -465,6 +483,8 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             k,
             v,
             dropout_p,
+            dropout_philox_seed,
+            dropout_philox_offset,
             softmax_scale,
             causal=causal,
             window_size_left=window_size[0],
@@ -475,6 +495,8 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
         )
         ctx.save_for_backward(q, k, v, out_padded, softmax_lse, rng_state)
         ctx.dropout_p = dropout_p
+        ctx.dropout_philox_seed = dropout_philox_seed
+        ctx.dropout_philox_offset = dropout_philox_offset
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
         ctx.window_size = window_size
@@ -504,6 +526,8 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             dqkv[:, :, 1],
             dqkv[:, :, 2],
             ctx.dropout_p,
+            ctx.dropout_philox_seed,
+            ctx.dropout_philox_offset,
             ctx.softmax_scale,
             ctx.causal,
             ctx.window_size[0],
@@ -561,6 +585,8 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
         )
         ctx.save_for_backward(q, k, v, out_padded, softmax_lse, cu_seqlens, rng_state)
         ctx.dropout_p = dropout_p
+        ctx.dropout_philox_seed = dropout_philox_seed
+        ctx.dropout_philox_offset = dropout_philox_offset
         ctx.max_seqlen = max_seqlen
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
@@ -615,6 +641,8 @@ class FlashAttnKVPackedFunc(torch.autograd.Function):
         q,
         kv,
         dropout_p,
+        dropout_philox_seed,
+        dropout_philox_offset,
         softmax_scale,
         causal,
         window_size,
@@ -636,6 +664,8 @@ class FlashAttnKVPackedFunc(torch.autograd.Function):
             k,
             v,
             dropout_p,
+            dropout_philox_seed,
+            dropout_philox_offset,
             softmax_scale,
             causal=causal,
             window_size_left=window_size[0],
@@ -646,6 +676,8 @@ class FlashAttnKVPackedFunc(torch.autograd.Function):
         )
         ctx.save_for_backward(q, k, v, out_padded, softmax_lse, rng_state)
         ctx.dropout_p = dropout_p
+        ctx.dropout_philox_seed = dropout_philox_seed
+        ctx.dropout_philox_offset = dropout_philox_offset
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
         ctx.window_size = window_size
@@ -676,6 +708,8 @@ class FlashAttnKVPackedFunc(torch.autograd.Function):
             dkv[:, :, 0],
             dkv[:, :, 1],
             ctx.dropout_p,
+            ctx.dropout_philox_seed,
+            ctx.dropout_philox_offset,
             ctx.softmax_scale,
             ctx.causal,
             ctx.window_size[0],
@@ -739,6 +773,8 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state
         )
         ctx.dropout_p = dropout_p
+        ctx.dropout_philox_seed = dropout_philox_seed
+        ctx.dropout_philox_offset = dropout_philox_offset
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
         ctx.softmax_scale = softmax_scale
@@ -797,6 +833,8 @@ class FlashAttnFunc(torch.autograd.Function):
         k,
         v,
         dropout_p,
+        dropout_philox_seed,
+        dropout_philox_offset,
         softmax_scale,
         causal,
         window_size,
@@ -817,6 +855,8 @@ class FlashAttnFunc(torch.autograd.Function):
             k,
             v,
             dropout_p,
+            dropout_philox_seed,
+            dropout_philox_offset,
             softmax_scale,
             causal=causal,
             window_size_left=window_size[0],
@@ -827,6 +867,8 @@ class FlashAttnFunc(torch.autograd.Function):
         )
         ctx.save_for_backward(q, k, v, out_padded, softmax_lse, rng_state)
         ctx.dropout_p = dropout_p
+        ctx.dropout_philox_seed = dropout_philox_seed
+        ctx.dropout_philox_offset = dropout_philox_offset
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
         ctx.window_size = window_size
@@ -855,6 +897,8 @@ class FlashAttnFunc(torch.autograd.Function):
             dk,
             dv,
             ctx.dropout_p,
+            ctx.dropout_philox_seed,
+            ctx.dropout_philox_offset,
             ctx.softmax_scale,
             ctx.causal,
             ctx.window_size[0],
@@ -867,7 +911,7 @@ class FlashAttnFunc(torch.autograd.Function):
         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
         dk = dk[..., : dout.shape[-1]]
         dv = dv[..., : dout.shape[-1]]
-        return dq, dk, dv, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None
 
 
 class FlashAttnVarlenFunc(torch.autograd.Function):
@@ -920,6 +964,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state
         )
         ctx.dropout_p = dropout_p
+        ctx.dropout_philox_seed = dropout_philox_seed
+        ctx.dropout_philox_offset = dropout_philox_offset
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
         ctx.softmax_scale = softmax_scale
@@ -1109,6 +1155,8 @@ def flash_attn_func(
     k,
     v,
     dropout_p=0.0,
+    dropout_philox_seed=0.0,
+    dropout_philox_offset=0.0,
     softmax_scale=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite context window
@@ -1170,6 +1218,8 @@ def flash_attn_func(
         k,
         v,
         dropout_p,
+        dropout_philox_seed,
+        dropout_philox_offset,
         softmax_scale,
         causal,
         window_size,

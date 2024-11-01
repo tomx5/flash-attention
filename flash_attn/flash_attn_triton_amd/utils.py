@@ -3,7 +3,35 @@ import torch
 import os
 import triton
 
-from .fwd_prefill import store_dropout_mask
+import triton.language as tl
+
+@triton.jit
+def dropout_offsets(philox_seed, philox_offset, dropout_p, m, n, stride):
+    ms = tl.arange(0, m)
+    ns = tl.arange(0, n)
+    return philox_offset + ms[:, None] * stride + ns[None, :]
+
+
+@triton.jit
+def dropout_rng(philox_seed, philox_offset, dropout_p, m, n, stride):
+    rng_offsets = dropout_offsets(philox_seed, philox_offset, dropout_p, m, n, stride).to(tl.uint32)
+    # TODO: use tl.randint for better performance
+    return tl.rand(philox_seed, rng_offsets)
+
+
+@triton.jit
+def dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride):
+    rng_output = dropout_rng(philox_seed, philox_offset, dropout_p, m, n, stride)
+    rng_keep = rng_output > dropout_p
+    return rng_keep
+
+@triton.jit
+def store_dropout_mask(X, philox_seed, philox_offset, dropout_p: tl.constexpr, m: tl.constexpr, n: tl.constexpr, stride: tl.constexpr):
+    x = tl.zeros((m, n), tl.float32)
+    # import pdb; pdb.set_trace()
+    x = dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride)
+    x_block = (tl.arange(0, m)[:, None]*n + tl.arange(0, n)[None, :])
+    tl.store(X+x_block, x, mask=((tl.arange(0, m)[:, None] < m) & (tl.arange(0, n)[None, :] < n)))
 
 AUTOTUNE = os.environ.get('FLASH_ATTENTION_TRITON_AMD_AUTOTUNE', '1').lower() in ('1', 'true', 'yes')
 DEBUG = os.environ.get('FLASH_ATTENTION_TRITON_AMD_DEBUG', '0').lower() in ('1', 'true', 'yes')
@@ -96,7 +124,7 @@ class MetaData():
 
         assert self.max_seqlens_q != 0 and self.max_seqlens_k, "max_seqlens_q OR max_seqlens_k is 0. Must be non-zero."
 
-        self.dropout_mask = torch.zeros(self.max_seqlens_q, self.max_seqlens_k)
+        self.dropout_mask = torch.zeros(self.max_seqlens_q, self.max_seqlens_k, device='cuda')
         store_dropout_mask[(1, 1, 1)](self.dropout_mask,
                                       self.dropout_philox_seed,
                                       self.dropout_philox_offset,

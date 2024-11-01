@@ -94,8 +94,9 @@ def attention_backward_core_ref_impl(
 
     # print('ds_before', ds)
     # import pdb; pdb.set_trace()
-    ds = ds * dropout_mask
-    ds = ds / (1 - dropout_p)
+    if dropout_p > 0.0:
+        ds = ds * dropout_mask
+        ds = ds / (1 - dropout_p)
     # print('ds_after', ds)
 
     # compute gradient wrt k
