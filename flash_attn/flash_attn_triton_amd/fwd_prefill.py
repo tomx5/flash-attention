@@ -169,6 +169,8 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
 
         # CAVEAT: Must update l_ij before applying dropout
         l_ij = tl.sum(p, 1)
+        
+        # if dropout enabled, mask the scores and scale proportionally
         if ENABLE_DROPOUT:
             philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n
             keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, actual_seqlen_k)
@@ -177,6 +179,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                 exp_score_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
                 tl.store(exp_scores_ptrs, tl.where(keep, p, -p), mask=exp_score_mask)
             p = tl.where(keep, p, 0.0)
+            p = p / (1 - dropout_p)
         elif RETURN_SCORES:
             # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
             exp_score_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
@@ -411,11 +414,11 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_
         scores_scaled_shifted_ptrs = None
         exp_scores_ptrs = None
 
-    if ENABLE_DROPOUT:
-        off_hz = off_z * HQ + off_h_q
-        batch_philox_offset = philox_offset_base + off_hz * seqlen_q * seqlen_k
-    else:
-        batch_philox_offset = 0
+    # if ENABLE_DROPOUT:
+    #     off_hz = off_z * HQ + off_h_q
+    #     batch_philox_offset = philox_offset_base + off_hz * seqlen_q * seqlen_k
+    # else:
+    #     batch_philox_offset = 0
     
     # initialize pointer to m and l
     m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
@@ -448,7 +451,7 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_
     if n_full_blocks > 0:
         block_max = (n_blocks - masked_blocks) * BLOCK_N
         acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk, stride_bn,
-                                        start_m, seqlen_k, seqlen_q, dropout_p, philox_seed, batch_philox_offset,
+                                        start_m, seqlen_k, seqlen_q, dropout_p, philox_seed, philox_offset_base,
                                         exp_scores_ptrs,
                                         # _, _, offs_n_causal, masked_blocks, n_extra_tokens, _
                                         block_min, block_max, 0, 0, 0, alibi_slope, score_ptrs, scores_scaled_shifted_ptrs,
@@ -476,7 +479,7 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_
             scores_scaled_shifted_ptrs += n_full_blocks * BLOCK_N
             exp_scores_ptrs += n_full_blocks * BLOCK_N
         acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk, stride_bn,
-                                        start_m, seqlen_k, seqlen_q, dropout_p, philox_seed, batch_philox_offset,
+                                        start_m, seqlen_k, seqlen_q, dropout_p, philox_seed, philox_offset_base,
                                         exp_scores_ptrs, block_min, block_max, offs_n_causal, masked_blocks,
                                         n_extra_tokens, alibi_slope, score_ptrs, scores_scaled_shifted_ptrs,
                                         IS_CAUSAL, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,

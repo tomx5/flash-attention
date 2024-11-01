@@ -463,7 +463,7 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dropout_philo
     # (1, 16, 1024, 1024, 128),
 ])
 @pytest.mark.parametrize('causal', [False])
-@pytest.mark.parametrize("dropout_p", [0.17])
+@pytest.mark.parametrize("dropout_p", [0.5])
 @pytest.mark.parametrize("dropout_philox_seed, dropout_philox_offset", [
     (0x1BF51, 0x1D4B49),
 ])
@@ -552,6 +552,9 @@ def test_op_prefill_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
         metadata.max_seqlens_k,
         use_exp2
     )
+
+    print('ref scores', exp_scores_ref)
+    print('triton scores', exp_scores_triton)
 
     DEBUG = True
 

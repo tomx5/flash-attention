@@ -49,6 +49,8 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_mask, dro
         )
         attention_scaled_scores = attention_scaled_scores / (1 - dropout_p) # scale scores based on dropout
 
+        print('DIF SCORES REF', torch.exp(attention_scaled_scores))
+
     # Compute max for numerical stability
     max_scores = torch.max(attention_scaled_scores, dim=-1, keepdim=True)[0]
     if DEBUG:
