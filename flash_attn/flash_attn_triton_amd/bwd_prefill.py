@@ -229,9 +229,18 @@ def _bwd_kernel_one_col_block(
         # mask block in the cases where the data is smaller the block size
         p_mask = mask_m[:, None] & mask_n[None, :]
         p = tl.where(p_mask, p, 0.0)
+
+        # NOTE: must create a new var p_drop to prevent p (which is used later to compute ds) from changing
+        if ENABLE_DROPOUT:
+            philox_offset = philox_offset_base + start_m * N_CTX_K + start_n * BLOCK_N
+            keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, N_CTX_K)
+            p_drop = tl.where(keep, p, 0.0)
+
+            p_drop = p_drop / (1 - dropout_p)
+            p_drop = p_drop.to(Q.dtype.element_ty)
         
         # compute dv
-        dv += tl.dot(tl.trans(p.to(Q.dtype.element_ty)), do)
+        dv += tl.dot(tl.trans(p_drop.to(Q.dtype.element_ty)), do)
 
         # compute dp
         dp = tl.dot(do, tl.trans(v))
