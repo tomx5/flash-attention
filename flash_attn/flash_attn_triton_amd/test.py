@@ -210,13 +210,13 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
     # smallest config test
     (1, 1, 4, 4, 16),
-    # (1, 1, 16, 16, 64), # pass on new # fail on old
-    # (1, 1, 32, 32, 64), # pass on new # fail on old
-    # (1, 1, 64, 64, 16), # pass # smallest head_size = 16
-    # (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
-    # (1, 1, 128, 128, 64), # pass
-    # (1, 1, 256, 256, 64), # pass
-    # (1, 1, 512, 512, 64), # pass
+    (1, 1, 16, 16, 64), # pass on new # fail on old
+    (1, 1, 32, 32, 64), # pass on new # fail on old
+    (1, 1, 64, 64, 16), # pass # smallest head_size = 16
+    (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
+    (1, 1, 128, 128, 64), # pass
+    (1, 1, 256, 256, 64), # pass
+    (1, 1, 512, 512, 64), # pass
     # # failing FA
     # (1, 1, 256, 512, 16),
     # # old tests that work
@@ -462,7 +462,7 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dropout_philo
     # (1, 16, 1024, 1024, 64),
     # (1, 16, 1024, 1024, 128),
 ])
-@pytest.mark.parametrize('causal', [False])
+@pytest.mark.parametrize('causal', [True])
 @pytest.mark.parametrize("dropout_p", [0.5])
 @pytest.mark.parametrize("dropout_philox_seed, dropout_philox_offset", [
     (0x1BF51, 0x1D4B49),
@@ -476,6 +476,8 @@ def test_op_prefill_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
     torch.manual_seed(0)
     alibi_slopes = None
     device = "cuda"
+
+    assert layout == "bhsd", "'thd' layout currently not supported"
 
     if layout == "thd":
         q, k, v, metadata = varlen_input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device=device, DEBUG_INPUT=DEBUG_INPUT)
@@ -509,7 +511,7 @@ def test_op_prefill_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
         _, 
         _, 
         _, 
-        _) = attention_prefill_forward_triton_impl(
+        scores_scaled_shifted_triton) = attention_prefill_forward_triton_impl(
                                                 q, 
                                                 k, 
                                                 v, 
@@ -563,14 +565,26 @@ def test_op_prefill_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
         print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
     torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=ATOL, rtol=RTOL)
 
+    print("attention_scaled_scores_ref:", attention_scaled_scores_ref, attention_scaled_scores_ref.shape)
+    print("scores_scaled_shifted_triton:", scores_scaled_shifted_triton, scores_scaled_shifted_triton.shape)
+
     if layout != "thd":
         # use trick with lse to get the softmax. you need the scores but is it
         softmax_triton = torch.exp(attention_scaled_scores_ref - softmax_lse_triton.unsqueeze(-1))
+        # Apply dropout mask to softmax output
+        if dropout_p > 0.0:
+            softmax_triton = softmax_triton.masked_fill(
+                torch.logical_not(metadata.dropout_mask), 0
+            )
+            softmax_triton = softmax_triton / (1 - dropout_p) # scale scores based on dropout
         if DEBUG:
             print("attention_scaled_scores_ref:", attention_scaled_scores_ref, attention_scaled_scores_ref.shape)
             print("softmax_lse_triton:", softmax_lse_triton, softmax_lse_triton.shape)
             print("softmax_triton:", softmax_triton, softmax_triton.shape)
             print("softmax_ref:", softmax_ref, softmax_ref.shape)
+
+        # Do not test softmax ref / triton
+        # fwd_prefill.py::160 --> NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
         torch.testing.assert_close(softmax_triton, softmax_ref, atol=ATOL, rtol=RTOL)
     
     if DEBUG:

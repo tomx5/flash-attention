@@ -236,21 +236,23 @@ def _bwd_kernel_one_col_block(
         # compute dp
         dp = tl.dot(do, tl.trans(v))
 
+        # if dropout enabled, mask the scores and scale proportionally
+        if ENABLE_DROPOUT:
+            philox_offset = philox_offset_base + start_m * N_CTX_K + start_n * BLOCK_N
+            # import pdb; pdb.set_trace()
+            keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, N_CTX_K)
+            dp = tl.where(keep, dp, 0.0)
+
+            dp = dp / (1 - dropout_p) # scale ds based on dropout_p
+            dp = dp.to(Q.dtype.element_ty)
+
         # compute ds , ds = p * (dp - delta[:, None])
         d_ptrs = d_offset + offs_m * stride_deltam
         Di = tl.load(d_ptrs, mask=mask_m)
         ds = (p * (dp - Di[:, None])) * sm_scale
         ds = tl.where(p_mask, ds, 0.0).to(Q.dtype.element_ty)
         
-        # if dropout enabled, mask the scores and scale proportionally
-        if ENABLE_DROPOUT:
-            philox_offset = philox_offset_base + start_m * N_CTX_K + start_n * BLOCK_N
-            # import pdb; pdb.set_trace()
-            keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, N_CTX_K)
-            ds = tl.where(keep, ds, 0.0)
-
-            ds = ds / (1 - dropout_p) # scale ds based on dropout_p
-            ds = ds.to(Q.dtype.element_ty)
+        
         # print('ds_after_triton\n', ds)
 
         # compute dk = dot(ds.T, q)
@@ -326,6 +328,12 @@ def _bwd_kernel(
         start_n = tl.program_id(1)
     off_z = off_hz // H
     off_h = off_hz % H
+
+    if ENABLE_DROPOUT:
+        off_hz = off_z * H + off_h
+        batch_philox_offset = philox_offset_base + off_hz * max_seqlen_q * max_seqlen_k
+    else:
+        batch_philox_offset = 0
 
     if IS_VARLEN:
         # Compute sequence lengths for the current batch
@@ -409,7 +417,7 @@ def _bwd_kernel(
             start_n,
             num_block_m,
             num_block_n,
-            dropout_p, philox_seed, philox_offset_base,
+            dropout_p, philox_seed, batch_philox_offset,
             BLOCK_M=BLOCK_M,
             BLOCK_DMODEL=BLOCK_DMODEL,
             ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
@@ -468,7 +476,7 @@ def _bwd_kernel(
                 start_n,
                 num_block_m,
                 num_block_n,
-                dropout_p, philox_seed, philox_offset_base,
+                dropout_p, philox_seed, batch_philox_offset,
                 BLOCK_M=BLOCK_M,
                 BLOCK_DMODEL=BLOCK_DMODEL,
                 ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,

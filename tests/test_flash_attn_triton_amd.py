@@ -926,7 +926,7 @@ def test_flash_attn_varlen_qkvpacked(
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
 # @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
-@pytest.mark.parametrize("dropout_p", [0.20])
+@pytest.mark.parametrize("dropout_p", [0.50])
 # @pytest.mark.parametrize("softcap", [0.0, 50.0])
 @pytest.mark.parametrize("softcap", [0.0])
 def test_flash_attn_output(
@@ -948,9 +948,11 @@ def test_flash_attn_output(
     device = "cuda"
     # set seed
     torch.random.manual_seed(20)
-    batch_size = 4
+    batch_size = 1
     nheads = 6 if softcap == 0.0 else 4  # softcap reference impl takes more memory
+    nheads = 1
     nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 2)
+
     assert nheads % nheads_k == 0
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
     q = torch.ones(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)

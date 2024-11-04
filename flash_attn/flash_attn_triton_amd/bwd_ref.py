@@ -78,6 +78,10 @@ def attention_backward_core_ref_impl(
     if DEBUG:
         print("dp:", dp, dp.shape)
 
+    if dropout_p > 0.0:
+        dp = dp / (1 - dropout_p)
+        dp = dp * dropout_mask
+
     # calculate ds using dp
     if True:
         delta = torch.sum(o * do, axis=-1).to(torch.float32)  # what OAI kernel uses
@@ -94,9 +98,6 @@ def attention_backward_core_ref_impl(
 
     # print('ds_before', ds)
     # import pdb; pdb.set_trace()
-    if dropout_p > 0.0:
-        ds = ds * dropout_mask
-        ds = ds / (1 - dropout_p)
     # print('ds_after', ds)
 
     # compute gradient wrt k

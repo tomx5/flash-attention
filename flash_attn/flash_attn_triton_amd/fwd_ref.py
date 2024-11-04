@@ -42,15 +42,6 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_mask, dro
         if DEBUG:
             print("attention_scaled_scores after causal:", attention_scaled_scores, attention_scaled_scores.shape)
 
-    # Apply dropout mask
-    if dropout_p > 0.0:
-        attention_scaled_scores = attention_scaled_scores.masked_fill(
-            torch.logical_not(dropout_mask), float('-inf')
-        )
-        attention_scaled_scores = attention_scaled_scores / (1 - dropout_p) # scale scores based on dropout
-
-        print('DIF SCORES REF', torch.exp(attention_scaled_scores))
-
     # Compute max for numerical stability
     max_scores = torch.max(attention_scaled_scores, dim=-1, keepdim=True)[0]
     if DEBUG:
@@ -114,6 +105,14 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_mask, dro
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
 
     print('v', v)
+
+    # Apply dropout mask to softmax output
+    if dropout_p > 0.0:
+        softmax = softmax.masked_fill(
+            torch.logical_not(dropout_mask), 0
+        )
+        softmax = softmax / (1 - dropout_p) # scale scores based on dropout
+
 
     # Compute output
     o = torch.matmul(softmax, v.to(torch.float32)).to(torch.float16)
