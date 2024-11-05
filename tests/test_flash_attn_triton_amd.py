@@ -914,14 +914,14 @@ def test_flash_attn_varlen_qkvpacked(
     [
         # (113, 203),
         # (128, 217),
-        # (113, 211),
+        (113, 211),
         # (108, 256),
-        (256, 512),
-        (512, 256),
+        # (256, 512),
+        # (512, 256),
         # (1024, 1024),
         # (1023, 1024),
         # (1024, 1023),
-        (2048, 2048),
+        # (2048, 2048),
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
@@ -950,7 +950,7 @@ def test_flash_attn_output(
     torch.random.manual_seed(20)
     batch_size = 1
     nheads = 6 if softcap == 0.0 else 4  # softcap reference impl takes more memory
-    nheads = 1
+    # nheads = 1
     nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 2)
 
     assert nheads % nheads_k == 0

@@ -27,11 +27,14 @@ def dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride):
 
 @triton.jit
 def store_dropout_mask(X, philox_seed, philox_offset, dropout_p: tl.constexpr, m: tl.constexpr, n: tl.constexpr, stride: tl.constexpr):
-    x = tl.zeros((m, n), tl.float32)
+    # x = tl.zeros((m, n), tl.float32)
     # import pdb; pdb.set_trace()
-    x = dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride)
-    x_block = (tl.arange(0, m)[:, None]*n + tl.arange(0, n)[None, :])
-    tl.store(X+x_block, x, mask=((tl.arange(0, m)[:, None] < m) & (tl.arange(0, n)[None, :] < n)))
+    for start_m in range(0, m, 128):
+        for start_n in range(0, n, 128):
+            philox_offset_shift = philox_offset + start_m*n + start_n
+            x = dropout_mask(philox_seed, philox_offset_shift, dropout_p, 128, 128, stride)
+            x_block = (tl.arange(0, 128)[:, None]*n + tl.arange(0, 128)[None, :])
+            tl.store(X+x_block, x, mask=((tl.arange(0, 128)[:, None] < m) & (tl.arange(0, 128)[None, :] < n)))
 
 AUTOTUNE = os.environ.get('FLASH_ATTENTION_TRITON_AMD_AUTOTUNE', '1').lower() in ('1', 'true', 'yes')
 DEBUG = os.environ.get('FLASH_ATTENTION_TRITON_AMD_DEBUG', '0').lower() in ('1', 'true', 'yes')
@@ -124,14 +127,15 @@ class MetaData():
 
         assert self.max_seqlens_q != 0 and self.max_seqlens_k, "max_seqlens_q OR max_seqlens_k is 0. Must be non-zero."
 
-        self.dropout_mask = torch.zeros(self.max_seqlens_q, self.max_seqlens_k, device='cuda')
-        store_dropout_mask[(1, 1, 1)](self.dropout_mask,
-                                      self.dropout_philox_seed,
-                                      self.dropout_philox_offset,
-                                      self.dropout_p,
-                                      self.max_seqlens_q,
-                                      self.max_seqlens_k,
-                                      self.max_seqlens_k)
+        # # TODO: parallelize the creation of the dropout mask across many threads
+        # self.dropout_mask = torch.zeros(self.max_seqlens_q, self.max_seqlens_k, device='cuda')
+        # store_dropout_mask[(1, 1, 1)](self.dropout_mask,
+        #                               self.dropout_philox_seed,
+        #                               self.dropout_philox_offset,
+        #                               self.dropout_p,
+        #                               self.max_seqlens_q,
+        #                               self.max_seqlens_k,
+        #                               self.max_seqlens_k)
 
         self.return_scores = return_scores
 
