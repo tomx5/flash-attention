@@ -19,14 +19,17 @@ var/
 *.egg-info/
 .installed.cfg
 *.egg
-.eggs
 
 # IDE-related
 .idea/
 
 # Dev
 venv
+
+# AMD
 scripts
+csrc/flash_attn_ck
+.eggs
 *.log
 core.*
 *.csv

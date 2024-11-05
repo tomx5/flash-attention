@@ -36,8 +36,9 @@ def store_dropout_mask(X, philox_seed, philox_offset, dropout_p: tl.constexpr, m
             x_block = (tl.arange(0, 128)[:, None]*n + tl.arange(0, 128)[None, :])
             tl.store(X+x_block, x, mask=((tl.arange(0, 128)[:, None] < m) & (tl.arange(0, 128)[None, :] < n)))
 
-AUTOTUNE = os.environ.get('FLASH_ATTENTION_TRITON_AMD_AUTOTUNE', '1').lower() in ('1', 'true', 'yes')
+AUTOTUNE = os.environ.get('FLASH_ATTENTION_TRITON_AMD_AUTOTUNE', '0').lower() in ('1', 'true', 'yes')
 DEBUG = os.environ.get('FLASH_ATTENTION_TRITON_AMD_DEBUG', '0').lower() in ('1', 'true', 'yes')
+PERF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_PERF', '0').lower() in ('1', 'true', 'yes')
 
 class MetaData():
     cu_seqlens_q = None
