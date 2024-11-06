@@ -126,8 +126,6 @@ class MetaData():
         self.dropout_philox_seed = dropout_philox_seed
         self.dropout_philox_offset = dropout_philox_offset
 
-        assert self.max_seqlens_q != 0 and self.max_seqlens_k, "max_seqlens_q OR max_seqlens_k is 0. Must be non-zero."
-
         # # TODO: parallelize the creation of the dropout mask across many threads
         # self.dropout_mask = torch.zeros(self.max_seqlens_q, self.max_seqlens_k, device='cuda')
         # store_dropout_mask[(1, 1, 1)](self.dropout_mask,
@@ -165,6 +163,7 @@ class MetaData():
         assert (nheads_q % nheads_k) == 0
         assert self.layout is not None
         assert self.layout == 'thd' or not self.varlen
+        assert self.max_seqlens_q != 0 and self.max_seqlens_k != 0, "max_seqlens_q OR max_seqlens_k is 0. Must be non-zero."
 
 def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device="cuda", DEBUG_INPUT=False):
     torch.manual_seed(20)

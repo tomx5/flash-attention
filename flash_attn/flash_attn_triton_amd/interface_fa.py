@@ -83,7 +83,7 @@ def fwd(q,
                                                 v,
                                                 metadata.sm_scale, 
                                                 metadata.causal,
-                                                metadata.dropout_mask,
+                                                None,
                                                 metadata.dropout_p,
                                                 metadata.layout, 
                                                 metadata.cu_seqlens_q, 
@@ -182,14 +182,15 @@ def bwd(
     metadata.max_seqlens_q = q.shape[1]
     metadata.max_seqlens_k = k.shape[1]
     metadata.layout = "bshd"
+    metadata.need_dropout(dropout_p, dropout_philox_seed, dropout_philox_offset)
 
     if USE_REF:
         if DEBUG:
             print("Using reference implementation")
 
-        seqlen_q, seqlen_k = q.shape(-3), k.shape(-3)       # NOTE: assumes 'bshd' layout
-        dropout_mask = torch.zeros(seqlen_q, seqlen_k)
-        store_dropout_mask[(1, 1, 1)](MASK=dropout_mask, philox_seed=dropout_philox_seed, philox_offset=dropout_philox_offset, dropout_p=dropout_p, m=seqlen_q, n=seqlen_k, stride=seqlen_k)
+        # seqlen_q, seqlen_k = q.shape(-3), k.shape(-3)       # NOTE: assumes 'bshd' layout
+        # dropout_mask = torch.zeros(seqlen_q, seqlen_k)
+        # store_dropout_mask[(1, 1, 1)](MASK=dropout_mask, philox_seed=dropout_philox_seed, philox_offset=dropout_philox_offset, dropout_p=dropout_p, m=seqlen_q, n=seqlen_k, stride=seqlen_k)
         
         dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
             dout,
@@ -200,8 +201,8 @@ def bwd(
             softmax_lse,
             softmax_scale,
             causal,
+            None,
             dropout_p,
-            dropout_mask,
             "bshd",
             None,
             None,
