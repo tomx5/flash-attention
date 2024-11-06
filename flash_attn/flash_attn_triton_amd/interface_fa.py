@@ -152,7 +152,6 @@ def bwd(
     softcap,
     deterministic,
     gen_,
-    rng_state,
 ):
     if DEBUG:
         print()
@@ -177,7 +176,6 @@ def bwd(
         print("window_size_right:", window_size_right)
         print("deterministic:", deterministic)
         print("gen_:", gen_)
-        print("rng_state:", rng_state)
 
 
     if USE_REF:
@@ -406,7 +404,6 @@ def varlen_bwd(
     softcap,
     deterministic,
     gen_,
-    rng_state,
 ):
     if DEBUG:
         print()
@@ -432,7 +429,6 @@ def varlen_bwd(
         print("window_size_right:", window_size_right)
         print("deterministic:", deterministic)
         print("gen_:", gen_)
-        print("rng_state:", rng_state)
 
     if USE_REF:
         if DEBUG:

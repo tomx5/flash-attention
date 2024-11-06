@@ -266,7 +266,6 @@ def _flash_attn_backward(
     softcap: float,
     alibi_slopes: Optional[torch.Tensor],
     deterministic: bool,
-    rng_state: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     # dq, dk, dv are allocated by us so they should already be contiguous
     dout, q, k, v, out = [maybe_contiguous(x) for x in (dout, q, k, v, out)]
@@ -296,7 +295,7 @@ def _flash_attn_backward(
         softcap,
         deterministic,
         None,
-        rng_state,
+        
     )
     return softmax_d
 
@@ -366,7 +365,6 @@ def _flash_attn_varlen_backward(
     softcap: float,
     alibi_slopes: Optional[torch.Tensor],
     deterministic: bool,
-    rng_state: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     # dq, dk, dv are allocated by us so they should already be contiguous
     dout, q, k, v, out = [maybe_contiguous(x) for x in (dout, q, k, v, out)]
@@ -396,12 +394,12 @@ def _flash_attn_varlen_backward(
         softmax_scale,
         False,
         causal,
+        None,
         window_size_left,
         window_size_right,
         softcap,
         deterministic,
-        None,
-        rng_state,
+        gen_=None,
     )
     # if dk.isnan().any() or dk.isnan().any() or dv.isnan().any() or softmax_d.isnan().any():
     #     breakpoint()
@@ -628,7 +626,6 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
             ctx.softcap,
             ctx.alibi_slopes,
             ctx.deterministic,
-            rng_state=rng_state,
         )
         dqkv = dqkv[..., : dout.shape[-1]]  # We could have padded the head dimension
         return dqkv, None, None, None, None, None, None, None, None, None, None
@@ -818,7 +815,6 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             ctx.softcap,
             ctx.alibi_slopes,
             ctx.deterministic,
-            rng_state=rng_state,
         )
         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
         dkv = dkv[..., : dout.shape[-1]]
@@ -906,7 +902,6 @@ class FlashAttnFunc(torch.autograd.Function):
             ctx.softcap,
             ctx.alibi_slopes,
             ctx.deterministic,
-            rng_state=rng_state,
         )
         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
         dk = dk[..., : dout.shape[-1]]
@@ -926,6 +921,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         max_seqlen_q,
         max_seqlen_k,
         dropout_p,
+        dropout_philox_seed,
+        dropout_philox_offset,
         softmax_scale,
         causal,
         window_size,
@@ -950,8 +947,10 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             cu_seqlens_k,
             max_seqlen_q,
             max_seqlen_k,
-            dropout_p,
-            softmax_scale,
+            dropout_p=dropout_p,
+            dropout_philox_seed=dropout_philox_seed,
+            dropout_philox_offset=dropout_philox_offset,
+            softmax_scale=softmax_scale,
             causal=causal,
             window_size_left=window_size[0],
             window_size_right=window_size[1],
@@ -1000,6 +999,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             ctx.max_seqlen_q,
             ctx.max_seqlen_k,
             ctx.dropout_p,
+            ctx.dropout_philox_seed,
+            ctx.dropout_philox_offset,
             ctx.softmax_scale,
             ctx.causal,
             ctx.window_size[0],
@@ -1007,12 +1008,11 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             ctx.softcap,
             ctx.alibi_slopes,
             ctx.deterministic,
-            rng_state=rng_state,
         )
         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
         dk = dk[..., : dout.shape[-1]]
         dv = dv[..., : dout.shape[-1]]
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 def flash_attn_qkvpacked_func(
@@ -1395,6 +1395,8 @@ def flash_attn_varlen_func(
     max_seqlen_q,
     max_seqlen_k,
     dropout_p=0.0,
+    dropout_philox_seed=0x001,
+    dropout_philox_offset=0x001,
     softmax_scale=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite context window
@@ -1468,6 +1470,8 @@ def flash_attn_varlen_func(
         max_seqlen_q,
         max_seqlen_k,
         dropout_p,
+        dropout_philox_seed,
+        dropout_philox_offset,
         softmax_scale,
         causal,
         window_size,
