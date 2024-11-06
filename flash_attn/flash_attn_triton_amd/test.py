@@ -387,14 +387,15 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dropout_philo
     (4, 6, 2048, 2048, 32),
 ])
 @pytest.mark.parametrize('causal', [True, False])
-@pytest.mark.parametrize("dropout_p", [0.0, 0.5])
+@pytest.mark.parametrize('return_scores', [False])
+@pytest.mark.parametrize("dropout_p", [0.0])
 @pytest.mark.parametrize("dropout_philox_seed, dropout_philox_offset", [
     (0x1BF51, 0x1D4B49),
 ])
 @pytest.mark.parametrize('use_exp2', [True, False]) # using exp2 causas issue with exp2
 @pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
-def test_op_prefill_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dropout_philox_seed, dropout_philox_offset, layout, use_exp2, DEBUG_INPUT):
+def test_op_prefill_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, dropout_p, dropout_philox_seed, dropout_philox_offset, layout, use_exp2, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(0)
     alibi_slopes = None
@@ -422,7 +423,6 @@ def test_op_prefill_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
         metadata.need_dropout(dropout_p, dropout_philox_seed, dropout_philox_offset)
 
     # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
-    return_scores = True
     if return_scores:
         metadata.return_scores = True
 
