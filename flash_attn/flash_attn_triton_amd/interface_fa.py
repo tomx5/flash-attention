@@ -177,6 +177,11 @@ def bwd(
         print("deterministic:", deterministic)
         print("gen_:", gen_)
 
+    # Setup metadata
+    metadata = MetaData(sm_scale=softmax_scale)
+    metadata.max_seqlens_q = q.shape[1]
+    metadata.max_seqlens_k = k.shape[1]
+    metadata.layout = "bshd"
 
     if USE_REF:
         if DEBUG:

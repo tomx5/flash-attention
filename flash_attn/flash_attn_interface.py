@@ -533,10 +533,9 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             ctx.softcap,
             ctx.alibi_slopes,
             ctx.deterministic,
-            rng_state=rng_state,
         )
         dqkv = dqkv[..., : dout.shape[-1]]  # We could have padded the head dimension
-        return dqkv, None, None, None, None, None, None, None, None
+        return dqkv, None, None, None, None, None, None, None, None, None, None
 
 
 class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
@@ -547,6 +546,8 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
         cu_seqlens,
         max_seqlen,
         dropout_p,
+        dropout_philox_seed,
+        dropout_philox_offset,
         softmax_scale,
         causal,
         window_size,
@@ -572,6 +573,8 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
             max_seqlen,
             max_seqlen,
             dropout_p,
+            dropout_philox_seed,
+            dropout_philox_offset,
             softmax_scale,
             causal=causal,
             window_size_left=window_size[0],
@@ -714,7 +717,6 @@ class FlashAttnKVPackedFunc(torch.autograd.Function):
             ctx.softcap,
             ctx.alibi_slopes,
             ctx.deterministic,
-            rng_state=rng_state,
         )
         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
         dkv = dkv[..., : dout.shape[-1]]
@@ -1018,6 +1020,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
 def flash_attn_qkvpacked_func(
     qkv,
     dropout_p=0.0,
+    dropout_philox_seed=0.0,
+    dropout_philox_offset=0.0,
     softmax_scale=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite context window
@@ -1063,6 +1067,8 @@ def flash_attn_qkvpacked_func(
     return FlashAttnQKVPackedFunc.apply(
         qkv,
         dropout_p,
+        dropout_philox_seed,
+        dropout_philox_offset,
         softmax_scale,
         causal,
         window_size,

@@ -151,8 +151,6 @@ class MetaData():
             assert len(self.cu_seqlens_q) == len(self.cu_seqlens_k)
             # TODO: Remove once bias is supported with varlen
             assert self.bias is None
-            # TODO:Remove once dropout is supported with varlen
-            assert self.dropout_p == 0.0
             # assert not self.return_scores
         else:
             assert q.dim() == 4

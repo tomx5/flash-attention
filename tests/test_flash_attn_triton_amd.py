@@ -20,6 +20,10 @@ from flash_attn.flash_attn_interface import _get_block_size_n
 from flash_attn.layers.rotary import apply_rotary_emb
 from flash_attn.flash_attn_triton_amd.utils import DEBUG
 
+
+# Test if Using Pytorch Ref
+USE_REF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_REF', '0').lower() in ('1', 'true', 'yes')
+
 # Test ROCM Triton Backend
 USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_TRITON_AMD_ENABLE", "FALSE") == "TRUE"
 if USE_TRITON_ROCM:
@@ -589,12 +593,12 @@ def get_dropout_fraction(
 # @pytest.mark.parametrize('seqlen', [128, 256, 384, 512, 768, 1024, 2048])
 @pytest.mark.parametrize("seqlen", [97, 128, 200, 384, 768, 1024, 1025, 2048])
 # @pytest.mark.parametrize("seqlen", [128])
-# @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
-@pytest.mark.parametrize("dropout_p", [0.0])
+@pytest.mark.parametrize("dropout_p", [0.0, 0.17])
+# @pytest.mark.parametrize("dropout_p", [0.0])
 def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, deterministic, dtype):
     if USE_TRITON_ROCM:
-        if dropout_p != 0.0:
-            pytest.skip("Dropout not supported in AMD's Triton Backend yet")
+        if USE_REF and dropout_p != 0.0:
+            pytest.skip("USE_REF not supported when Dropout is enabled.")
 
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
@@ -615,9 +619,15 @@ def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, determ
         attn_bias = attn_bias_from_alibi_slopes(alibi_slopes, seqlen, seqlen, causal=causal)
     else:
         alibi_slopes, attn_bias = None, None
+
+    dropout_philox_seed = 0x1BF58
+    dropout_philox_offset = 0x1D4B49
+
     out, lse, S_dmask = flash_attn_qkvpacked_func(
         qkv,
         dropout_p,
+        dropout_philox_seed,
+        dropout_philox_offset,
         causal=causal,
         window_size=window_size,
         alibi_slopes=alibi_slopes,
@@ -747,12 +757,16 @@ def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, determ
 # @pytest.mark.parametrize('d', [32])
 @pytest.mark.parametrize("seqlen", [97, 128, 200, 257, 384, 512, 768, 1025, 2048])
 # @pytest.mark.parametrize('seqlen', [128])
-# @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
-@pytest.mark.parametrize('dropout_p', [0.0])
+@pytest.mark.parametrize("dropout_p", [0.0, 0.17])
+# @pytest.mark.parametrize('dropout_p', [0.0])
 def test_flash_attn_varlen_qkvpacked(
     seqlen, d, dropout_p, causal, local, alibi, deterministic, dtype
 ):
     if USE_TRITON_ROCM:
+        
+        if USE_REF and dropout_p != 0.0:
+            pytest.skip("USE_REF not supported when Dropout is enabled.")
+
         if dropout_p != 0.0:
             pytest.skip("Dropout not supported in AMD's Triton Backend yet")
 
@@ -891,8 +905,8 @@ def test_flash_attn_varlen_qkvpacked(
 # @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
 # @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("dtype", [torch.float16])
-# @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
-@pytest.mark.parametrize("mha_type", ["mha"])
+@pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
+# @pytest.mark.parametrize("mha_type", ["mha"])
 @pytest.mark.parametrize("deterministic", [False, True])
 # @pytest.mark.parametrize("deterministic", [True])
 # @pytest.mark.parametrize("deterministic", [False])
@@ -925,14 +939,18 @@ def test_flash_attn_varlen_qkvpacked(
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
-# @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
-@pytest.mark.parametrize("dropout_p", [0.00])
+@pytest.mark.parametrize("dropout_p", [0.0, 0.17])
+# @pytest.mark.parametrize("dropout_p", [0.17])
 # @pytest.mark.parametrize("softcap", [0.0, 50.0])
 @pytest.mark.parametrize("softcap", [0.0])
 def test_flash_attn_output(
     seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, softcap
 ):
     if USE_TRITON_ROCM:
+
+        if USE_REF and dropout_p != 0.0:
+            pytest.skip("USE_REF not supported when Dropout is enabled.")
+        
         if softcap != 0.0:
             pytest.skip("softcap not supported on AMD's Triton Backend yet")
 
@@ -1025,6 +1043,9 @@ def test_flash_attn_output(
             window_size=window_size,
         )
         dropout_mask = S_dmask_converted >= 0
+
+        breakpoint()
+
         attn_unnorm = S_dmask_converted.abs()
         if kvpacked:
             kv_rep = repeat(kv, "b s two h d -> b s two (h g) d", g=nheads // nheads_k)
@@ -1205,8 +1226,8 @@ def test_flash_attn_output(
 # @pytest.mark.parametrize('kvpacked', [False])
 # @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
 @pytest.mark.parametrize('dtype', [torch.float16])
-# @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
-@pytest.mark.parametrize('mha_type', ["mha"])
+@pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
+# @pytest.mark.parametrize('mha_type', ["mha"])
 # @pytest.mark.parametrize("deterministic", [False, True])
 @pytest.mark.parametrize("deterministic", [False])
 # @pytest.mark.parametrize("alibi", [False, True])
@@ -1215,9 +1236,9 @@ def test_flash_attn_output(
 @pytest.mark.parametrize("local", [False])
 # @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize('causal', [False])
-@pytest.mark.parametrize("d", [32, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
+# @pytest.mark.parametrize("d", [32, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
-# @pytest.mark.parametrize('d', [160])
+@pytest.mark.parametrize('d', [160])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
@@ -1235,14 +1256,18 @@ def test_flash_attn_output(
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(128, 128)])
-@pytest.mark.parametrize("dropout_p", [0.0, 0.17])
-# @pytest.mark.parametrize('dropout_p', [0.0])
+# @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
+@pytest.mark.parametrize('dropout_p', [0.17])
 # @pytest.mark.parametrize("softcap", [0.0, 50.0])
 @pytest.mark.parametrize("softcap", [0.0])
 def test_flash_attn_varlen_output(
     seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, softcap
 ):
     if USE_TRITON_ROCM:
+        
+        if USE_REF and dropout_p != 0.0:
+            pytest.skip("USE_REF not supported when Dropout is enabled.")
+
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
         
