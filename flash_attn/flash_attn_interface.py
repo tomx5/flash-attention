@@ -1091,6 +1091,8 @@ def flash_attn_kvpacked_func(
     q,
     kv,
     dropout_p=0.0,
+    dropout_philox_seed=0,
+    dropout_philox_offset=0,
     softmax_scale=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite context window
@@ -1154,6 +1156,8 @@ def flash_attn_kvpacked_func(
         q,
         kv,
         dropout_p,
+        dropout_philox_seed,
+        dropout_philox_offset,
         softmax_scale,
         causal,
         window_size,

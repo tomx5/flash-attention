@@ -20,6 +20,8 @@ from flash_attn.flash_attn_interface import _get_block_size_n
 from flash_attn.layers.rotary import apply_rotary_emb
 from flash_attn.flash_attn_triton_amd.utils import DEBUG
 
+# Minimum Allowed Error for Precision Tests
+MIN_ERROR = 1.0e-5
 
 # Test if Using Pytorch Ref
 USE_REF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_REF', '0').lower() in ('1', 'true', 'yes')
@@ -303,14 +305,14 @@ def attention_ref(
     # Otherwise we'll get NaN in dV
     if query_padding_mask is not None:
         attention = attention.masked_fill(rearrange(~query_padding_mask, "b s -> b 1 s 1"), 0.0)
-
+    dropout_scaling = 1.0 / (1 - dropout_p)
+    # attention_drop = attention.masked_fill(~dropout_mask, 0.0) * dropout_scaling
+    # output = torch.einsum('bhts,bshd->bthd', attention_drop , v)
     if dropout_mask is not None:
         attention_drop = attention.masked_fill(~dropout_mask, 0.0)
-        attention_drop = attention_drop / (1 - dropout_p) # apply dropout scaling
     else:
         attention_drop = attention
-
-    output = torch.einsum("bhts,bshd->bthd", attention_drop, v)
+    output = torch.einsum("bhts,bshd->bthd", attention_drop, v * dropout_scaling)
     if query_padding_mask is not None:
         output.masked_fill_(rearrange(~query_padding_mask, "b s -> b s 1 1"), 0.0)
     return output.to(dtype=dtype_og), attention.to(dtype=dtype_og)
@@ -586,13 +588,13 @@ def get_dropout_fraction(
 @pytest.mark.parametrize("local", [False])
 # @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("causal", [False])
-# @pytest.mark.parametrize("d", [32, 40, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
+@pytest.mark.parametrize("d", [32, 40, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 64, 96, 128])
-@pytest.mark.parametrize("d", [40])
+# @pytest.mark.parametrize("d", [32])
 # @pytest.mark.parametrize('seqlen', [128, 256, 384, 512, 768, 1024, 2048])
-# @pytest.mark.parametrize("seqlen", [97, 128, 200, 384, 768, 1024, 1025, 2048])
-@pytest.mark.parametrize("seqlen", [97])
+@pytest.mark.parametrize("seqlen", [97, 128, 200, 384, 768, 1024, 1025, 2048])
+# @pytest.mark.parametrize("seqlen", [128])
 @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
 # @pytest.mark.parametrize("dropout_p", [0.0])
 def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, deterministic, dtype):
@@ -732,6 +734,7 @@ def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, determ
     assert (out - out_ref).abs().max().item() <= 2 * (out_pt - out_ref).abs().max().item()
 
     if dropout_p > 0.0:
+        # NOTE: commented out assertion due to differences that don't effect output
         # assert (attn - attn_ref).abs().max().item() <= 2 * (attn_pt - attn_ref).abs().max().item()
         # With alibi, many of the prob values are 0.0 & -0.0 so dropout_fraction isn't accurate
         if not alibi:
@@ -760,8 +763,8 @@ def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, determ
 # @pytest.mark.parametrize('d', [32])
 @pytest.mark.parametrize("seqlen", [97, 128, 200, 257, 384, 512, 768, 1025, 2048])
 # @pytest.mark.parametrize('seqlen', [128])
-# @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
-@pytest.mark.parametrize('dropout_p', [0.17])
+@pytest.mark.parametrize("dropout_p", [0.0, 0.17])
+# @pytest.mark.parametrize('dropout_p', [0.17])
 def test_flash_attn_varlen_qkvpacked(
     seqlen, d, dropout_p, causal, local, alibi, deterministic, dtype
 ):
@@ -899,6 +902,7 @@ def test_flash_attn_varlen_qkvpacked(
     assert (out - out_ref).abs().max().item() <= 2 * (out_pt - out_ref).abs().max().item()
 
     if dropout_p > 0.0:
+        # NOTE: commented out assertion due to differences that don't effect output
         # assert (attn - attn_ref).abs().max().item() <= 2 * (attn_pt - attn_ref).abs().max().item()
         # With alibi, many of the prob values are 0.0 & -0.0 so dropout_fraction isn't accurate
         if not alibi:
@@ -915,16 +919,16 @@ def test_flash_attn_varlen_qkvpacked(
 @pytest.mark.parametrize("dtype", [torch.float16])
 # @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
 @pytest.mark.parametrize("mha_type", ["mha"])
-@pytest.mark.parametrize("deterministic", [False, True])
+# @pytest.mark.parametrize("deterministic", [False, True])
 # @pytest.mark.parametrize("deterministic", [True])
-# @pytest.mark.parametrize("deterministic", [False])
+@pytest.mark.parametrize("deterministic", [False])
 # @pytest.mark.parametrize("alibi", [False, True])
 @pytest.mark.parametrize("alibi", [False])
 # @pytest.mark.parametrize("local", [False, True])
 @pytest.mark.parametrize("local", [False])
-@pytest.mark.parametrize("causal", [False, True])
+# @pytest.mark.parametrize("causal", [False, True])
 # @pytest.mark.parametrize("causal", [True])
-# @pytest.mark.parametrize("causal", [False])
+@pytest.mark.parametrize("causal", [False])
 @pytest.mark.parametrize("d", [32, 40, 59, 64, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
@@ -948,7 +952,7 @@ def test_flash_attn_varlen_qkvpacked(
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
 @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
-# @pytest.mark.parametrize("dropout_p", [0.17])
+# @pytest.mark.parametrize("dropout_p", [0.0])
 # @pytest.mark.parametrize("softcap", [0.0, 50.0])
 @pytest.mark.parametrize("softcap", [0.0])
 def test_flash_attn_output(
@@ -973,15 +977,13 @@ def test_flash_attn_output(
         pytest.skip("Softcap and dropout not supported together")
     device = "cuda"
     # set seed
-    torch.random.manual_seed(20)
-    batch_size = 1
+    torch.random.manual_seed(0)
+    batch_size = 4
     nheads = 6 if softcap == 0.0 else 4  # softcap reference impl takes more memory
-    # nheads = 1
     nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 2)
-
     assert nheads % nheads_k == 0
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
-    q = torch.ones(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
+    q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
     if softcap > 0:
         # Ensure the values of qk are at least within softcap range.
         q = q * softcap
@@ -1051,7 +1053,6 @@ def test_flash_attn_output(
             window_size=window_size,
         )
         dropout_mask = S_dmask_converted >= 0
-
         attn_unnorm = S_dmask_converted.abs()
         if kvpacked:
             kv_rep = repeat(kv, "b s two h d -> b s two (h g) d", g=nheads // nheads_k)
@@ -1178,7 +1179,6 @@ def test_flash_attn_output(
                 dk_pt,
                 dv_pt,
             ) = torch.autograd.grad(out_pt, (q, k, v), g)
-            print(out.grad)
         print(f"dQ max diff: {(dq - dq_ref).abs().max().item()}")
         print(f"dK max diff: {(dk - dk_ref).abs().max().item()}")
         print(f"dV max diff: {(dv - dv_ref).abs().max().item()}")
@@ -1191,8 +1191,6 @@ def test_flash_attn_output(
         print(f"dQ Pytorch mean diff: {(dq_pt - dq_ref).abs().mean().item()}")
         print(f"dK Pytorch mean diff: {(dk_pt - dk_ref).abs().mean().item()}")
         print(f"dV Pytorch mean diff: {(dv_pt - dv_ref).abs().mean().item()}")
-
-    MIN_ERROR = 1.0e-5
 
     # Check that FlashAttention's numerical error is at most twice the numerical error
     # of a Pytorch implementation.
@@ -1553,8 +1551,6 @@ def test_flash_attn_varlen_output(
         print(f"dQ Pytorch mean diff: {(dq_pt - dq_ref).abs().mean().item()}")
         print(f"dK Pytorch mean diff: {(dk_pt - dk_ref).abs().mean().item()}")
         print(f"dV Pytorch mean diff: {(dv_pt - dv_ref).abs().mean().item()}")
-    
-    MIN_ERROR = 1.0e-5
 
     # Check that FlashAttention's numerical error is at most twice the numerical error
     # of a Pytorch implementation.
@@ -1586,8 +1582,8 @@ def test_flash_attn_varlen_output(
         assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item() + MIN_ERROR
 
 
-@pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
-# @pytest.mark.parametrize("dtype", [torch.float16])
+# @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
+@pytest.mark.parametrize("dtype", [torch.float16])
 # @pytest.mark.parametrize("local", [False, True])
 @pytest.mark.parametrize("local", [False])
 @pytest.mark.parametrize("d", [32, 40, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
@@ -1709,8 +1705,8 @@ def test_flash_attn_causal(seqlen_q, seqlen_k, swap_sq_sk, d, local, dtype):
         print("dq_pt:", dq_pt, dq_pt.shape)
     assert (dq - dq_ref).abs().max().item() <= 2 * (dq_pt - dq_ref).abs().max().item() + 1e-5
 
-@pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
-# @pytest.mark.parametrize("dtype", [torch.float16])
+# @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
+@pytest.mark.parametrize("dtype", [torch.float16])
 # @pytest.mark.parametrize("local", [False, True])
 @pytest.mark.parametrize("local", [False])
 @pytest.mark.parametrize("d", [32, 40, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])

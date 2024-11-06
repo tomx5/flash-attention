@@ -418,7 +418,6 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_
         batch_philox_offset = philox_offset_base + off_hz * seqlen_q * seqlen_k
     else:
         batch_philox_offset = 0
-    
     # initialize pointer to m and l
     m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
     l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
@@ -567,7 +566,7 @@ def attention_prefill_forward_triton_impl(
                                         return_scores, 
                                         use_exp2):
 
-    if True:
+    if DEBUG:
         print()
         print("attention_prefill_forward_triton_impl")
         print("q:", q, q.shape)
@@ -634,10 +633,6 @@ def attention_prefill_forward_triton_impl(
     else:
         softmax_lse = torch.empty((batch, nheads_q, max_seqlens_q), device=q.device, dtype=torch.float32)
         stride_lse_z, stride_lse_h, stride_lse_m = softmax_lse.stride()
-
-    # # Seed the RNG so we get reproducible results for testing.
-    # philox_seed = 0x1BF52
-    # philox_offset = 0x1D4B42
 
     if bias is not None:
         bias_strides = (bias.stride(0), bias.stride(1),bias.stride(2),
