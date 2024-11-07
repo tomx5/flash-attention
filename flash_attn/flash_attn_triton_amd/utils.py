@@ -127,14 +127,14 @@ class MetaData():
         self.dropout_philox_offset = dropout_philox_offset
 
         # # TODO: Generate the dropout mask on demand without needing a fwd pass of attention
-        # self.dropout_mask = torch.zeros(self.max_seqlens_q, self.max_seqlens_k, device='cuda')
-        # store_dropout_mask[(1, 1, 1)](self.dropout_mask,
-        #                               self.dropout_philox_seed,
-        #                               self.dropout_philox_offset,
-        #                               self.dropout_p,
-        #                               self.max_seqlens_q,
-        #                               self.max_seqlens_k,
-        #                               self.max_seqlens_k)
+        self.dropout_mask = torch.zeros(self.max_seqlens_q, self.max_seqlens_k, device='cuda')
+        store_dropout_mask[(1, 1, 1)](self.dropout_mask,
+                                      self.dropout_philox_seed,
+                                      self.dropout_philox_offset,
+                                      self.dropout_p,
+                                      self.max_seqlens_q,
+                                      self.max_seqlens_k,
+                                      self.max_seqlens_k)
 
         self.return_scores = return_scores
 

@@ -580,8 +580,8 @@ def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
 
-    if dropout_p > 0.0:
-        pytest.skip("dropout is not supported with test_op_prefill_bwd_impl in AMD Tests.")
+    # if dropout_p > 0.0:
+    #     pytest.skip("dropout is not supported with test_op_prefill_bwd_impl in AMD Tests.")
 
     alibi_slopes = None
     if layout == "thd":

@@ -1269,8 +1269,8 @@ def test_flash_attn_varlen_output(
 ):
     if USE_TRITON_ROCM:
 
-        if dropout_p != 0.0:
-            pytest.skip("varlen does not support dropout on AMD Triton Backend currently.")
+        # if dropout_p != 0.0:
+        #     pytest.skip("varlen does not support dropout on AMD Triton Backend currently.")
         
         if USE_REF and dropout_p != 0.0:
             pytest.skip("USE_REF not supported when Dropout is enabled.")
@@ -1441,6 +1441,8 @@ def test_flash_attn_varlen_output(
         print(f"Actual dropout fraction: {dropout_fraction}")
     else:
         dropout_mask = None
+
+    breakpoint()
 
     if kvpacked:
         out_ref, attn_ref = attention_kvpacked_ref(
