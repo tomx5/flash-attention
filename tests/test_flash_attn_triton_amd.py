@@ -1268,6 +1268,9 @@ def test_flash_attn_varlen_output(
     seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, softcap
 ):
     if USE_TRITON_ROCM:
+
+        if dropout_p != 0.0:
+            pytest.skip("varlen does not support dropout on AMD Triton Backend currently.")
         
         if USE_REF and dropout_p != 0.0:
             pytest.skip("USE_REF not supported when Dropout is enabled.")
@@ -1347,6 +1350,8 @@ def test_flash_attn_varlen_output(
             max_seqlen_q,
             max_seqlen_k,
             dropout_p,
+            dropout_philox_seed=dropout_philox_seed,
+            dropout_philox_offset=dropout_philox_offset,
             causal=causal,
             window_size=window_size,
             softcap=softcap,

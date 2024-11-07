@@ -1325,6 +1325,8 @@ def flash_attn_varlen_kvpacked_func(
     max_seqlen_q,
     max_seqlen_k,
     dropout_p=0.0,
+    dropout_philox_seed=0,
+    dropout_philox_offset=0,
     softmax_scale=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite context window
@@ -1398,6 +1400,8 @@ def flash_attn_varlen_kvpacked_func(
         max_seqlen_q,
         max_seqlen_k,
         dropout_p,
+        dropout_philox_seed,
+        dropout_philox_offset,
         softmax_scale,
         causal,
         window_size,
