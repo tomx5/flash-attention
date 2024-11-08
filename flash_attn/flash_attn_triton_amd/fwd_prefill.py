@@ -163,7 +163,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         # CAVEAT: Must update l_ij before applying dropout
         l_ij = tl.sum(p, 1)
         if ENABLE_DROPOUT:
-            philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n - BLOCK_N
+            philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n
             keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, actual_seqlen_k)
             if RETURN_SCORES:
                 # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
@@ -624,8 +624,8 @@ def attention_prefill_forward_triton_impl(
         stride_lse_z, stride_lse_h, stride_lse_m = softmax_lse.stride()
 
     # Seed the RNG so we get reproducible results for testing.
-    philox_seed = 0x1BF52
-    philox_offset = 0x1D4B42
+    philox_seed = 0x1BF58
+    philox_offset = 0x1D4B49
 
     if bias is not None:
         bias_strides = (bias.stride(0), bias.stride(1),bias.stride(2),
