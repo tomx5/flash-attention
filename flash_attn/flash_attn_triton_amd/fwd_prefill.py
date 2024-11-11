@@ -406,7 +406,7 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_
 
     if ENABLE_DROPOUT:
         off_hz = off_z * HQ + off_h_q
-        batch_philox_offset = philox_offset_base + off_hz * seqlen_q * seqlen_k
+        batch_philox_offset = philox_offset_base + off_hz * MAX_SEQLENS_Q * MAX_SEQLENS_K
     else:
         batch_philox_offset = 0
     # initialize pointer to m and l

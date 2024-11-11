@@ -1516,30 +1516,30 @@ def test_flash_attn_varlen_output(
     # of a Pytorch implementation.
     assert (out - out_ref).abs().max().item() <= 2 * (out_pt - out_ref).abs().max().item()
 
-    # if dropout_p > 0.0:
-    #     assert (attn - attn_ref).abs().max().item() <= 2 * (attn_pt - attn_ref).abs().max().item()
-    #     # With alibi, many of the prob values are 0.0 & -0.0 so dropout_fraction isn't accurate
-    #     if not alibi:
-    #         assert abs(dropout_fraction - dropout_p) <= (0.01 if not local else 0.04)
+    if dropout_p > 0.0:
+        # assert (attn - attn_ref).abs().max().item() <= 2 * (attn_pt - attn_ref).abs().max().item()
+        # With alibi, many of the prob values are 0.0 & -0.0 so dropout_fraction isn't accurate
+        if not alibi:
+            assert abs(dropout_fraction - dropout_p) <= (0.01 if not local else 0.04)
 
-    # if (d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90):
-    #     if DEBUG:
-    #         print("dv:", dv, dv.shape)
-    #         print("dv_ref:", dv_ref, dv_ref.shape)
-    #         print("dv_pt:", dv_pt, dv_pt.shape)
-    #     assert (dv - dv_ref).abs().max().item() <= 3 * (dv_pt - dv_ref).abs().max().item()
+    if (d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90):
+        if DEBUG:
+            print("dv:", dv, dv.shape)
+            print("dv_ref:", dv_ref, dv_ref.shape)
+            print("dv_pt:", dv_pt, dv_pt.shape)
+        assert (dv - dv_ref).abs().max().item() <= 3 * (dv_pt - dv_ref).abs().max().item()
         
-    #     if DEBUG:
-    #         print("dk:", dk, dk.shape)
-    #         print("dk_ref:", dk_ref, dk_ref.shape)
-    #         print("dk_pt:", dk_pt, dk_pt.shape)
-    #     assert (dk - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
+        if DEBUG:
+            print("dk:", dk, dk.shape)
+            print("dk_ref:", dk_ref, dk_ref.shape)
+            print("dk_pt:", dk_pt, dk_pt.shape)
+        assert (dk - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
 
-    #     if DEBUG:
-    #         print("dq:", dq, dq.shape)
-    #         print("dq_ref:", dq_ref, dq_ref.shape)
-    #         print("dq_pt:", dq_pt, dq_pt.shape)
-    #     assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
+        if DEBUG:
+            print("dq:", dq, dq.shape)
+            print("dq_ref:", dq_ref, dq_ref.shape)
+            print("dq_pt:", dq_pt, dq_pt.shape)
+        assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
 
 
 # @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
