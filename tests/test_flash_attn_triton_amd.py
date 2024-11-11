@@ -1275,6 +1275,9 @@ def test_flash_attn_varlen_output(
 
     query_padding_mask = generate_random_padding_mask(seqlen_q, batch_size, device, mode="random")
     key_padding_mask = generate_random_padding_mask(seqlen_k, batch_size, device, mode="random")
+
+    query_padding_mask, key_padding_mask = None, None
+
     # key_padding_mask = generate_random_padding_mask(seqlen_k, batch_size, device, mode='full')
     if alibi:
         alibi_slopes = torch.rand(batch_size, nheads, device=device, dtype=torch.float32) * 0.3
@@ -1329,6 +1332,7 @@ def test_flash_attn_varlen_output(
             dq_pad_fn,
             dk_pad_fn,
         ) = generate_qkv(q, k, v, query_padding_mask, key_padding_mask, kvpacked=False)
+        breakpoint()
         out_unpad, sm_lse, S_dmask = flash_attn_varlen_func(
             q_unpad,
             k_unpad,
