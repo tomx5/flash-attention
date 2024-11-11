@@ -118,7 +118,9 @@ def fwd(q,
                                                 metadata.max_seqlens_k, 
                                                 metadata.return_scores, 
                                                 metadata.use_exp2)
-        rng_state = torch.Tensor([philox_seed, philox_offset])
+        
+        # Init rng_state if dropout is enabled
+        rng_state = torch.Tensor([philox_seed, philox_offset]) if dropout_p > 0.0 else None
 
     if DEBUG:
         print("fwd outputs")
@@ -240,7 +242,7 @@ def varlen_fwd(
         seqused_k,
         leftpad_k,
         block_table_,
-        alibi_slopes,\
+        alibi_slopes,
         max_seqlen_q,
         max_seqlen_k,
         dropout_p,
@@ -330,8 +332,8 @@ def varlen_fwd(
         exp_scores, 
         _, 
         _, 
-        _, 
-        _, 
+        philox_seed, 
+        philox_offset, 
         _, 
         _) = attention_prefill_forward_triton_impl(
                                                             q, 
@@ -350,6 +352,8 @@ def varlen_fwd(
                                                             metadata.max_seqlens_k, 
                                                             metadata.return_scores, 
                                                             metadata.use_exp2)
+        # Init rng_state if dropout is enabled
+        rng_state = torch.Tensor([philox_seed, philox_offset]) if dropout_p > 0.0 else None
     if DEBUG:
         print("varlen_fwd outputs")
         print("o:", o, o.shape)
@@ -357,7 +361,10 @@ def varlen_fwd(
         print("exp_scores:", exp_scores, exp_scores.shape if exp_scores is not None else None )
 
 
-    return o, softmax_lse, exp_scores, None
+    breakpoint()
+
+
+    return o, softmax_lse, exp_scores, rng_state
 
 def varlen_bwd(
     dout,
@@ -460,6 +467,7 @@ def varlen_bwd(
             max_seqlen_q,
             max_seqlen_k,
             False,
+            rng_state
         )
         delta = delta_triton
 

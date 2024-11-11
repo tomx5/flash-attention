@@ -231,6 +231,8 @@ def _bwd_kernel_one_col_block(
 
             p_drop = p_drop / (1 - dropout_p)
             p_drop = p_drop.to(Q.dtype.element_ty)
+        else:
+            p_drop = p
         
         # compute dv
         dv += tl.dot(tl.trans(p_drop.to(Q.dtype.element_ty)), do)
@@ -421,7 +423,7 @@ def _bwd_kernel(
             BLOCK_N=BLOCK_N,
             SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,
             CAUSAL=CAUSAL,
-            DROPOUT=dropout_p>0.0,
+            DROPOUT=DROPOUT,
             USE_EXP2=USE_EXP2,
         )
     else:
@@ -480,7 +482,7 @@ def _bwd_kernel(
                 BLOCK_N=BLOCK_N,
                 SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,
                 CAUSAL=CAUSAL,
-                DROPOUT=dropout_p>0.0,
+                DROPOUT=DROPOUT,
                 USE_EXP2=USE_EXP2,
             )
 
@@ -550,7 +552,10 @@ def attention_prefill_backward_triton_impl(
     is_varlen = layout == "thd"
 
     # get dropout metadata
-    philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
+    if dropout_p > 0.0:
+        philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
+    else:
+        philox_seed, philox_offset = None, None
 
     # FIXME: some configs lead to oom for some reason when using 64 x 64 blocks
     if max_seqlen_q <= 32 or max_seqlen_k <= 32:
