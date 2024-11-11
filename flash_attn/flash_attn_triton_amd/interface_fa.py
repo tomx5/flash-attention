@@ -272,9 +272,6 @@ def varlen_fwd(
         print("window_size_left:", window_size_left)
         print("window_size_right:", window_size_right)
         print("gen_:", gen_)
-
-    if dropout_p != 0.0:
-        raise ValueError("dropout is not supported on AMD's Triton Backend yet")
     
     if o is None:
         o = torch.empty_like(q)
@@ -360,10 +357,6 @@ def varlen_fwd(
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
         print("exp_scores:", exp_scores, exp_scores.shape if exp_scores is not None else None )
 
-
-    breakpoint()
-
-
     return o, softmax_lse, exp_scores, rng_state
 
 def varlen_bwd(
@@ -417,9 +410,6 @@ def varlen_bwd(
         print("deterministic:", deterministic)
         print("gen_:", gen_)
         print("rng_state:", rng_state)
-
-    if dropout_p != 0.0:
-        raise ValueError("dropout is not supported on AMD yet")
 
     if USE_REF:
         if DEBUG:
