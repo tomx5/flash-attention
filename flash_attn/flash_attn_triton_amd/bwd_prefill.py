@@ -564,7 +564,7 @@ def attention_prefill_backward_triton_impl(
     else:
         BLOCK_M = 64 
         BLOCK_N = 64
-    num_warps = 4 # NOTE: originial is 8. changing it to 1 caused issues be careful
+    num_warps = 8 # NOTE: originial is 8. changing it to 1 caused issues be careful
     num_stages = 1
     waves_per_eu = 1
 
