@@ -1211,24 +1211,24 @@ def test_flash_attn_output(
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
-        # (5, 5),
-        # (1, 147),
-        # (113, 203),
-        # (128, 217),
-        # (113, 211),
-        # (108, 256),
-        # (256, 512),
-        # (512, 256),
+        (5, 5),
+        (1, 147),
+        (113, 203),
+        (128, 217),
+        (113, 211),
+        (108, 256),
+        (256, 512),
+        (512, 256),
         # (1024, 1024),
         # (1023, 1024),
         # (1024, 1023),
         # (2048, 2048),
-        (790, 790)
+        # (790, 790)
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(128, 128)])
 # @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
-@pytest.mark.parametrize('dropout_p', [0.0])
+@pytest.mark.parametrize('dropout_p', [0.17])
 # @pytest.mark.parametrize("softcap", [0.0, 50.0])
 @pytest.mark.parametrize("softcap", [0.0])
 def test_flash_attn_varlen_output(

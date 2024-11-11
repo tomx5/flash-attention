@@ -329,7 +329,6 @@ def _bwd_kernel(
     off_h = off_hz % H
 
     if DROPOUT:
-        off_hz = off_z * H + off_h
         batch_philox_offset = philox_offset + off_hz * max_seqlen_q * max_seqlen_k
     else:
         batch_philox_offset = 0
@@ -564,7 +563,7 @@ def attention_prefill_backward_triton_impl(
     else:
         BLOCK_M = 64 
         BLOCK_N = 64
-    num_warps = 8 # NOTE: originial is 8. changing it to 1 caused issues be careful
+    num_warps = 4 # NOTE: originial is 8. changing it to 1 caused issues be careful
     num_stages = 1
     waves_per_eu = 1
 
