@@ -9,6 +9,7 @@ def cdiv_fn(x, y):
 
 @triton.jit
 def dropout_offsets(philox_seed, philox_offset, dropout_p, m, n, stride):
+    # tl.device_print('bwd_philox_offset:', philox_offset)
     ms = tl.arange(0, m)
     ns = tl.arange(0, n)
     return philox_offset + ms[:, None] * stride + ns[None, :]
@@ -549,6 +550,7 @@ def attention_prefill_backward_triton_impl(
     stride_oz, stride_oh, stride_om, stride_ok = o_strides
     batch_headsize = batch * nheads_q
     is_varlen = layout == "thd"
+    
 
     # get dropout metadata
     if dropout_p > 0.0:

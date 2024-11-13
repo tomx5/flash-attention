@@ -83,7 +83,8 @@ def fwd(q,
                                                 v,
                                                 metadata.sm_scale, 
                                                 metadata.causal,
-                                                metadata.layout, 
+                                                metadata.layout,
+                                                dropout_p,
                                                 metadata.cu_seqlens_q, 
                                                 metadata.cu_seqlens_k,
                                                 metadata.max_seqlens_q, 
@@ -187,12 +188,14 @@ def bwd(
             softmax_lse,
             softmax_scale,
             causal,
+            dropout_p,
             "bshd",
             None,
             None,
             None,
             None,
             False,
+            rng_state
         )
         dq.copy_(dq_ref)
         dk.copy_(dk_ref)
@@ -314,6 +317,7 @@ def varlen_fwd(
                                                 v,
                                                 metadata.sm_scale, 
                                                 metadata.causal,
+                                                dropout_p,
                                                 metadata.layout, 
                                                 metadata.cu_seqlens_q, 
                                                 metadata.cu_seqlens_k,
@@ -423,12 +427,14 @@ def varlen_bwd(
             softmax_lse,
             softmax_scale,
             causal,
+            dropout_p,
             "thd",
             cu_seqlens_q,
             cu_seqlens_k,
             max_seqlen_q,
             max_seqlen_k,
             False,
+            rng_state
         )
         dq.copy_(dq_ref)
         dk.copy_(dk_ref)

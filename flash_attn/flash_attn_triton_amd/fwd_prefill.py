@@ -9,6 +9,7 @@ def cdiv_fn(x, y):
 
 @triton.jit
 def dropout_offsets(philox_seed, philox_offset, dropout_p, m, n, stride):
+    # tl.device_print('fwd_philox_offset:', philox_offset)
     ms = tl.arange(0, m)
     ns = tl.arange(0, n)
     return philox_offset + ms[:, None] * stride + ns[None, :]
@@ -584,6 +585,7 @@ def attention_prefill_forward_triton_impl(
 
     batch, nheads_q, nheads_k, head_size, seqlen_q, seqlen_k = get_shape_from_layout(q, k, layout, cu_seqlens_q, cu_seqlens_k, max_seqlens_q, max_seqlens_k)
     q_strides, k_strides, v_strides, o_strides = get_strides_from_layout(q, k, v, o, layout)
+
 
     # Get closest power of 2 over or equal to 32.
     padded_d_model = 1 << (head_size - 1).bit_length()

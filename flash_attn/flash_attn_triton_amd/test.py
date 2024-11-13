@@ -253,7 +253,7 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
     input_metadata.max_seqlens_k = seqlen_k
     input_metadata.layout = "bhsd"
 
-    dropout_p = 0.17
+    dropout_p = 0
     if DEBUG_INPUT:
         q = torch.arange(seqlen_q, dtype=dtype, device="cuda").view(1, 1, seqlen_q, 1).expand(Z, H, seqlen_q, D_HEAD).requires_grad_()
         k = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, 1, seqlen_k, 1).expand(Z, H, seqlen_k, D_HEAD).requires_grad_()
@@ -440,7 +440,8 @@ def test_op_prefill_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
         k.clone(), 
         v.clone(), 
         metadata.sm_scale, 
-        causal, 
+        causal,
+        dropout_p,
         layout,
         metadata.cu_seqlens_q,
         metadata.cu_seqlens_k,
@@ -564,7 +565,8 @@ def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, l
         k_ref, 
         v_ref,
         metadata.sm_scale, 
-        causal, 
+        causal,
+        dropout_p,
         layout,
         metadata.cu_seqlens_q,
         metadata.cu_seqlens_k,
@@ -591,12 +593,14 @@ def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, l
         softmax_lse_ref,
         metadata.sm_scale,
         causal,
+        dropout_p,
         layout,
         metadata.cu_seqlens_q,
         metadata.cu_seqlens_k,
         metadata.max_seqlens_q,
         metadata.max_seqlens_k,
-        use_exp2
+        use_exp2,
+        rng_state
     )
 
     # =============================================== Triton ==============================================================

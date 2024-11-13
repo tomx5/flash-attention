@@ -237,6 +237,7 @@ def attention_forward_pytorch_ref_impl(
     v,
     sm_scale,
     causal,
+    dropout_p,
     layout,
     cu_seqlens_q,
     cu_seqlens_k,
