@@ -31,7 +31,8 @@ class _attention_prefill(torch.autograd.Function):
                                                 metadata.max_seqlens_q, 
                                                 metadata.max_seqlens_k, 
                                                 metadata.return_scores, 
-                                                metadata.use_exp2)
+                                                metadata.use_exp2,
+                                                dtype=q.dtype)
 
         ctx.save_for_backward(q, k, v, o, softmax_lse)
         ctx.grid = grid

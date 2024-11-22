@@ -7,6 +7,35 @@ AUTOTUNE = os.environ.get('FLASH_ATTENTION_TRITON_AMD_AUTOTUNE', '0').lower() in
 DEBUG = os.environ.get('FLASH_ATTENTION_TRITON_AMD_DEBUG', '0').lower() in ('1', 'true', 'yes')
 PERF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_PERF', '0').lower() in ('1', 'true', 'yes')
 
+def set_dtype(dtype):
+    """
+    Sets the dtype. Supports both string and torch dtype inputs.
+    
+    Args:
+        dtype (str or torch.dtype): Dtype to validate
+    
+    Returns:
+        torch.dtype: Validated torch dtype
+    
+    Raises:
+        ValueError: If dtype is not supported
+    """
+    dtype_mapping = {
+        'fp32': torch.float32,
+        'fp16': torch.float16,
+        'bf16': torch.bfloat16,
+        'fp8': torch.float8_e5m2,
+        torch.float32: torch.float32,
+        torch.float16: torch.float16,
+        torch.bfloat16: torch.bfloat16,
+        torch.float8_e4m3fn: torch.float8_e4m3fn,
+        torch.float8_e5m2: torch.float8_e5m2
+    }
+    
+    assert dtype in dtype_mapping, f"Invalid dtype: {dtype}. Supported dtypes: {list(set(dtype_mapping.keys()))}"
+    
+    return dtype_mapping[dtype]
+
 class MetaData():
     cu_seqlens_q = None
     cu_seqlens_k = None

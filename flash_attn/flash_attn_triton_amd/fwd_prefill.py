@@ -1,7 +1,7 @@
 import torch
 import triton
 import triton.language as tl
-from .utils import get_shape_from_layout, get_strides_from_layout, is_cdna, is_rdna, DEBUG, AUTOTUNE
+from .utils import get_shape_from_layout, get_strides_from_layout, is_cdna, is_rdna, set_dtype, DEBUG, AUTOTUNE
 
 @triton.jit
 def cdiv_fn(x, y):
@@ -553,7 +553,8 @@ def attention_prefill_forward_triton_impl(
                                         max_seqlens_q, 
                                         max_seqlens_k, 
                                         return_scores, 
-                                        use_exp2):
+                                        use_exp2,
+                                        dtype):
 
     if DEBUG:
         print()
@@ -574,6 +575,14 @@ def attention_prefill_forward_triton_impl(
         print("max_seqlens_k:", max_seqlens_k)
         print("return_scores:", return_scores)
         print("use_exp2:", use_exp2)
+        print("dtype:", dtype)
+
+    dtype = set_dtype(dtype)
+    
+    # cast to set dtype
+    q = q.to(dtype)
+    k = k.to(dtype)
+    v = v.to(dtype)
 
     # check if varlen
     is_varlen = layout == "thd"

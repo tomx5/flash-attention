@@ -1,6 +1,6 @@
 import torch
 import math
-from .utils import DEBUG
+from .utils import DEBUG, set_dtype
 
 DEBUG_CORE = DEBUG and False
 
@@ -306,7 +306,8 @@ def attention_forward_pytorch_ref_impl(
     cu_seqlens_k,
     max_seqlen_q,
     max_seqlen_k,
-    use_exp2
+    use_exp2,
+    dtype
     ):
     if DEBUG:
         print()
@@ -322,6 +323,14 @@ def attention_forward_pytorch_ref_impl(
         print("max_seqlen_q:", max_seqlen_q)
         print("max_seqlen_k:", max_seqlen_k)
         print("use_exp2:", use_exp2)
+        print("dtype:", dtype)
+
+    dtype = set_dtype(dtype)
+    
+    # cast to set dtype
+    q = q.to(dtype)
+    k = k.to(dtype)
+    v = v.to(dtype)
 
      # compute reference
     if layout == "thd":

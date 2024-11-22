@@ -1,7 +1,7 @@
 import torch
 import pytest
 
-from .utils import MetaData, get_input_shapes, input_helper, varlen_input_helper, DEBUG
+from .utils import MetaData, get_input_shapes, input_helper, varlen_input_helper, set_dtype, DEBUG
 from .interface_torch import attention_prefill, attention_decode
 from .fwd_ref import attention_forward_pytorch_ref_impl, compute_alibi_tensor_ref
 from .fwd_prefill import attention_prefill_forward_triton_impl
@@ -382,7 +382,10 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
 @pytest.mark.parametrize('use_exp2', [True, False]) # works when use_exp2 is false
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues
 def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, layout, use_exp2, DEBUG_INPUT):
-    dtype = torch.float16
+
+    # options: 'fp16', 'bf16', 'fp32', 'fp8'
+    dtype = set_dtype('fp16')
+
     torch.manual_seed(0)
     alibi_slopes = None
     dropout_p = 0.0
@@ -437,7 +440,8 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, return
                                                 metadata.max_seqlens_q, 
                                                 metadata.max_seqlens_k, 
                                                 metadata.return_scores, 
-                                                metadata.use_exp2)
+                                                metadata.use_exp2,
+                                                dtype='fp8')
 
     (
         output_ref,
@@ -458,7 +462,8 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, return
         metadata.cu_seqlens_k,
         metadata.max_seqlens_q,
         metadata.max_seqlens_k,
-        use_exp2
+        use_exp2,
+        dtype="fp16"
     )
 
     if DEBUG:

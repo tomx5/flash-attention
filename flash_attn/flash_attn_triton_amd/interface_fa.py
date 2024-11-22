@@ -119,7 +119,8 @@ def fwd(q,
                                                 metadata.max_seqlens_q, 
                                                 metadata.max_seqlens_k, 
                                                 metadata.return_scores, 
-                                                metadata.use_exp2)
+                                                metadata.use_exp2,
+                                                dtype=q.dtype)
 
     if DEBUG:
         print("fwd outputs")
@@ -350,7 +351,8 @@ def varlen_fwd(
                                                             metadata.max_seqlens_q, 
                                                             metadata.max_seqlens_k, 
                                                             metadata.return_scores, 
-                                                            metadata.use_exp2)
+                                                            metadata.use_exp2,
+                                                            dtype=q.dtype)
     if DEBUG:
         print("varlen_fwd outputs")
         print("o:", o, o.shape)
