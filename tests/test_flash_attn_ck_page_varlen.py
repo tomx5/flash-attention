@@ -134,19 +134,15 @@ def test_flash_attn_varlen_causal(
     ) = generate_qkv(q, k, v, query_padding_mask, key_padding_mask, kvpacked=False)
     if paged_kv_block_size is not None:
         nblock = k_cache_paged.shape[0]
-        print(k_cache_paged.shape)
-        print(v_cache_paged.shape)
 
         k_cache_paged = rearrange(k_cache_paged,
                                   'nblock block_size nheads (d1 d2) -> nblock nheads d1 block_size d2',
-                                  block_size=paged_kv_block_size, d1=d // 8, d2=8)
+                                  block_size=paged_kv_block_size, d1=d // 8, d2=8).contiguous()
 
         v_cache_paged = rearrange(v_cache_paged,
                                   'nblock block_size nheads d -> nblock nheads d block_size',
-                                  block_size=paged_kv_block_size)
+                                  block_size=paged_kv_block_size).contiguous()
 
-        print(k_cache_paged.shape)
-        print(v_cache_paged.shape)
 
     out_unpad = flash_attn_varlen_func(
         q_unpad,

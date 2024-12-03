@@ -340,6 +340,8 @@ mha_varlen_fwd(at::Tensor &q,                   // total_q x num_heads x head_si
     TORCH_CHECK(q.stride(-1) == 1, "Input tensor must have contiguous last dimension");
     TORCH_CHECK(k.stride(-1) == 1, "Input tensor must have contiguous last dimension");
     TORCH_CHECK(v.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+    CHECK_CONTIGUOUS(k);
+    CHECK_CONTIGUOUS(v);
     CHECK_CONTIGUOUS(cu_seqlens_q);
     CHECK_CONTIGUOUS(cu_seqlens_k);
 
