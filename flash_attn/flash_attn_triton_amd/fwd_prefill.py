@@ -557,9 +557,9 @@ def attention_prefill_forward_triton_impl(
     
     # if qkv are fp8, then find scaling factor for quantization
     if q.dtype in {torch.float8_e4m3fnuz, torch.float8_e5m2}:
-        q_scale = q.abs().max().item()
-        k_scale = k.abs().max().item()
-        v_scale = v.abs().max().item()
+        q_scale = q.to(torch.float32).abs().max().item()
+        k_scale = k.to(torch.float32).abs().max().item()
+        v_scale = v.to(torch.float32).abs().max().item()
     else:
         q_scale = k_scale = v_scale = 1
 
@@ -650,7 +650,7 @@ def attention_prefill_forward_triton_impl(
         alibi_strides = (0, 0)
 
 
-    attn_fwd[grid](q, k, v, bias, sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
+    attn_fwd[grid](q, k, v, bias, q_scale, k_scale, v_scale, sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
                     *bias_strides, *alibi_strides, *scores_strides, stride_lse_z, stride_lse_h, stride_lse_m, cu_seqlens_q, cu_seqlens_k,
                     dropout_p=dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset, scores=scores, 
                     scores_scaled_shifted=scores_scaled_shifted, exp_scores=exp_scores, alibi_slopes=alibi_slopes, 
