@@ -475,7 +475,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, return
         torch.testing.assert_close(softmax_triton, softmax_ref, atol=ATOL, rtol=RTOL)
 
     # if triton is fp8, cast to fp16 in order to compare with ref
-    if output_triton.dtype in {torch.float8_e4m3fnuz, torch.float8_e5m2}:
+    if output_triton.dtype in {torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz}:
         output_triton = output_triton.to(torch.float16)
     
     if DEBUG:
