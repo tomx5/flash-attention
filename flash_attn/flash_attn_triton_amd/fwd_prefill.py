@@ -87,8 +87,8 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                     IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
                     OFFS_M: tl.constexpr, OFFS_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, MASK_STEPS: tl.constexpr,
                     ENABLE_DROPOUT: tl.constexpr, PADDED_HEAD: tl.constexpr,
-                    ACTUAL_BLOCK_DMODEL: tl.constexpr, SM_SCALE: tl.constexpr, USE_EXP2: tl.constexpr,
-                    RETURN_SCORES: tl.constexpr):
+                    ACTUAL_BLOCK_DMODEL: tl.constexpr, Q_SCALE: tl.constexpr, K_SCALE: tl.constexpr, V_SCALE: tl.constexpr, SM_SCALE: tl.constexpr,
+                    USE_EXP2: tl.constexpr, RETURN_SCORES: tl.constexpr):
     if USE_EXP2:
         RCP_LN2: tl.constexpr = 1.4426950408889634
     
@@ -122,7 +122,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                 qk = tl.where(mask, qk, float("-inf"))
         
         # -- compute qk ----
-        qk += tl.dot(q.to(tl.float16), k.to(tl.float16))
+        qk += tl.dot(q, k)
         qk_scaled =  qk * SM_SCALE
         if RETURN_SCORES:
             score_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
@@ -190,7 +190,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         l_i = l_i * alpha + l_ij
         # update m_i and l_i
         m_i = m_ij
-        acc += tl.dot(p.to(tl.float16), v.to(tl.float16))
+        acc += tl.dot(p.to(v.type.element_ty), v)
         k_ptrs += BLOCK_N * stride_kn
         v_ptrs += BLOCK_N * stride_vk
         if bias_ptrs is not None:
@@ -277,7 +277,7 @@ autotune_configs, autotune_keys = get_autotune_configs()
     use_cuda_graph=True,
 )
 @triton.jit
-def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_qh, stride_qm, stride_qk, 
+def attn_fwd(Q, K, V, bias, Q_SCALE: tl.constexpr, K_SCALE: tl.constexpr, V_SCALE: tl.constexpr, SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_qh, stride_qm, stride_qk, 
              stride_kz, stride_kh, stride_kn, stride_kk, stride_vz, stride_vh, stride_vk, stride_vn, 
              stride_oz, stride_oh, stride_om, stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az, stride_ah,
              stride_sz, stride_sh, stride_sm, stride_sn, stride_lse_z, stride_lse_h, stride_lse_m, cu_seqlens_q, cu_seqlens_k,
@@ -448,7 +448,7 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_
                                         False, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                                         # _, MASK_STEPS, ...
                                         PRE_LOAD_V, False, ENABLE_DROPOUT, PADDED_HEAD,
-                                        ACTUAL_BLOCK_DMODEL, SM_SCALE,  USE_EXP2=USE_EXP2, RETURN_SCORES=RETURN_SCORES)
+                                        ACTUAL_BLOCK_DMODEL, Q_SCALE, K_SCALE, V_SCALE, SM_SCALE,  USE_EXP2=USE_EXP2, RETURN_SCORES=RETURN_SCORES)
         block_min = block_max
         block_max = n_blocks * BLOCK_N
 
@@ -474,7 +474,7 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_
                                         IS_CAUSAL, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                                         # _, MASK_STEPS, ...
                                         PRE_LOAD_V, True, ENABLE_DROPOUT, PADDED_HEAD,
-                                        ACTUAL_BLOCK_DMODEL, SM_SCALE, USE_EXP2=USE_EXP2, RETURN_SCORES=RETURN_SCORES)
+                                        ACTUAL_BLOCK_DMODEL, Q_SCALE, K_SCALE, V_SCALE, SM_SCALE, USE_EXP2=USE_EXP2, RETURN_SCORES=RETURN_SCORES)
     # epilogue
     # This helps the compiler do Newton Raphson on l_i vs on acc which is much larger.
     l_recip = 1 / l_i[:, None]
@@ -554,6 +554,14 @@ def attention_prefill_forward_triton_impl(
                                         max_seqlens_k, 
                                         return_scores, 
                                         use_exp2):
+    
+    # if qkv are fp8, then find scaling factor for quantization
+    if q.dtype in {torch.float8_e4m3fnuz, torch.float8_e5m2}:
+        q_scale = q.abs().max().item()
+        k_scale = k.abs().max().item()
+        v_scale = v.abs().max().item()
+    else:
+        q_scale = k_scale = v_scale = 1
 
     if DEBUG:
         print()
@@ -562,6 +570,9 @@ def attention_prefill_forward_triton_impl(
         print("k:", k, k.shape)
         print("v:", v, v.shape)
         print("o:", o, o.shape)
+        print("q_scale", q_scale)
+        print("k_scale", k_scale)
+        print("v_scale", v_scale)
         print("sm_scale:", sm_scale)
         print("alibi_slopes:", alibi_slopes)
         print("causal:", causal)
