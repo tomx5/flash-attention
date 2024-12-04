@@ -638,8 +638,6 @@ def attention_prefill_forward_triton_impl(
     else:
         alibi_strides = (0, 0)
 
-    import pdb; pdb.set_trace()
-
 
     attn_fwd[grid](q, k, v, bias, sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
                     *bias_strides, *alibi_strides, *scores_strides, stride_lse_z, stride_lse_h, stride_lse_m, cu_seqlens_q, cu_seqlens_k,
@@ -650,9 +648,6 @@ def attention_prefill_forward_triton_impl(
                     BLOCK_DMODEL=padded_d_model, USE_BIAS=False if bias is None else True,
                     USE_ALIBI=False if alibi_slopes is None else True, ENABLE_DROPOUT=dropout_p
                     > 0.0, USE_EXP2=use_exp2, RETURN_SCORES=return_scores)
-    
-    
-    import pdb; pdb.set_trace()
 
     if DEBUG:
         print()

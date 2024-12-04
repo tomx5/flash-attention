@@ -382,7 +382,7 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
 @pytest.mark.parametrize('use_exp2', [True, False]) # works when use_exp2 is false
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues
 def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, layout, use_exp2, DEBUG_INPUT):
-    dtype = torch.float16
+    dtype = torch.float8_e4m3fnuz
     torch.manual_seed(0)
     alibi_slopes = None
     dropout_p = 0.0
@@ -473,6 +473,10 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, return
             print("softmax_triton:", softmax_triton, softmax_triton.shape)
             print("softmax_ref:", softmax_ref, softmax_ref.shape)
         torch.testing.assert_close(softmax_triton, softmax_ref, atol=ATOL, rtol=RTOL)
+
+    # if triton is fp8, cast to fp16 in order to compare with ref
+    if output_triton.dtype in {torch.float8_e4m3fnuz}:
+        output_triton = output_triton.to(torch.float16)
     
     if DEBUG:
         print("output_triton:", output_triton, output_triton.shape)
