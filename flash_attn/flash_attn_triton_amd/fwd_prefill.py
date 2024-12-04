@@ -123,7 +123,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         
         # -- compute qk ----
         qk += tl.dot(q, k)
-        qk_scaled =  qk * SM_SCALE
+        qk_scaled =  qk * SM_SCALE * Q_SCALE * K_SCALE
         if RETURN_SCORES:
             score_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
             tl.store(score_ptrs, qk_scaled, mask=score_mask)
@@ -190,7 +190,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         l_i = l_i * alpha + l_ij
         # update m_i and l_i
         m_i = m_ij
-        acc += tl.dot(p.to(v.type.element_ty), v)
+        acc += tl.dot(p.to(v.type.element_ty), (v.to(tl.float32) * V_SCALE).to(v.type.element_ty))
         k_ptrs += BLOCK_N * stride_kn
         v_ptrs += BLOCK_N * stride_vk
         if bias_ptrs is not None:
@@ -585,6 +585,13 @@ def attention_prefill_forward_triton_impl(
         print("max_seqlens_k:", max_seqlens_k)
         print("return_scores:", return_scores)
         print("use_exp2:", use_exp2)
+
+    # import pdb; pdb.set_trace()
+
+    # scale qkv by quantization factor (if not fp8 scales by 1)
+    q = (q.to(torch.float32) / q_scale).to(q.dtype)
+    k = (k.to(torch.float32) / k_scale).to(k.dtype)
+    v = (v.to(torch.float32) / v_scale).to(v.dtype)
 
     # check if varlen
     is_varlen = layout == "thd"
