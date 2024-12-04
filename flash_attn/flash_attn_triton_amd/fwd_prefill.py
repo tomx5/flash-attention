@@ -562,6 +562,7 @@ def attention_prefill_forward_triton_impl(
         v_scale = v.to(torch.float32).abs().max().item()
     else:
         q_scale = k_scale = v_scale = 1
+    q_scale = k_scale = v_scale = 1
 
     if DEBUG:
         print()
