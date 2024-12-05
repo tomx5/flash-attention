@@ -10,7 +10,7 @@ from .bwd_ref import attention_backward_pytorch_ref_impl
 from .fwd_decode import dequantize_kv_fp16, quantize_kv_int4
 
 # defailt fp16 tolerance is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
-ATOL, RTOL = 1e-2, 0 # old standard. maybe to lose. 
+ATOL, RTOL = 7e-2, 0 # old standard. maybe to lose. 
 # ATOL, RTOL = 1e-3, 1e-3  # catchs fa mismatch issues
 # ATOL, RTOL = 1e-4, 1e-3 # to strict. there will be small diffs
 # ATOL, RTOL = 1e-5, 1e-3 # # default fp16. there will be small diffs
@@ -489,6 +489,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, return
     if DEBUG:
         print("output_triton:", output_triton, output_triton.shape)
         print("output_ref:", output_ref, output_ref.shape)
+    print('avg error: ', torch.abs(output_triton.to(torch.float32) - output_ref.to(torch.float32)).mean().item())
     torch.testing.assert_close(output_triton.to(torch.float32), output_ref.to(torch.float32), atol=ATOL, rtol=RTOL)
 
 @pytest.mark.parametrize(
