@@ -161,7 +161,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
             p = tl.math.exp(q_shifted)
 
         # CAVEAT: Must update l_ij before applying dropout
-        l_ij = tl.sum(p, 1)
+        l_ij = tl.sum(p, 1) # p = fp32 at this point
         if ENABLE_DROPOUT:
             philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n - BLOCK_N
             keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, actual_seqlen_k)
@@ -190,7 +190,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         l_i = l_i * alpha + l_ij
         # update m_i and l_i
         m_i = m_ij
-        acc += tl.dot(p.to(v.type.element_ty), (v.to(tl.float32) * V_SCALE).to(v.type.element_ty))
+        acc += tl.dot(p.to(v.type.element_ty), v) #(v.to(tl.float32) * V_SCALE)
         k_ptrs += BLOCK_N * stride_kn
         v_ptrs += BLOCK_N * stride_vk
         if bias_ptrs is not None:

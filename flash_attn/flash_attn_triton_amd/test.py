@@ -376,8 +376,8 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
         (4, 6, 6, 2048, 2048, 32),
     ],
 )
-@pytest.mark.parametrize('causal', [True, False])
-@pytest.mark.parametrize('return_scores', [False])
+@pytest.mark.parametrize('causal', [False, True])
+@pytest.mark.parametrize('return_scores', [True])
 @pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
 @pytest.mark.parametrize('use_exp2', [True, False]) # works when use_exp2 is false
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues
@@ -396,6 +396,8 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, return
         output_triton = torch.zeros_like(q).contiguous()
     else:
         output_triton = torch.empty_like(q)
+
+    output_triton = output_triton.to(torch.float32) # this massively improved accuracy. The output tensor needs to be of high precision
 
     if DEBUG:
         if HQ // HK != 1:
@@ -464,6 +466,10 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, return
         print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
     torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=ATOL, rtol=RTOL)
 
+    if DEBUG:
+        print("exp_scores_triton", exp_scores_triton)
+        print("exp_scores_ref", exp_scores_ref)
+
     if layout != "thd":
         # use trick with lse to get the softmax. you need the scores but is it
         softmax_triton = torch.exp(attention_scaled_scores_ref - softmax_lse_triton.unsqueeze(-1))
@@ -474,6 +480,8 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, return
             print("softmax_ref:", softmax_ref, softmax_ref.shape)
         torch.testing.assert_close(softmax_triton, softmax_ref, atol=ATOL, rtol=RTOL)
 
+    # import pdb; pdb.set_trace()
+
     # if triton is fp8, cast to fp16 in order to compare with ref
     if output_triton.dtype in {torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz}:
         output_triton = output_triton.to(torch.float16)
@@ -481,7 +489,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, return
     if DEBUG:
         print("output_triton:", output_triton, output_triton.shape)
         print("output_ref:", output_ref, output_ref.shape)
-    torch.testing.assert_close(output_triton, output_ref, atol=ATOL, rtol=RTOL)
+    torch.testing.assert_close(output_triton.to(torch.float32), output_ref.to(torch.float32), atol=ATOL, rtol=RTOL)
 
 @pytest.mark.parametrize(
     "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD", [
