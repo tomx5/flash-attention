@@ -104,13 +104,13 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         k_offs_k = None if not PADDED_HEAD else tl.arange(0, BLOCK_DMODEL)
         k = load_fn(k_ptrs, k_offs_k, k_offs_n, ACTUAL_BLOCK_DMODEL, actual_seqlen_k)
         if IS_FP8:
-            k = (k.to(tl.float32) / k_scale.to(tl.float32)).to(k.type.element_ty)
+            k = (k.to(tl.float16) / k_scale.to(tl.float16)).to(k.type.element_ty)
 
         if PRE_LOAD_V:
             # We can use the same offsets as k, just with dims transposed.
             v = load_fn(v_ptrs, k_offs_n, k_offs_k, actual_seqlen_k, ACTUAL_BLOCK_DMODEL)
             if IS_FP8:
-                v = (v.to(tl.float32) / v_scale.to(tl.float32)).to(v.type.element_ty)
+                v = (v.to(tl.float16) / v_scale.to(tl.float16)).to(v.type.element_ty)
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         # We start from end of seqlen_k so only the first iteration would need
         # to be checked for padding if it is not a multiple of block_n
@@ -131,7 +131,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         qk += tl.dot(q, k)
         qk_scaled =  qk * SM_SCALE
         if IS_FP8:
-            qk_scaled = qk_scaled * q_scale * k_scale # scale qk after matmul if quantized
+            qk_scaled = qk_scaled * q_scale * k_scale # descale qk after matmul if quantized
         if RETURN_SCORES:
             score_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
             tl.store(score_ptrs, qk_scaled, mask=score_mask)
@@ -195,15 +195,20 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         if not PRE_LOAD_V:
             v = load_fn(v_ptrs, k_offs_n, k_offs_k, actual_seqlen_k, ACTUAL_BLOCK_DMODEL)
             if IS_FP8:
-                v = (v.to(tl.float32) / v_scale.to(tl.float32)).to(v.type.element_ty)
+                v = (v.to(tl.float16) / v_scale.to(tl.float16)).to(v.type.element_ty)
         # -- update m_i and l_i
         l_i = l_i * alpha + l_ij
         # update m_i and l_i
         m_i = m_ij
-        if not IS_FP8:
-            acc += tl.dot(p.to(v.type.element_ty), v)
+
+        if IS_FP8:
+            p_scale = 1
+            p_scaled = (p / p_scale)
+            acc += tl.dot(p.to(v.type.element_ty), (v*v_scale).to(v.type.element_ty))
         else:
-            acc += tl.dot(p.to(v.type.element_ty), (v.to(tl.float32) * v_scale).to(v.type.element_ty)) # if fp8, descale v before computing
+            acc += tl.dot(p.to(v.type.element_ty), v)
+
+        
         k_ptrs += BLOCK_N * stride_kn
         v_ptrs += BLOCK_N * stride_vk
         if bias_ptrs is not None:
@@ -290,7 +295,7 @@ autotune_configs, autotune_keys = get_autotune_configs()
     use_cuda_graph=True,
 )
 @triton.jit
-def attn_fwd(Q, K, V, bias, Q_SCALE, K_SCALE, V_SCALE, stride_qscale_z: tl.constexpr, stride_kvscale_z: tl.constexpr, SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_qh, stride_qm, stride_qk, 
+def attn_fwd(Q, K, V, bias, Q_SCALE, K_SCALE, V_SCALE, stride_qscale_z, stride_kvscale_z, SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_qh, stride_qm, stride_qk, 
              stride_kz, stride_kh, stride_kn, stride_kk, stride_vz, stride_vh, stride_vk, stride_vn, 
              stride_oz, stride_oh, stride_om, stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az, stride_ah,
              stride_sz, stride_sh, stride_sm, stride_sn, stride_lse_z, stride_lse_h, stride_lse_m, cu_seqlens_q, cu_seqlens_k,
@@ -431,16 +436,16 @@ def attn_fwd(Q, K, V, bias, Q_SCALE, K_SCALE, V_SCALE, stride_qscale_z: tl.const
     if PADDED_HEAD:
         q_ptrs_mask = q_ptrs_mask & (offs_d[None, :] < ACTUAL_BLOCK_DMODEL)
     q = tl.load(q_ptrs, mask=q_ptrs_mask, other=0.0)
-    
+
     # if IS FP8 get q_scale and quantize
     if IS_FP8:
-        q_scale = tl.load(Q_SCALE + off_z*stride_qscale_z + off_h_q, other=1.0)
-        q = (q.to(tl.float32) / q_scale.to(tl.float32)).to(q.type.element_ty) # scale q by q_scale
+        q_scale = tl.load(Q_SCALE + off_z*stride_qscale_z + off_h_q)
+        q = (q.to(tl.float16) / q_scale.to(tl.float16)).to(q.type.element_ty) # scale q by q_scale
 
-        k_scale = tl.load(K_SCALE + off_z*stride_kvscale_z + off_h_k, other=1.0)
-        v_scale = tl.load(V_SCALE + off_z*stride_kvscale_z + off_h_k, other=1.0)
+        k_scale = tl.load(K_SCALE + off_z*stride_kvscale_z + off_h_k)
+        v_scale = tl.load(V_SCALE + off_z*stride_kvscale_z + off_h_k)
     else:
-        q_scale = k_scale = v_scale = 1.0
+        q_scale, k_scale, v_scale = 1.0, 1.0, 1.0
 
     # Here we compute how many full and masked blocks we have.
     padded_block_k = n_extra_tokens != 0
@@ -467,11 +472,12 @@ def attn_fwd(Q, K, V, bias, Q_SCALE, K_SCALE, V_SCALE, stride_qscale_z: tl.const
                                         exp_scores_ptrs,
                                         # _, _, offs_n_causal, masked_blocks, n_extra_tokens, _
                                         block_min, block_max, 0, 0, 0, alibi_slope, score_ptrs, scores_scaled_shifted_ptrs,
+                                        q_scale, k_scale, v_scale, IS_FP8,
                                         # IS_CAUSAL, ....
                                         False, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                                         # _, MASK_STEPS, ...
                                         PRE_LOAD_V, False, ENABLE_DROPOUT, PADDED_HEAD,
-                                        ACTUAL_BLOCK_DMODEL, q_scale, k_scale, v_scale, SM_SCALE,  USE_EXP2=USE_EXP2, RETURN_SCORES=RETURN_SCORES)
+                                        ACTUAL_BLOCK_DMODEL, SM_SCALE, USE_EXP2=USE_EXP2, RETURN_SCORES=RETURN_SCORES)
         block_min = block_max
         block_max = n_blocks * BLOCK_N
 
@@ -494,10 +500,11 @@ def attn_fwd(Q, K, V, bias, Q_SCALE, K_SCALE, V_SCALE, stride_qscale_z: tl.const
                                         start_m, seqlen_k, seqlen_q, dropout_p, philox_seed, batch_philox_offset,
                                         exp_scores_ptrs, block_min, block_max, offs_n_causal, masked_blocks,
                                         n_extra_tokens, alibi_slope, score_ptrs, scores_scaled_shifted_ptrs,
+                                        q_scale, k_scale, v_scale, IS_FP8,
                                         IS_CAUSAL, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                                         # _, MASK_STEPS, ...
                                         PRE_LOAD_V, True, ENABLE_DROPOUT, PADDED_HEAD,
-                                        ACTUAL_BLOCK_DMODEL, Q_SCALE, K_SCALE, V_SCALE, SM_SCALE, USE_EXP2=USE_EXP2, RETURN_SCORES=RETURN_SCORES)
+                                        ACTUAL_BLOCK_DMODEL, SM_SCALE, USE_EXP2=USE_EXP2, RETURN_SCORES=RETURN_SCORES)
     # epilogue
     # This helps the compiler do Newton Raphson on l_i vs on acc which is much larger.
     l_recip = 1 / l_i[:, None]
@@ -585,7 +592,6 @@ def attention_prefill_forward_triton_impl(
         torch.float8_e5m2fnuz,
     }
     is_fp8 = q.dtype in fp8_types
-    
     # check if varlen
     is_varlen = layout == "thd"
     
@@ -594,7 +600,7 @@ def attention_prefill_forward_triton_impl(
     q_scale_stride_z = q_scale.stride(0)
     kv_scale_stride_z = k_scale.stride(0)
 
-    import pdb; pdb.set_trace()
+    # import pdb; pdb.set_trace()
 
     if DEBUG:
         print()
@@ -681,6 +687,7 @@ def attention_prefill_forward_triton_impl(
     else:
         alibi_strides = (0, 0)
 
+    # import pdb; pdb.set_trace()
 
     attn_fwd[grid](q, k, v, bias, q_scale, k_scale, v_scale, q_scale_stride_z, kv_scale_stride_z, sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
                     *bias_strides, *alibi_strides, *scores_strides, stride_lse_z, stride_lse_h, stride_lse_m, cu_seqlens_q, cu_seqlens_k,

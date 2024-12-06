@@ -356,5 +356,5 @@ def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd'):
         k_scale = torch.ones((batch, head), device=k.device)
         v_scale = torch.ones((batch, head), device=v.device)
     
-    return q_scale, k_scale, v_scale
+    return q_scale*0.025, k_scale*0.025, v_scale*0.025
 
