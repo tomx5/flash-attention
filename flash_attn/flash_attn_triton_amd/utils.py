@@ -285,3 +285,63 @@ def is_rdna():
     return is_hip() and triton.runtime.driver.active.get_current_target().arch in ("gfx1030", "gfx1100", "gfx1101",
                                                                                    "gfx1102", "gfx1200", "gfx1201")
 
+def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd'):
+    """
+    Create scale tensors for q and k based on the scaling configuration.
+    
+    Args:
+    q (torch.Tensor): Query tensor
+    k (torch.Tensor): Key tensor
+    v (torch.Tensor): Value tensor
+    SCALE_PER_HEAD (bool): Whether to compute scale per head or globally
+    
+    Returns:
+    tuple: (q_scale, k_scale, v_scale) tensors
+    """
+    if layout == 'bhsd':
+        seqlen_loc = 2
+        dim_loc = 3
+    elif layout == 'bshd':
+        seqlen_loc = 1
+        dim_loc = 3
+    else:
+        # is varlen
+        pass
+
+    is_varlen = layout == "thd"
+
+    # Handle float8 dtype special case
+    if q.dtype in {torch.float8_e4m3fnuz, torch.float8_e5m2}:
+        # Convert to float32 for scale computation
+        q_float32 = q.to(torch.float32)
+        k_float32 = k.to(torch.float32)
+        v_float32 = v.to(torch.float32)
+        
+        if SCALE_PER_HEAD:
+            if is_varlen:
+                assert False, "VARLEN NOT SUPPORTED FOR SCALE PER HEAD"
+            else:
+                # Compute max for each batch-head pair
+                q_scale = q_float32.abs().amax(dim=(seqlen_loc, dim_loc))  # Shape: (BATCH, HEAD) - computes mas across seqlen and dim
+                k_scale = k_float32.abs().amax(dim=(seqlen_loc, dim_loc))  # Shape: (BATCH, HEAD)
+                v_scale = v_float32.abs().amax(dim=(seqlen_loc, dim_loc))  # Shape: (BATCH, HEAD)
+        else:
+            # Compute global max and create a tensor of that value
+            q_global_max = q_float32.abs().max().item()
+            k_global_max = k_float32.abs().max().item()
+            v_global_max = v_float32.abs().max().item()
+            
+            # Create tensors filled with the global max
+            batch, _, head, _ = q.shape
+            q_scale = torch.full((batch, head), q_global_max, device=q.device)
+            k_scale = torch.full((batch, head), k_global_max, device=k.device)
+            v_scale = torch.full((batch, head), v_global_max, device=v.device)
+    else:
+        # For non-float8 dtypes, use a default scale of 1
+        batch, _, head, _ = q.shape
+        q_scale = torch.ones((batch, head), device=q.device)
+        k_scale = torch.ones((batch, head), device=k.device)
+        v_scale = torch.ones((batch, head), device=v.device)
+    
+    return q_scale, k_scale, v_scale
+

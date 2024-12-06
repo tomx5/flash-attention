@@ -1,7 +1,7 @@
 import torch
 import triton
 import triton.language as tl
-from .utils import get_shape_from_layout, get_strides_from_layout, is_cdna, is_rdna, DEBUG, AUTOTUNE
+from .utils import get_shape_from_layout, get_strides_from_layout, is_cdna, is_rdna, create_scale_tensors, DEBUG, AUTOTUNE
 
 @triton.jit
 def cdiv_fn(x, y):
@@ -559,16 +559,14 @@ def attention_prefill_forward_triton_impl(
                                         return_scores, 
                                         use_exp2):
     
+    
+    # check if varlen
+    is_varlen = layout == "thd"
+    
     # if qkv are fp8, then find scaling factor for quantization
-    if q.dtype in {torch.float8_e4m3fnuz, torch.float8_e5m2}:
-        q_scale = q.to(torch.float32).abs().max().item()
-        k_scale = k.to(torch.float32).abs().max().item()
-        v_scale = v.to(torch.float32).abs().max().item()
-    else:
-        q_scale = k_scale = v_scale = 1
+    q_scale, k_scale, v_scale = create_scale_tensors(q, k, v, SCALE_PER_HEAD=True, layout=layout)
 
-    # force v_scale = 1
-    q_scale = k_scale = v_scale = 1
+    import pdb; pdb.set_trace()
 
     if DEBUG:
         print()
@@ -599,9 +597,6 @@ def attention_prefill_forward_triton_impl(
     q = (q.to(torch.float32) / q_scale).to(q.dtype)
     k = (k.to(torch.float32) / k_scale).to(k.dtype)
     v = (v.to(torch.float32) / v_scale).to(v.dtype)
-
-    # check if varlen
-    is_varlen = layout == "thd"
 
     # NOTE: a large bias tensor leads to overflow during pointer arithmetic
     if (bias is not None):
