@@ -592,11 +592,12 @@ def attention_prefill_forward_triton_impl(
         torch.float8_e5m2fnuz,
     }
     is_fp8 = q.dtype in fp8_types
+    is_fp8 = False
     # check if varlen
     is_varlen = layout == "thd"
     
     # if qkv are fp8, then find scaling factor for quantization
-    q_scale, k_scale, v_scale = create_scale_tensors(q, k, v, SCALE_PER_HEAD=True, layout=layout)
+    q_scale, k_scale, v_scale = create_scale_tensors(q, k, v, SCALE_PER_HEAD=True, layout=layout) # TODO: if SCALE_PER_HEAD: within the kernel itself just compute qkv_scale = tl.max(q or k or v)
     q_scale_stride_z = q_scale.stride(0)
     kv_scale_stride_z = k_scale.stride(0)
 

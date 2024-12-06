@@ -305,6 +305,7 @@ def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd'):
         torch.float8_e5m2fnuz,
     }
     is_fp8 = q.dtype in fp8_types
+    is_fp8 = False
 
     if layout == 'bhsd':
         seqlen_loc = 2
