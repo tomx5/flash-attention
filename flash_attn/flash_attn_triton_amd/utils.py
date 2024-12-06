@@ -298,6 +298,14 @@ def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd'):
     Returns:
     tuple: (q_scale, k_scale, v_scale) tensors
     """
+    fp8_types = {
+        torch.float8_e4m3fnuz,
+        torch.float8_e4m3fn,  
+        torch.float8_e5m2,
+        torch.float8_e5m2fnuz,
+    }
+    is_fp8 = q.dtype in fp8_types
+
     if layout == 'bhsd':
         seqlen_loc = 2
         dim_loc = 3
@@ -311,7 +319,7 @@ def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd'):
     is_varlen = layout == "thd"
 
     # Handle float8 dtype special case
-    if q.dtype in {torch.float8_e4m3fnuz, torch.float8_e5m2}:
+    if is_fp8:
         # Convert to float32 for scale computation
         q_float32 = q.to(torch.float32)
         k_float32 = k.to(torch.float32)
@@ -338,7 +346,12 @@ def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd'):
             v_scale = torch.full((batch, head), v_global_max, device=v.device)
     else:
         # For non-float8 dtypes, use a default scale of 1
-        batch, _, head, _ = q.shape
+        if layout == 'bshd':
+            batch, _, head, _ = q.shape
+        elif layout == 'bhsd':
+            batch, head, _, _ = q.shape
+        else:
+            assert False, "VARLEN NOT SUPPORTED"
         q_scale = torch.ones((batch, head), device=q.device)
         k_scale = torch.ones((batch, head), device=k.device)
         v_scale = torch.ones((batch, head), device=v.device)
