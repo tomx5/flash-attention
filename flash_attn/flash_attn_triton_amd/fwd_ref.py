@@ -1,10 +1,24 @@
 import torch
 import math
-from .utils import DEBUG
+from .utils import create_scale_tensors, check_is_fp8, DEBUG
 
 DEBUG_CORE = DEBUG and False
 
-def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
+def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2, layout):
+    is_fp8 = check_is_fp8(q)
+    if is_fp8:
+        # if qkv are fp8, then find scaling factor for quantization
+        q_scale, k_scale, v_scale = create_scale_tensors(q, k, v, SCALE_PER_HEAD=True, layout=layout) # TODO: if SCALE_PER_HEAD: within the kernel itself just compute qkv_scale = tl.max(q or k or v)
+        q_scale_stride_z = q_scale.stride(0)
+        kv_scale_stride_z = k_scale.stride(0)
+
+        # scale qkv tensors if FP8
+        q = q / q_scale
+        k = k / k_scale
+        v = v / v_scale
+    else:
+        q_scale = k_scale = v_scale = 1
+
     if DEBUG_CORE:
         print()
         print("attention_forward_core_ref_impl")
@@ -14,9 +28,17 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
         print("sm_scale:", sm_scale)
         print("causal:", causal)
         print("use_exp2:", use_exp2)
+        print('layout:', layout)
+        print('is_fp8:', is_fp8)
+        print('q_scale:', q_scale)
+        print('k_scale:', k_scale)
+        print('v_scale:', v_scale)
     
     # Compute attention scores
-    attention_scores = torch.matmul(q.to(torch.float32), k.transpose(-2, -1).to(torch.float32))
+    if not is_fp8:
+        attention_scores = torch.matmul(q.to(torch.float32), k.transpose(-2, -1).to(torch.float32))
+    else:
+        attention_scores = torch.matmul(q.to(torch.float32), k.transpose(-2, -1).to(torch.float32)) * q_scale * v_scale
     if DEBUG_CORE:
         print("attention_scores:", attention_scores, attention_scores.shape)
 
@@ -105,7 +127,7 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
 
     # Compute output
-    o = torch.matmul(softmax, v.to(torch.float32))
+    o = torch.matmul(softmax, v.to(torch.float32)) * v_scale
     if DEBUG_CORE:
         print("o:", o, o.shape)
 
@@ -147,7 +169,7 @@ def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout
 
     # Call the core attention function
     o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scaled_scores, attention_scores = attention_forward_core_ref_impl(
-        q, k, v, sm_scale, causal, use_exp2
+        q, k, v, sm_scale, causal, use_exp2, layout
     )
 
     if group_size != 1:
@@ -192,6 +214,7 @@ def attention_varlen_forward_pytorch_ref_impl(
     max_seqlen_k,
     use_exp2
 ):
+
     # Ensure the layout is 'thd'
     if layout != 'thd':
         raise ValueError(f"Unsupported layout {layout}. Expected 'thd'.")
@@ -260,7 +283,7 @@ def attention_varlen_forward_pytorch_ref_impl(
             attention_shifted_scaled_scores_i,
             attention_scaled_scores_i,
             attention_scores_i,
-        ) = attention_forward_core_ref_impl(q_i, k_i, v_i, sm_scale, causal, use_exp2)
+        ) = attention_forward_core_ref_impl(q_i, k_i, v_i, sm_scale, causal, use_exp2, layout)
 
         # Reshape outputs back to original dimensions
         if group_size != 1:
