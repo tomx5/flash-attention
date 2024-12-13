@@ -335,13 +335,13 @@ mha_varlen_fwd(at::Tensor &q,                   // total_q x num_heads x head_si
         CHECK_DEVICE(block_table);
         TORCH_CHECK(block_table.dtype() == torch::kInt32, "block_table must have dtype torch.int32");
         TORCH_CHECK(block_table.stride(-1) == 1, "block_table must have contiguous last dimension");
+        CHECK_CONTIGUOUS(k);
+        CHECK_CONTIGUOUS(v);
     }
 
     TORCH_CHECK(q.stride(-1) == 1, "Input tensor must have contiguous last dimension");
     TORCH_CHECK(k.stride(-1) == 1, "Input tensor must have contiguous last dimension");
     TORCH_CHECK(v.stride(-1) == 1, "Input tensor must have contiguous last dimension");
-    CHECK_CONTIGUOUS(k);
-    CHECK_CONTIGUOUS(v);
     CHECK_CONTIGUOUS(cu_seqlens_q);
     CHECK_CONTIGUOUS(cu_seqlens_k);
 
