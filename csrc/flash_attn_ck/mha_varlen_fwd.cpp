@@ -36,7 +36,7 @@ fmha_fwd_splitkv_traits get_ck_fmha_varlen_fwd_splitkv_traits(const mask_info &m
                                    head_size,
                                    dtype,
                                    true, // is_group_mode
-                                   true, // is_v_rowmajor
+                                   false, // is_v_rowmajor
                                    mask.type,
                                    enable_alibi ? bias_enum::alibi : bias_enum::no_bias,
                                    has_lse,
