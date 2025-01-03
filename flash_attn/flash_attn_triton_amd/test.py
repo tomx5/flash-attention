@@ -512,22 +512,21 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 @pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('dropout_p', [0.0])
 @pytest.mark.parametrize('layout', ["bshd"]) # expects bshd args
-@pytest.mark.parametrize('dtype', [torch.float8_e4m3fn, torch.float16])
 @pytest.mark.parametrize('DEBUG_INPUT', [False])
-def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, dtype, DEBUG_INPUT):
+def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, DEBUG_INPUT):
     device = "cuda"
     window_size =  (-1, -1)
     softcap = 0.0
     alibi_slopes = None
     deterministic = False
 
-    q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
+    q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, torch.float32, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
 
 
-    out, lse, S_dmask = flash_attn_func(
-            q,
-            k,
-            v,
+    out_fp16, lse_fp16, S_dmask_fp16 = flash_attn_func(
+            q.clone().to(torch.float16),
+            k.clone().to(torch.float16),
+            v.clone().to(torch.float16),
             dropout_p,
             causal=causal,
             window_size=window_size,
@@ -536,10 +535,32 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
             deterministic=deterministic,
             return_attn_probs=True,
         )
+    if DEBUG:
+        print("out_fp16", out_fp16)
+        print("lse_fp16", lse_fp16)
+        print("S_dmask_fp16", S_dmask_fp16)
 
-    print("out", out)
-    print("lse", lse)
-    print("S_dmask", S_dmask)
+    out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_func(
+            q.clone().to(torch.float8_e4m3fnuz),
+            k.clone().to(torch.float8_e4m3fnuz),
+            v.clone().to(torch.float8_e4m3fnuz),
+            dropout_p,
+            causal=causal,
+            window_size=window_size,
+            softcap=softcap,
+            alibi_slopes=alibi_slopes,
+            deterministic=deterministic,
+            return_attn_probs=True,
+        )
+    if DEBUG:
+        print("out_fp8", out_fp8)
+        print("lse_fp8", lse_fp8)
+        print("S_dmask_fp8", S_dmask_fp8)
+
+    if DEBUG:
+        print("out_fp16:", out_fp16, out_fp16.shape)
+        print("out_fp8:", out_fp8, out_fp8.shape)
+    torch.testing.assert_close(out_fp16.to(torch.float32), out_fp8.to(torch.float32), atol=ATOL, rtol=RTOL)
 
 @pytest.mark.parametrize(
     "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD", [
