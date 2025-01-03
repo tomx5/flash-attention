@@ -8,6 +8,7 @@ from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
 from .fwd_decode import dequantize_kv_fp16, quantize_kv_int4
+from flash_attn import flash_attn_func
 
 # defailt fp16 tolerance is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
 ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 
@@ -470,6 +471,75 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
         print("output_triton:", output_triton, output_triton.shape)
         print("output_ref:", output_ref, output_ref.shape)
     torch.testing.assert_close(output_triton, output_ref, atol=ATOL, rtol=RTOL)
+
+
+@pytest.mark.parametrize(
+    "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD",
+    [
+        # (1, 1, 1, 1, 1, 1),
+        (1, 1, 1, 2, 4, 16),
+        # (1, 2, 2, 2, 4, 16),
+        # (1, 4, 1, 2, 4, 16),
+        # (1, 4, 2, 2, 4, 16),
+        # # (1, 1, 1, 4, 2, 16),
+        # (1, 1, 1, 4, 4, 16),
+        # (1, 2, 2, 4, 4, 16),
+        # (2, 1, 1, 4, 4, 16),
+        # (2, 2, 2, 4, 4, 16),
+        # (1, 1, 1, 128, 64, 16),
+        # (2, 2, 2, 2, 128, 1),
+        # (2, 3, 3, 2, 128, 16),
+        # (3, 2, 2, 256, 512, 16),
+        # (3, 3, 3, 128, 128, 64),
+        # (2, 4, 4, 1024, 1024, 64),
+        # (4, 6, 6, 108, 256, 224),
+        # (4, 8, 8, 2048, 2048, 128),
+        # (4, 16, 16, 4096, 4096, 64),
+        # (2, 4, 4, 8192, 8192, 32),
+        # # fa configs
+        # (4, 6, 1, 113, 203, 256),
+        # (4, 6, 1, 128, 217, 256),
+        # (4, 6, 2, 113, 211, 128),
+        # (4, 6, 2, 108, 256, 128),
+        # (4, 6, 1, 256, 512, 64),
+        # (4, 6, 1, 512, 256, 64),
+        # (4, 6, 2, 1024, 1024, 32),
+        # (4, 6, 2, 1023, 1024, 32),
+        # (4, 6, 6, 1024, 1023, 32),
+        # (4, 6, 6, 2048, 2048, 32),
+    ],
+)
+@pytest.mark.parametrize('causal', [False])
+@pytest.mark.parametrize('dropout_p', [0.0])
+@pytest.mark.parametrize('layout', ["bshd"]) # expects bshd args
+@pytest.mark.parametrize('dtype', [torch.float8_e4m3fn, torch.float16])
+@pytest.mark.parametrize('DEBUG_INPUT', [False])
+def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, dtype, DEBUG_INPUT):
+    device = "cuda"
+    window_size =  (-1, -1)
+    softcap = 0.0
+    alibi_slopes = None
+    deterministic = False
+
+    q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
+
+
+    out, lse, S_dmask = flash_attn_func(
+            q,
+            k,
+            v,
+            dropout_p,
+            causal=causal,
+            window_size=window_size,
+            softcap=softcap,
+            alibi_slopes=alibi_slopes,
+            deterministic=deterministic,
+            return_attn_probs=True,
+        )
+
+    print("out", out)
+    print("lse", lse)
+    print("S_dmask", S_dmask)
 
 @pytest.mark.parametrize(
     "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD", [
