@@ -411,6 +411,11 @@ def attn_fwd(Q, K, V, bias,
         v_scale = tl.load(V_SCALE + off_z * stride_kvscale_z + off_h_k)
         p_scale = tl.load(P_SCALE + off_z * stride_pscale_z + off_h_q)
         p_inv_scale = tl.load(P_INV_SCALE + off_z * stride_pinvscale_z + off_h_q)
+        # print("q_scale", q_scale)
+        # print("k_scale", k_scale)
+        # print("v_scale", v_scale)
+        # print("p_scale", p_scale)
+        # print("p_inv_scale", p_inv_scale)
     else:
         q_scale, k_scale, v_scale, p_scale, p_inv_scale = 1.0, 1.0, 1.0, 1.0, 1.0
 
@@ -588,6 +593,11 @@ def attention_prefill_forward_triton_impl(
     is_fp8 = q.dtype in FP8_TYPES
     
     if is_fp8:
+        # constants
+        eps = 1e-9
+        type_max = torch.finfo(q.dtype).max
+        per_head_scaling = True
+
         # Convert to float32 for scale computation
         q_float32 = q.detach().to(torch.float32)
         k_float32 = k.detach().to(torch.float32)
@@ -598,24 +608,45 @@ def attention_prefill_forward_triton_impl(
         nheads_q = q.size(1) if layout == "bhsd" else q.size(2)
         nheads_k = k.size(1) if layout == "bhsd" else k.size(2)
         
-        # Compute global max values
-        eps = 1e-9
-        q_max = max(q_float32.abs().max().item(), eps)
-        k_max = max(k_float32.abs().max().item(), eps)
-        v_max = max(v_float32.abs().max().item(), eps)
-        
-        # Create scale tensors with the global values
-        q_scale = torch.full((batch, nheads_q), q_max, dtype=torch.float32, device=q.device)
-        k_scale = torch.full((batch, nheads_k), k_max, dtype=torch.float32, device=k.device)
-        v_scale = torch.full((batch, nheads_k), v_max, dtype=torch.float32, device=v.device)
-        
-        # Simple p_scale for softmax computation
-        p_scale = torch.full((batch, nheads_q), 1.0, dtype=torch.float32, device=q.device)
-        p_inv_scale = torch.full((batch, nheads_q), 1.0, dtype=torch.float32, device=q.device)
+        if per_head_scaling:        
+            # Set up layout-specific dimensions
+            if layout == "bhsd":
+                seqlen_loc = 2
+                dim_loc = 3
+            elif layout == "bshd":
+                seqlen_loc = 1
+                dim_loc = 3
+            
+            # Compute max for each batch-head pair across seqlen and dim
+            q_scale = torch.maximum(q_float32.abs().amax(dim=(seqlen_loc, dim_loc)), torch.tensor(eps))
+            k_scale = torch.maximum(k_float32.abs().amax(dim=(seqlen_loc, dim_loc)), torch.tensor(eps))
+            v_scale = torch.maximum(v_float32.abs().amax(dim=(seqlen_loc, dim_loc)), torch.tensor(eps))
+            
+            # Divide by type max
+            q_scale = q_scale / type_max
+            k_scale = k_scale / type_max
+            v_scale = v_scale / type_max
+
+            # Set p_scale according to reference
+            p_scale = torch.full((batch, nheads_q), 1.0/type_max, dtype=torch.float32, device=q.device)
+            p_inv_scale = 1.0 / p_scale
+        else:
+            q_max = max(q_float32.abs().max().item(), eps)
+            k_max = max(k_float32.abs().max().item(), eps)
+            v_max = max(v_float32.abs().max().item(), eps)
+            
+            # Create scale tensors with the global values
+            q_scale = torch.full((batch, nheads_q), q_max, dtype=torch.float32, device=q.device)
+            k_scale = torch.full((batch, nheads_k), k_max, dtype=torch.float32, device=k.device)
+            v_scale = torch.full((batch, nheads_k), v_max, dtype=torch.float32, device=v.device)
+            
+            # Simple p_scale for softmax computation
+            p_scale = torch.full((batch, nheads_q), 1.0, dtype=torch.float32, device=q.device)
+            p_inv_scale = torch.full((batch, nheads_q), 1.0, dtype=torch.float32, device=q.device)
         
         # Get strides for the kernel
         q_scale_stride_z = q_scale.stride(0)
-        kv_scale_stride_z = k_scale.stride(0) 
+        kv_scale_stride_z = k_scale.stride(0)
         p_scale_stride_z = p_scale.stride(0)
         p_inv_scale_stride_z = p_inv_scale.stride(0)
     else:
@@ -634,6 +665,9 @@ def attention_prefill_forward_triton_impl(
         print("kv_scale_stride_z:", kv_scale_stride_z)
         print("p_scale_stride_z:", p_scale_stride_z)
         print("p_inv_scale_stride_z:", p_inv_scale_stride_z)
+        if is_fp8:
+            print(f"type_max: {type_max}")
+            
 
     # check if varlen
     is_varlen = layout == "thd"
