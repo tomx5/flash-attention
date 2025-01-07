@@ -512,7 +512,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 @pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('dropout_p', [0.0])
 @pytest.mark.parametrize('layout', ["bshd"]) # expects bshd args
-@pytest.mark.parametrize('DEBUG_INPUT', [False])
+@pytest.mark.parametrize('DEBUG_INPUT', [True])
 def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, DEBUG_INPUT):
     device = "cuda"
     window_size =  (-1, -1)
