@@ -62,7 +62,7 @@ def compute_alibi_block(alibi_slope, seqlen_q, seqlen_k, offs_m, offs_n, transpo
 @triton.jit
 def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk, stride_bn, stride_sn, start_m,
                     actual_seqlen_k, actual_seqlen_q, dropout_p, philox_seed, philox_ptrs, sd_mask_ptrs, dropout_mask_ptrs,
-                    q_fp8_ptrs, k_fp8_ptrs, qk_f32_ptrs, block_min, block_max, offs_n_causal, masked_blocks, n_extra_tokens, alibi_slope,
+                    q_fp8_ptrs, k_fp8_ptrs, qk_fp8_ptrs, block_min, block_max, offs_n_causal, masked_blocks, n_extra_tokens, alibi_slope,
                     q_scale, k_scale, v_scale, p_scale, p_inv_scale, IS_FP8: tl.constexpr,
                     IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
                     OFFS_M: tl.constexpr, OFFS_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, MASK_STEPS: tl.constexpr,
@@ -109,7 +109,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         if IS_FP8:
             tl.store(q_fp8_ptrs, q, mask=q_mask)
             tl.store(k_fp8_ptrs, k, mask=k_mask)
-            tl.store(qk_f32_ptrs, tl.dot(q, k), mask=p_mask)
+            tl.store(qk_fp8_ptrs, tl.dot(q, k), mask=p_mask)
         
         
         # -- compute qk ----
@@ -197,6 +197,8 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         if ENABLE_DROPOUT:
             dropout_mask_ptrs += BLOCK_N * stride_sn
             philox_ptrs += BLOCK_N * stride_sn
+        if IS_FP8:
+            qk_fp8_ptrs += BLOCK_N * stride_sn
     return acc, l_i, m_i
 
 
@@ -493,6 +495,8 @@ def attn_fwd(Q, K, V, bias,
         if ENABLE_DROPOUT:
             dropout_mask_ptrs += n_full_blocks * BLOCK_N * stride_sn
             philox_ptrs += n_full_blocks * BLOCK_N * stride_sn
+        if IS_FP8:
+            qk_fp8_ptrs += n_full_blocks * BLOCK_N * stride_sn
         acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk, stride_bn, stride_sn,
                                         start_m, seqlen_k, seqlen_q, dropout_p, philox_seed, philox_ptrs,
                                         sd_mask_ptrs, dropout_mask_ptrs, q_fp8_ptrs, k_fp8_ptrs, qk_fp8_ptrs, block_min, block_max, offs_n_causal, masked_blocks,
@@ -736,7 +740,10 @@ def attention_prefill_forward_triton_impl(
     else:
         sd_mask = None
         dropout_mask = None
-        scores_strides = (0, 0, 0, 0)
+        if is_fp8:
+            scores_strides = (qk_fp8.stride(0), qk_fp8.stride(1), qk_fp8.stride(2), qk_fp8.stride(3))
+        else:
+            scores_strides = (0, 0, 0, 0)
 
     # stores LSE the log of the normalization constant / sum of expoential score(unnormalzied probablities)
     if is_varlen:
