@@ -63,7 +63,7 @@ def compute_alibi_block(alibi_slope, seqlen_q, seqlen_k, offs_m, offs_n, transpo
 def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk, stride_bn, stride_sn, start_m,
                     actual_seqlen_k, actual_seqlen_q, dropout_p, philox_seed, philox_ptrs, sd_mask_ptrs, dropout_mask_ptrs,
                     q_fp8_ptrs, k_fp8_ptrs, qk_fp8_ptrs, p_fp8_ptrs, acc_fp8_ptrs, block_min, block_max, offs_n_causal, masked_blocks, n_extra_tokens, alibi_slope,
-                    q_scale, k_scale, v_scale, p_scale, p_inv_scale, IS_FP8: tl.constexpr,
+                    q_inv_scale, k_inv_scale, v_inv_scale, p_inv_scale, IS_FP8: tl.constexpr,
                     IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
                     OFFS_M: tl.constexpr, OFFS_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, MASK_STEPS: tl.constexpr,
                     ENABLE_DROPOUT: tl.constexpr, PADDED_HEAD: tl.constexpr,
@@ -114,7 +114,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         qk += tl.dot(q, k)
         qk_scaled =  qk * SM_SCALE
         if IS_FP8:
-            qk_scaled *= q_scale * k_scale  # descale qk after matmul if quantized
+            qk_scaled *= q_inv_scale * k_inv_scale  # descale qk after matmul if quantized
             tl.store(qk_fp8_ptrs, qk_scaled, mask=p_mask)
 
         if IS_CAUSAL:
@@ -144,9 +144,6 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
             p = tl.math.exp2(q_shifted * RCP_LN2)
         else:
             p = tl.math.exp(q_shifted)
-        if IS_FP8:
-            p *= p_inv_scale
-            tl.store(p_fp8_ptrs, p, mask=p_mask)
 
         # CAVEAT: Must update l_ij before applying dropout
         l_ij = tl.sum(p, 1)
@@ -184,9 +181,12 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         l_i = l_i * alpha + l_ij
         # update m_i and l_i
         m_i = m_ij
-        acc += tl.dot(p.to(v.type.element_ty), v)
+
         if IS_FP8:
-            acc *= p_scale * v_scale
+            p *= (1/p_inv_scale) # put p into fp8 range
+            tl.store(p_fp8_ptrs, p, mask=p_mask)
+
+        acc += tl.dot(p.to(v.type.element_ty), v)
         k_ptrs += BLOCK_N * stride_kn
         v_ptrs += BLOCK_N * stride_vk
         if bias_ptrs is not None:
@@ -200,6 +200,10 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         if IS_FP8:
             qk_fp8_ptrs += BLOCK_N * stride_sn
             p_fp8_ptrs += BLOCK_N * stride_sn
+
+    if IS_FP8:
+        acc *= p_inv_scale * v_inv_scale
+        tl.store(acc_fp8_ptrs, acc)
 
     return acc, l_i, m_i
 
@@ -280,7 +284,7 @@ autotune_configs, autotune_keys = get_autotune_configs()
 )
 @triton.jit
 def attn_fwd(Q, K, V, bias,
-             Q_SCALE, K_SCALE, V_SCALE, P_SCALE, P_INV_SCALE, stride_qscale_z, stride_kvscale_z, stride_pscale_z, stride_pinvscale_z,
+             Q_INV_SCALE, K_INV_SCALE, V_INV_SCALE, P_INV_SCALE, stride_q_inv_scale_z, stride_kv_inv_scale_z, stride_p_inv_scale_z,
              SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_qh, stride_qm, stride_qk,
              stride_kz, stride_kh, stride_kn, stride_kk, stride_vz, stride_vh, stride_vk, stride_vn,
              stride_oz, stride_oh, stride_om, stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az, stride_ah,
@@ -420,16 +424,10 @@ def attn_fwd(Q, K, V, bias,
 
     # Load scale factors if IS_FP8.
     if IS_FP8:
-        q_scale = tl.load(Q_SCALE + off_z * stride_qscale_z + off_h_q)
-        k_scale = tl.load(K_SCALE + off_z * stride_kvscale_z + off_h_k)
-        v_scale = tl.load(V_SCALE + off_z * stride_kvscale_z + off_h_k)
-        p_scale = tl.load(P_SCALE + off_z * stride_pscale_z + off_h_q)
-        p_inv_scale = tl.load(P_INV_SCALE + off_z * stride_pinvscale_z + off_h_q)
-        # print("q_scale", q_scale)
-        # print("k_scale", k_scale)
-        # print("v_scale", v_scale)
-        # print("p_scale", p_scale)
-        # print("p_inv_scale", p_inv_scale)
+        q_inv_scale = tl.load(Q_INV_SCALE + off_z * stride_q_inv_scale_z + off_h_q)
+        k_inv_scale = tl.load(K_INV_SCALE + off_z * stride_kv_inv_scale_z + off_h_k)
+        v_inv_scale = tl.load(V_INV_SCALE + off_z * stride_kv_inv_scale_z + off_h_k)
+        p_inv_scale = tl.load(P_INV_SCALE + off_z * stride_p_inv_scale_z + off_h_q)
         
         q_fp8_offset = q_fp8 + off_z * stride_qz + off_h_q * stride_qh + cu_seqlens_q_start * stride_qm
         q_fp8_ptrs = q_fp8_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
@@ -448,7 +446,7 @@ def attn_fwd(Q, K, V, bias,
         acc_fp8_offset = acc_fp8 + off_z * stride_qz + off_h_q * stride_qh + cu_seqlens_q_start * stride_qm
         acc_fp8_ptrs = acc_fp8_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk  
     else:
-        q_scale, k_scale, v_scale, p_scale, p_inv_scale = 1.0, 1.0, 1.0, 1.0, 1.0
+        q_inv_scale, k_inv_scale, v_inv_scale, p_inv_scale = 1.0, 1.0, 1.0,  1.0
         q_fp8_ptrs = None
         k_fp8_ptrs = None
         qk_fp8_ptrs = None
@@ -480,7 +478,7 @@ def attn_fwd(Q, K, V, bias,
                                         sd_mask_ptrs, dropout_mask_ptrs, q_fp8_ptrs, k_fp8_ptrs, qk_fp8_ptrs, p_fp8_ptrs, acc_fp8_ptrs,
                                         # _, _, offs_n_causal, masked_blocks, n_extra_tokens, _
                                         block_min, block_max, 0, 0, 0, alibi_slope,
-                                        q_scale, k_scale, v_scale, p_scale, p_inv_scale, IS_FP8,
+                                        q_inv_scale, k_inv_scale, v_inv_scale, p_inv_scale, IS_FP8,
                                         # IS_CAUSAL, ....
                                         False, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                                         # _, MASK_STEPS, ...
@@ -512,7 +510,7 @@ def attn_fwd(Q, K, V, bias,
                                         start_m, seqlen_k, seqlen_q, dropout_p, philox_seed, philox_ptrs,
                                         sd_mask_ptrs, dropout_mask_ptrs, q_fp8_ptrs, k_fp8_ptrs, qk_fp8_ptrs, p_fp8_ptrs, acc_fp8_ptrs, 
                                         block_min, block_max, offs_n_causal, masked_blocks, n_extra_tokens, alibi_slope,
-                                        q_scale, k_scale, v_scale, p_scale, p_inv_scale, IS_FP8,
+                                        q_inv_scale, k_inv_scale, v_inv_scale, p_inv_scale, IS_FP8,
                                         IS_CAUSAL, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                                         # _, MASK_STEPS, ...
                                         PRE_LOAD_V, True, ENABLE_DROPOUT, PADDED_HEAD,
@@ -521,8 +519,6 @@ def attn_fwd(Q, K, V, bias,
     # This helps the compiler do Newton Raphson on l_i vs on acc which is much larger.
     l_recip = 1 / l_i[:, None]
     acc = acc * l_recip
-    if IS_FP8:
-        tl.store(acc_fp8_ptrs, acc)
     if ENABLE_DROPOUT:
         dropout_scale = 1 / (1 - dropout_p)
         acc = acc * dropout_scale
@@ -655,37 +651,27 @@ def attention_prefill_forward_triton_impl(
             elif layout == "bshd":
                 seqlen_loc = 1
 
-            # Compute max for each batch-head pair across seqlen and dim
-            q_scale = torch.maximum(q_float32.abs().amax(dim=(seqlen_loc, 3)), torch.tensor(eps))
-            k_scale = torch.maximum(k_float32.abs().amax(dim=(seqlen_loc, 3)), torch.tensor(eps))
-            v_scale = torch.maximum(v_float32.abs().amax(dim=(seqlen_loc, 3)), torch.tensor(eps))
+            # compute max for each batch-head pair across seqlen and dim
+            q_max = torch.maximum(q_float32.abs().amax(dim=(seqlen_loc, 3)), torch.tensor(eps))
+            k_max = torch.maximum(k_float32.abs().amax(dim=(seqlen_loc, 3)), torch.tensor(eps))
+            v_max = torch.maximum(v_float32.abs().amax(dim=(seqlen_loc, 3)), torch.tensor(eps))
             
-            # Divide by type max
-            q_scale = q_scale / type_max
-            k_scale = k_scale / type_max
-            v_scale = v_scale / type_max
+            # Scale values to fp8 range
+            q = (q_float32 * type_max/ q_max).to(q.dtype)
+            k = (k_float32 * type_max/ k_max).to(k.dtype)
+            v = (v_float32 * type_max/ v_max).to(v.dtype)
 
-            # Set p_scale according to reference
-            p_scale = torch.full((batch, nheads_q), 1.0/type_max, dtype=torch.float32, device=q.device)
-            p_inv_scale = 1.0 / p_scale
+            # create scale factors for dequantizing back to fp32
+            q_inv_scale = q_max/ type_max
+            k_inv_scale = k_max/ type_max 
+            v_inv_scale = v_max/ type_max
+            p_inv_scale = torch.full((batch, nheads_q), 1.0 / type_max, dtype=torch.float32, device=q.device) # the max of p is to 1.0 ?
         else:
-            q_max = max(q_float32.abs().max().item(), eps)
-            k_max = max(k_float32.abs().max().item(), eps)
-            v_max = max(v_float32.abs().max().item(), eps)
-            
-            # Create scale tensors with the global values
-            q_scale = torch.full((batch, nheads_q), q_max, dtype=torch.float32, device=q.device)
-            k_scale = torch.full((batch, nheads_k), k_max, dtype=torch.float32, device=k.device)
-            v_scale = torch.full((batch, nheads_k), v_max, dtype=torch.float32, device=v.device)
-            
-            # Simple p_scale for softmax computation
-            p_scale = torch.full((batch, nheads_q), 1.0, dtype=torch.float32, device=q.device)
-            p_inv_scale = torch.full((batch, nheads_q), 1.0, dtype=torch.float32, device=q.device)
+            raise ValueError("per_head_scaling is false")
         
         # Get strides for the kernel
-        q_scale_stride_z = q_scale.stride(0)
-        kv_scale_stride_z = k_scale.stride(0)
-        p_scale_stride_z = p_scale.stride(0)
+        q_scale_stride_z = q_inv_scale.stride(0)
+        kv_scale_stride_z = k_inv_scale.stride(0)
         p_inv_scale_stride_z = p_inv_scale.stride(0)
 
         # dump intermedia results
@@ -697,8 +683,8 @@ def attention_prefill_forward_triton_impl(
         acc_fp8 = torch.zeros(o.shape, dtype=torch.float32, device=q.device)
     else:
         # For non-FP8 types, use dummy values (no scaling needed)
-        q_scale = k_scale = v_scale = p_scale = p_inv_scale = 1
-        q_scale_stride_z = kv_scale_stride_z = p_scale_stride_z = p_inv_scale_stride_z = 0
+        q_inv_scale = k_inv_scale = v_inv_scale = p_inv_scale = 1
+        q_scale_stride_z = kv_scale_stride_z = p_inv_scale_stride_z = 0
         q_fp8 = None
         k_fp8 = None
         qk_fp8= None
@@ -707,14 +693,12 @@ def attention_prefill_forward_triton_impl(
 
     if DEBUG:
         print("is_fp8:", is_fp8)
-        print("q_scale:", q_scale)
-        print("k_scale:", k_scale)
-        print("v_scale:", v_scale)
-        print("p_scale:", p_scale)
+        print("q_inv_scale:", q_inv_scale)
+        print("k_inv_scale:", k_inv_scale)
+        print("v_inv_scale:", v_inv_scale)
         print("p_inv_scale:", p_inv_scale)
         print("q_scale_stride_z:", q_scale_stride_z)
         print("kv_scale_stride_z:", kv_scale_stride_z)
-        print("p_scale_stride_z:", p_scale_stride_z)
         print("p_inv_scale_stride_z:", p_inv_scale_stride_z)
         if is_fp8:
             print(f"type_max: {type_max}")
@@ -786,7 +770,7 @@ def attention_prefill_forward_triton_impl(
         print("k:", k)
 
     attn_fwd[grid](q, k, v, bias,
-                    q_scale, k_scale, v_scale, p_scale, p_inv_scale, q_scale_stride_z, kv_scale_stride_z, p_scale_stride_z, p_inv_scale_stride_z,
+                    q_inv_scale, k_inv_scale, v_inv_scale, p_inv_scale, q_scale_stride_z, kv_scale_stride_z, p_inv_scale_stride_z,
                     sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
                     *bias_strides, *alibi_strides, *scores_strides, stride_lse_z, stride_lse_h, stride_lse_m, cu_seqlens_q, cu_seqlens_k,
                     dropout_p=dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset, sd_mask=sd_mask, dropout_mask=dropout_mask, alibi_slopes=alibi_slopes, 
