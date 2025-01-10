@@ -655,7 +655,12 @@ def attention_prefill_forward_triton_impl(
             q_max = torch.maximum(q_float32.abs().amax(dim=(seqlen_loc, 3)), torch.tensor(eps))
             k_max = torch.maximum(k_float32.abs().amax(dim=(seqlen_loc, 3)), torch.tensor(eps))
             v_max = torch.maximum(v_float32.abs().amax(dim=(seqlen_loc, 3)), torch.tensor(eps))
-            
+
+            # add unsqueeze operations to make q_max broadcastable
+            q_max = q_max.unsqueeze(seqlen_loc).unsqueeze(-1)
+            k_max = k_max.unsqueeze(seqlen_loc).unsqueeze(-1)
+            v_max = v_max.unsqueeze(seqlen_loc).unsqueeze(-1)
+
             # Scale values to fp8 range
             q = (q_float32 * type_max/ q_max).to(q.dtype)
             k = (k_float32 * type_max/ k_max).to(k.dtype)
