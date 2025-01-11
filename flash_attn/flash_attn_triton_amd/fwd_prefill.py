@@ -598,7 +598,11 @@ def attention_prefill_forward_triton_impl(
                                         philox_offset,
                                         # misc
                                         return_softmax,
-                                        use_exp2):
+                                        use_exp2,
+                                        # fp8
+                                        descale_q,
+                                        descale_k,
+                                        descale_v):
 
     if DEBUG:
         print()
@@ -629,55 +633,20 @@ def attention_prefill_forward_triton_impl(
     is_fp8 = q.dtype in FP8_TYPES
     
     if is_fp8:
-        # constants
-        eps = 1e-9
+        print("IS_FP8")
         type_max = torch.finfo(q.dtype).max
-        per_head_scaling = True
 
-        # Convert to float32 for scale computation
-        q_float32 = q.detach().to(torch.float32)
-        k_float32 = k.detach().to(torch.float32)
-        v_float32 = v.detach().to(torch.float32)
-        
-        # Get shapes for scaling
         batch = q.size(0) if layout != "thd" else len(cu_seqlens_q) - 1
         nheads_q = q.size(1) if layout == "bhsd" else q.size(2)
         nheads_k = k.size(1) if layout == "bhsd" else k.size(2)
-        
-        if per_head_scaling:        
-            # Set up layout-specific dimensions
-            if layout == "bhsd":
-                seqlen_loc = 2
-            elif layout == "bshd":
-                seqlen_loc = 1
 
-            # compute max for each batch-head pair across seqlen and dim
-            q_max = torch.maximum(q_float32.abs().amax(dim=(seqlen_loc, 3)), torch.tensor(eps))
-            k_max = torch.maximum(k_float32.abs().amax(dim=(seqlen_loc, 3)), torch.tensor(eps))
-            v_max = torch.maximum(v_float32.abs().amax(dim=(seqlen_loc, 3)), torch.tensor(eps))
+        descale_p = torch.full((batch, nheads_q), 1.0 / type_max, dtype=torch.float32, device=q.device) # the max of p is to 1.0 ?
 
-            # add unsqueeze operations to make q_max broadcastable
-            q_max = q_max.unsqueeze(seqlen_loc).unsqueeze(-1)
-            k_max = k_max.unsqueeze(seqlen_loc).unsqueeze(-1)
-            v_max = v_max.unsqueeze(seqlen_loc).unsqueeze(-1)
-
-            # Scale values to fp8 range
-            q = (q_float32 * type_max/ q_max).to(q.dtype)
-            k = (k_float32 * type_max/ k_max).to(k.dtype)
-            v = (v_float32 * type_max/ v_max).to(v.dtype)
-
-            # create scale factors for dequantizing back to fp32
-            q_inv_scale = q_max/ type_max
-            k_inv_scale = k_max/ type_max 
-            v_inv_scale = v_max/ type_max
-            p_inv_scale = torch.full((batch, nheads_q), 1.0 / type_max, dtype=torch.float32, device=q.device) # the max of p is to 1.0 ?
-        else:
-            raise ValueError("per_head_scaling is false")
-        
         # Get strides for the kernel
-        q_scale_stride_z = q_inv_scale.stride(0)
-        kv_scale_stride_z = k_inv_scale.stride(0)
-        p_inv_scale_stride_z = p_inv_scale.stride(0)
+        descale_q_stride_z = descale_q.stride(0)
+        descale_k_stride_z = descale_k.stride(0)
+        descale_k_stride_z = descale_v.stride(0)
+        descale_p_stride_z = descale_p.stride(0)
 
         # dump intermedia results
         q_fp8 = torch.zeros_like(q)
@@ -688,8 +657,8 @@ def attention_prefill_forward_triton_impl(
         acc_fp8 = torch.zeros(o.shape, dtype=torch.float32, device=q.device)
     else:
         # For non-FP8 types, use dummy values (no scaling needed)
-        q_inv_scale = k_inv_scale = v_inv_scale = p_inv_scale = 1
-        q_scale_stride_z = kv_scale_stride_z = p_inv_scale_stride_z = 0
+        descale_q = descale_k = descale_v = descale_p = 1
+        descale_q_stride_z = descale_k_stride_z = descale_k_stride_z = descale_p_stride_z = 0
         q_fp8 = None
         k_fp8 = None
         qk_fp8= None
@@ -698,13 +667,14 @@ def attention_prefill_forward_triton_impl(
 
     if DEBUG:
         print("is_fp8:", is_fp8)
-        print("q_inv_scale:", q_inv_scale)
-        print("k_inv_scale:", k_inv_scale)
-        print("v_inv_scale:", v_inv_scale)
-        print("p_inv_scale:", p_inv_scale)
-        print("q_scale_stride_z:", q_scale_stride_z)
-        print("kv_scale_stride_z:", kv_scale_stride_z)
-        print("p_inv_scale_stride_z:", p_inv_scale_stride_z)
+        print("descale_q:", descale_q)
+        print("descale_k:", descale_k)
+        print("descale_v:", descale_v)
+        print("descale_p:", descale_p)
+        print("q_scale_stride_z:", descale_q_stride_z)
+        print("k_scale_stride_z:", descale_k_stride_z)
+        print("v_scale_stride_z:", descale_k_stride_z)
+        print("p_scale_stride_z:", descale_p_stride_z)
         if is_fp8:
             print(f"type_max: {type_max}")
             
@@ -775,7 +745,7 @@ def attention_prefill_forward_triton_impl(
         print("k:", k)
 
     attn_fwd[grid](q, k, v, bias,
-                    q_inv_scale, k_inv_scale, v_inv_scale, p_inv_scale, q_scale_stride_z, kv_scale_stride_z, p_inv_scale_stride_z,
+                    descale_q, descale_k, descale_v, descale_p, descale_q_stride_z, descale_k_stride_z, descale_p_stride_z,
                     sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
                     *bias_strides, *alibi_strides, *scores_strides, stride_lse_z, stride_lse_h, stride_lse_m, cu_seqlens_q, cu_seqlens_k,
                     dropout_p=dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset, sd_mask=sd_mask, dropout_mask=dropout_mask, alibi_slopes=alibi_slopes, 

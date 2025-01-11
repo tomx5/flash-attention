@@ -23,7 +23,10 @@ def fwd(q,
         window_size_right,
         softcap,
         return_softmax,
-        gen_):
+        gen_,
+        descale_q,
+        descale_k,
+        descale_v):
     
     if DEBUG:
         print()
@@ -111,7 +114,10 @@ def fwd(q,
                                                 metadata.philox_seed,
                                                 metadata.philox_offset,
                                                 metadata.return_scores,
-                                                metadata.use_exp2)
+                                                metadata.use_exp2,
+                                                descale_q,
+                                                descale_k,
+                                                descale_v)
 
     if DEBUG:
         print("fwd outputs")

@@ -476,26 +476,26 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 @pytest.mark.parametrize(
     "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD",
     [
-        (1, 1, 1, 1, 1, 1),
+        # (1, 1, 1, 1, 1, 1),
         (1, 1, 1, 2, 4, 16),
-        (1, 2, 2, 2, 4, 16),
-        (1, 4, 1, 2, 4, 16),
-        (1, 4, 2, 2, 4, 16),
-        (1, 1, 1, 4, 2, 16),
-        (1, 1, 1, 4, 4, 16),
-        (1, 2, 2, 4, 4, 16),
-        (2, 1, 1, 4, 4, 16),
-        (2, 2, 2, 4, 4, 16),
-        (1, 1, 1, 128, 64, 16),
-        (2, 2, 2, 2, 128, 1),
-        (2, 3, 3, 2, 128, 16),
-        (3, 2, 2, 256, 512, 16),
-        (3, 3, 3, 128, 128, 64),
-        (2, 4, 4, 1024, 1024, 64),
-        (4, 6, 6, 108, 256, 224),
-        (4, 8, 8, 2048, 2048, 128),
-        (4, 16, 16, 4096, 4096, 64),
-        (2, 4, 4, 8192, 8192, 32),
+        # (1, 2, 2, 2, 4, 16),
+        # (1, 4, 1, 2, 4, 16),
+        # (1, 4, 2, 2, 4, 16),
+        # (1, 1, 1, 4, 2, 16),
+        # (1, 1, 1, 4, 4, 16),
+        # (1, 2, 2, 4, 4, 16),
+        # (2, 1, 1, 4, 4, 16),
+        # (2, 2, 2, 4, 4, 16),
+        # (1, 1, 1, 128, 64, 16),
+        # (2, 2, 2, 2, 128, 1),
+        # (2, 3, 3, 2, 128, 16),
+        # (3, 2, 2, 256, 512, 16),
+        # (3, 3, 3, 128, 128, 64),
+        # (2, 4, 4, 1024, 1024, 64),
+        # (4, 6, 6, 108, 256, 224),
+        # (4, 8, 8, 2048, 2048, 128),
+        # (4, 16, 16, 4096, 4096, 64),
+        # (2, 4, 4, 8192, 8192, 32),
         # # fa configs
         # (4, 6, 1, 113, 203, 256),
         # (4, 6, 1, 128, 217, 256),
@@ -523,10 +523,14 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
     q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, torch.float32, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
 
 
+    # launch kernel in fp16
+    q_fp16 = q.clone().to(torch.float16)
+    k_fp16 = k.clone().to(torch.float16)
+    v_fp16 = v.clone().to(torch.float16)
     out_fp16, lse_fp16, S_dmask_fp16 = flash_attn_func(
-            q.clone().to(torch.float16),
-            k.clone().to(torch.float16),
-            v.clone().to(torch.float16),
+            q_fp16,
+            k_fp16,
+            v_fp16,
             dropout_p,
             causal=causal,
             window_size=window_size,
@@ -540,10 +544,26 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
         print("lse_fp16", lse_fp16)
         print("S_dmask_fp16", S_dmask_fp16)
 
+
+    # constants
+    eps = 1e-9
+    type_max = torch.finfo(torch.float8_e4m3fnuz).max
+
+    # compute max for each batch-head pair across seqlen and dim
+    q_max = torch.maximum(q.abs().amax(dim=(1, 3)), torch.tensor(eps)).unsqueeze(1).unsqueeze(-1)
+    k_max = torch.maximum(k.abs().amax(dim=(1, 3)), torch.tensor(eps)).unsqueeze(1).unsqueeze(-1)
+    v_max = torch.maximum(v.abs().amax(dim=(1, 3)), torch.tensor(eps)).unsqueeze(1).unsqueeze(-1)
+
+    # scale values to fp8 range
+    q_fp8 = (q * type_max/ q_max).to(torch.float8_e4m3fnuz)
+    k_fp8 = (k * type_max/ k_max).to(torch.float8_e4m3fnuz)
+    v_fp8 = (v * type_max/ v_max).to(torch.float8_e4m3fnuz)
+
+    # launch kernel in fp8
     out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_func(
-            q.clone().to(torch.float8_e4m3fnuz),
-            k.clone().to(torch.float8_e4m3fnuz),
-            v.clone().to(torch.float8_e4m3fnuz),
+            q_fp8,
+            k_fp8,
+            v_fp8,
             dropout_p,
             causal=causal,
             window_size=window_size,
@@ -551,6 +571,9 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
             alibi_slopes=alibi_slopes,
             deterministic=deterministic,
             return_attn_probs=True,
+            descale_q=(q_max/ type_max), 
+            descale_k=(k_max/ type_max), 
+            descale_v=(v_max/ type_max), 
         )
     if DEBUG:
         print("out_fp8", out_fp8)

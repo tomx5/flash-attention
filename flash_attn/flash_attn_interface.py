@@ -90,7 +90,10 @@ def _flash_attn_forward(
     window_size_right: int,
     softcap: float,
     alibi_slopes: Optional[torch.Tensor],
-    return_softmax: bool
+    return_softmax: bool,
+    descale_q,
+    descale_k,
+    descale_v,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
     out, softmax_lse, S_dmask, rng_state = flash_attn_gpu.fwd(
@@ -107,6 +110,9 @@ def _flash_attn_forward(
         softcap,
         return_softmax,
         None,
+        descale_q,
+        descale_k,
+        descale_v,
     )
     return out, softmax_lse, S_dmask, rng_state
 
@@ -804,6 +810,9 @@ class FlashAttnFunc(torch.autograd.Function):
         alibi_slopes,
         deterministic,
         return_softmax,
+        descale_q,
+        descale_k,
+        descale_v,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -824,6 +833,9 @@ class FlashAttnFunc(torch.autograd.Function):
             softcap=softcap,
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
+            descale_q=descale_q,
+            descale_k=descale_k,
+            descale_v=descale_v,
         )
         ctx.save_for_backward(q, k, v, out_padded, softmax_lse, rng_state)
         ctx.dropout_p = dropout_p
@@ -1116,6 +1128,9 @@ def flash_attn_func(
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
+    descale_q=None, 
+    descale_k=None, 
+    descale_v=None, 
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in KV with fewer heads
@@ -1177,6 +1192,9 @@ def flash_attn_func(
         alibi_slopes,
         deterministic,
         return_attn_probs,
+        descale_q, 
+        descale_k, 
+        descale_v,
     )
 
 
