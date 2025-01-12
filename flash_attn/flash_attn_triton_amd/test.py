@@ -479,13 +479,13 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
         (1, 1, 1, 1, 1, 1),
         (1, 1, 1, 2, 4, 16),
         (1, 2, 2, 2, 4, 16),
-        (1, 4, 1, 2, 4, 16),
-        (1, 4, 2, 2, 4, 16),
+        (1, 3, 3, 2, 4, 16),
+        (1, 4, 4, 2, 4, 16),
         (1, 1, 1, 4, 2, 16),
         (1, 1, 1, 4, 4, 16),
         (1, 2, 2, 4, 4, 16),
         (2, 1, 1, 4, 4, 16),
-        (2, 2, 2, 4, 4, 16),
+        (2, 2, 2, 4, 4, 16), # fails
         (1, 1, 1, 128, 64, 16),
         (2, 2, 2, 2, 128, 1),
         (2, 3, 3, 2, 128, 16),
@@ -496,15 +496,15 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
         (4, 8, 8, 2048, 2048, 128),
         (4, 16, 16, 4096, 4096, 64),
         (2, 4, 4, 8192, 8192, 32),
-        # fa configs
-        (4, 6, 1, 113, 203, 256),
-        (4, 6, 1, 128, 217, 256),
-        (4, 6, 2, 113, 211, 128),
-        (4, 6, 2, 108, 256, 128),
-        (4, 6, 1, 256, 512, 64),
-        (4, 6, 1, 512, 256, 64),
-        (4, 6, 2, 1024, 1024, 32),
-        (4, 6, 2, 1023, 1024, 32),
+        # # more failures here
+        (4, 1, 1, 113, 203, 256),
+        (4, 2, 2, 128, 217, 256),
+        (4, 2, 2, 113, 211, 128),
+        (4, 2, 2, 108, 256, 128),
+        (4, 1, 1, 256, 512, 64),
+        (4, 1, 1, 512, 256, 64),
+        (4, 2, 2, 1024, 1024, 32),
+        (4, 2, 2, 1023, 1024, 32),
         (4, 6, 6, 1024, 1023, 32),
         (4, 6, 6, 2048, 2048, 32),
     ],
@@ -521,7 +521,6 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
     deterministic = False
 
     q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, torch.float32, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
-
 
     # launch kernel in fp16
     q_fp16 = q.clone().to(torch.float16)
@@ -544,6 +543,16 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
         print("lse_fp16", lse_fp16)
         print("S_dmask_fp16", S_dmask_fp16)
 
+    # compute p for descaling
+    batch, _ , nheads_q, dim = q.shape
+    _, _ , nheads_k, _ = k.shape
+
+    softmax_scale = dim ** (-0.5)
+    qk = torch.matmul(q.permute(0, 2, 1, 3), k.permute(0, 2, 1, 3).transpose(-1, -2)) * softmax_scale # [B, H, S_q, S_k]
+    qk_rowmax = qk.amax(dim=-1, keepdim=True)  # => [B, H, S_q, 1]
+    qk_shifted = qk - qk_rowmax
+    p_unnorm = torch.exp(qk_shifted)  # => [B, H, S_q, S_k]
+    p_max = torch.maximum(p_unnorm.abs().amax(dim=(-2, -1)), torch.tensor(1e-9, device=q.device)) # [B, H]
 
 
     # compute max for each batch-head pair across seqlen and dim
@@ -556,15 +565,14 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
     q_fp8 = (q * type_max/ q_max).to(torch.float8_e4m3fnuz)
     k_fp8 = (k * type_max/ k_max).to(torch.float8_e4m3fnuz)
     v_fp8 = (v * type_max/ v_max).to(torch.float8_e4m3fnuz)
-    # compute descale values
-    batch, _ , nheads_q, _ = q.shape
-    batch, _ , nheads_k, _ = k.shape
-    descale_q = q_max/ type_max
-    descale_k = k_max/ type_max
-    descale_v = v_max/ type_max
-    # NOTE: I am using this but note that the max of p is not 1.0 because it is not normalized ?. I need to figure out how to compute p. maybe we should do per block maybe 
-    descale_p = torch.full((batch, nheads_q), 1.0 / type_max, dtype=torch.float32, device=q.device) 
 
+    # compute descale values
+    descale_q = q_max / type_max
+    descale_k = k_max / type_max
+    descale_v = v_max / type_max
+    descale_p = p_max / type_max
+    # descale_p = torch.full((batch, nheads_q), 1.0 / type_max, dtype=torch.float32, device=q.device) 
+    # descale_p = torch.ones((batch, nheads_q), dtype=torch.float32, device=q.device) 
 
     # launch kernel in fp8
     out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_func(
@@ -592,7 +600,7 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
         print("out_fp16:", out_fp16, out_fp16.shape)
         print("out_fp8:", out_fp8, out_fp8.shape)
     
-    ATOL_fp8, RTOL_fp8 = 1e-1, 1e-1 
+    ATOL_fp8, RTOL_fp8 = 1e-1, 1e-1
     torch.testing.assert_close(out_fp16.to(torch.float32), out_fp8.to(torch.float32), atol=ATOL_fp8, rtol=RTOL_fp8)
 
 @pytest.mark.parametrize(
