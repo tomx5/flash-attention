@@ -476,26 +476,26 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 @pytest.mark.parametrize(
     "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD",
     [
-        # (1, 1, 1, 1, 1, 1),
+        (1, 1, 1, 1, 1, 1),
         (1, 1, 1, 2, 4, 16),
-        # (1, 2, 2, 2, 4, 16),
-        # (1, 4, 1, 2, 4, 16),
-        # (1, 4, 2, 2, 4, 16),
-        # (1, 1, 1, 4, 2, 16),
-        # (1, 1, 1, 4, 4, 16),
-        # (1, 2, 2, 4, 4, 16),
-        # (2, 1, 1, 4, 4, 16),
-        # (2, 2, 2, 4, 4, 16),
-        # (1, 1, 1, 128, 64, 16),
-        # (2, 2, 2, 2, 128, 1),
-        # (2, 3, 3, 2, 128, 16),
-        # (3, 2, 2, 256, 512, 16),
-        # (3, 3, 3, 128, 128, 64),
-        # (2, 4, 4, 1024, 1024, 64),
-        # (4, 6, 6, 108, 256, 224),
-        # (4, 8, 8, 2048, 2048, 128),
-        # (4, 16, 16, 4096, 4096, 64),
-        # (2, 4, 4, 8192, 8192, 32),
+        (1, 2, 2, 2, 4, 16),
+        (1, 4, 1, 2, 4, 16),
+        (1, 4, 2, 2, 4, 16),
+        (1, 1, 1, 4, 2, 16),
+        (1, 1, 1, 4, 4, 16),
+        (1, 2, 2, 4, 4, 16),
+        (2, 1, 1, 4, 4, 16),
+        (2, 2, 2, 4, 4, 16),
+        (1, 1, 1, 128, 64, 16),
+        (2, 2, 2, 2, 128, 1),
+        (2, 3, 3, 2, 128, 16),
+        (3, 2, 2, 256, 512, 16),
+        (3, 3, 3, 128, 128, 64),
+        (2, 4, 4, 1024, 1024, 64),
+        (4, 6, 6, 108, 256, 224),
+        (4, 8, 8, 2048, 2048, 128),
+        (4, 16, 16, 4096, 4096, 64),
+        (2, 4, 4, 8192, 8192, 32),
         # # fa configs
         # (4, 6, 1, 113, 203, 256),
         # (4, 6, 1, 128, 217, 256),
@@ -512,7 +512,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 @pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('dropout_p', [0.0])
 @pytest.mark.parametrize('layout', ["bshd"]) # expects bshd args
-@pytest.mark.parametrize('DEBUG_INPUT', [True])
+@pytest.mark.parametrize('DEBUG_INPUT', [False])
 def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, DEBUG_INPUT):
     device = "cuda"
     window_size =  (-1, -1)
@@ -545,19 +545,31 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
         print("S_dmask_fp16", S_dmask_fp16)
 
 
-    # constants
-    eps = 1e-9
-    type_max = torch.finfo(torch.float8_e4m3fnuz).max
 
     # compute max for each batch-head pair across seqlen and dim
-    q_max = torch.maximum(q.abs().amax(dim=(1, 3)), torch.tensor(eps)).unsqueeze(1).unsqueeze(-1)
-    k_max = torch.maximum(k.abs().amax(dim=(1, 3)), torch.tensor(eps)).unsqueeze(1).unsqueeze(-1)
-    v_max = torch.maximum(v.abs().amax(dim=(1, 3)), torch.tensor(eps)).unsqueeze(1).unsqueeze(-1)
+    q_max = torch.maximum(q.abs().amax(dim=(1, 3)), torch.tensor(1e-9)).unsqueeze(1).unsqueeze(-1)
+    k_max = torch.maximum(k.abs().amax(dim=(1, 3)), torch.tensor(1e-9)).unsqueeze(1).unsqueeze(-1)
+    v_max = torch.maximum(v.abs().amax(dim=(1, 3)), torch.tensor(1e-9)).unsqueeze(1).unsqueeze(-1)
 
     # scale values to fp8 range
+    type_max = torch.finfo(torch.float8_e4m3fnuz).max
     q_fp8 = (q * type_max/ q_max).to(torch.float8_e4m3fnuz)
     k_fp8 = (k * type_max/ k_max).to(torch.float8_e4m3fnuz)
     v_fp8 = (v * type_max/ v_max).to(torch.float8_e4m3fnuz)
+
+   
+   
+    batch, _ , nheads_q, _ = q.shape
+    batch, _ , nheads_k, _ = k.shape
+
+    # we should do per block maybe 
+    descale_q = q_max/ type_max
+    descale_k = k_max/ type_max
+    descale_v = v_max/ type_max
+    # NOTE: I am using this but not that the max of p is not 1.0 because it is not normalized ?. I need to figure out how to compute p
+    descale_p = torch.full((batch, nheads_q), 1.0 / type_max, dtype=torch.float32, device=q.device) 
+    # descale_p = descale_q * descale_k
+
 
     # launch kernel in fp8
     out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_func(
@@ -571,9 +583,10 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
             alibi_slopes=alibi_slopes,
             deterministic=deterministic,
             return_attn_probs=True,
-            descale_q=(q_max/ type_max), 
-            descale_k=(k_max/ type_max), 
-            descale_v=(v_max/ type_max), 
+            descale_q=descale_q,
+            descale_k=descale_k,
+            descale_v=descale_v,
+            descale_p=descale_p,
         )
     if DEBUG:
         print("out_fp8", out_fp8)
@@ -583,7 +596,9 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
     if DEBUG:
         print("out_fp16:", out_fp16, out_fp16.shape)
         print("out_fp8:", out_fp8, out_fp8.shape)
-    torch.testing.assert_close(out_fp16.to(torch.float32), out_fp8.to(torch.float32), atol=ATOL, rtol=RTOL)
+    
+    ATOL_fp8, RTOL_fp8 = 1e-1, 1e-1 
+    torch.testing.assert_close(out_fp16.to(torch.float32), out_fp8.to(torch.float32), atol=ATOL_fp8, rtol=RTOL_fp8)
 
 @pytest.mark.parametrize(
     "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD", [

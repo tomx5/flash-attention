@@ -602,7 +602,8 @@ def attention_prefill_forward_triton_impl(
                                         # fp8
                                         descale_q,
                                         descale_k,
-                                        descale_v):
+                                        descale_v,
+                                        descale_p):
 
     if DEBUG:
         print()
@@ -640,12 +641,10 @@ def attention_prefill_forward_triton_impl(
         nheads_q = q.size(1) if layout == "bhsd" else q.size(2)
         nheads_k = k.size(1) if layout == "bhsd" else k.size(2)
 
-        descale_p = torch.full((batch, nheads_q), 1.0 / type_max, dtype=torch.float32, device=q.device) # the max of p is to 1.0 ?
-
         # Get strides for the kernel
         descale_q_stride_z = descale_q.stride(0)
         descale_k_stride_z = descale_k.stride(0)
-        descale_k_stride_z = descale_v.stride(0)
+        descale_v_stride_z = descale_v.stride(0)
         descale_p_stride_z = descale_p.stride(0)
 
         # dump intermedia results
@@ -658,7 +657,7 @@ def attention_prefill_forward_triton_impl(
     else:
         # For non-FP8 types, use dummy values (no scaling needed)
         descale_q = descale_k = descale_v = descale_p = 1
-        descale_q_stride_z = descale_k_stride_z = descale_k_stride_z = descale_p_stride_z = 0
+        descale_q_stride_z = descale_k_stride_z = descale_v_stride_z = descale_p_stride_z = 0
         q_fp8 = None
         k_fp8 = None
         qk_fp8= None
@@ -671,10 +670,10 @@ def attention_prefill_forward_triton_impl(
         print("descale_k:", descale_k)
         print("descale_v:", descale_v)
         print("descale_p:", descale_p)
-        print("q_scale_stride_z:", descale_q_stride_z)
-        print("k_scale_stride_z:", descale_k_stride_z)
-        print("v_scale_stride_z:", descale_k_stride_z)
-        print("p_scale_stride_z:", descale_p_stride_z)
+        print("descale_q_stride_z:", descale_q_stride_z)
+        print("descale_k_stride_z:", descale_k_stride_z)
+        print("descale_v_stride_z:", descale_v_stride_z)
+        print("descale_p_stride_z:", descale_p_stride_z)
         if is_fp8:
             print(f"type_max: {type_max}")
             

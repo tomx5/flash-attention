@@ -26,7 +26,8 @@ def fwd(q,
         gen_,
         descale_q,
         descale_k,
-        descale_v):
+        descale_v,
+        descale_p):
     
     if DEBUG:
         print()
@@ -117,7 +118,8 @@ def fwd(q,
                                                 metadata.use_exp2,
                                                 descale_q,
                                                 descale_k,
-                                                descale_v)
+                                                descale_v,
+                                                descale_p)
 
     if DEBUG:
         print("fwd outputs")
