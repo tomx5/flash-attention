@@ -496,17 +496,17 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
         (4, 8, 8, 2048, 2048, 128),
         (4, 16, 16, 4096, 4096, 64),
         (2, 4, 4, 8192, 8192, 32),
-        # # fa configs
-        # (4, 6, 1, 113, 203, 256),
-        # (4, 6, 1, 128, 217, 256),
-        # (4, 6, 2, 113, 211, 128),
-        # (4, 6, 2, 108, 256, 128),
-        # (4, 6, 1, 256, 512, 64),
-        # (4, 6, 1, 512, 256, 64),
-        # (4, 6, 2, 1024, 1024, 32),
-        # (4, 6, 2, 1023, 1024, 32),
-        # (4, 6, 6, 1024, 1023, 32),
-        # (4, 6, 6, 2048, 2048, 32),
+        # fa configs
+        (4, 6, 1, 113, 203, 256),
+        (4, 6, 1, 128, 217, 256),
+        (4, 6, 2, 113, 211, 128),
+        (4, 6, 2, 108, 256, 128),
+        (4, 6, 1, 256, 512, 64),
+        (4, 6, 1, 512, 256, 64),
+        (4, 6, 2, 1024, 1024, 32),
+        (4, 6, 2, 1023, 1024, 32),
+        (4, 6, 6, 1024, 1023, 32),
+        (4, 6, 6, 2048, 2048, 32),
     ],
 )
 @pytest.mark.parametrize('causal', [False])
@@ -556,19 +556,14 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
     q_fp8 = (q * type_max/ q_max).to(torch.float8_e4m3fnuz)
     k_fp8 = (k * type_max/ k_max).to(torch.float8_e4m3fnuz)
     v_fp8 = (v * type_max/ v_max).to(torch.float8_e4m3fnuz)
-
-   
-   
+    # compute descale values
     batch, _ , nheads_q, _ = q.shape
     batch, _ , nheads_k, _ = k.shape
-
-    # we should do per block maybe 
     descale_q = q_max/ type_max
     descale_k = k_max/ type_max
     descale_v = v_max/ type_max
-    # NOTE: I am using this but not that the max of p is not 1.0 because it is not normalized ?. I need to figure out how to compute p
+    # NOTE: I am using this but note that the max of p is not 1.0 because it is not normalized ?. I need to figure out how to compute p. maybe we should do per block maybe 
     descale_p = torch.full((batch, nheads_q), 1.0 / type_max, dtype=torch.float32, device=q.device) 
-    # descale_p = descale_q * descale_k
 
 
     # launch kernel in fp8
