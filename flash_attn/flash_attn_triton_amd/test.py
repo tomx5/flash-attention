@@ -547,12 +547,6 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
     batch, _ , nheads_q, dim = q.shape
     _, _ , nheads_k, _ = k.shape
 
-    softmax_scale = dim ** (-0.5)
-    qk = torch.matmul(q.permute(0, 2, 1, 3), k.permute(0, 2, 1, 3).transpose(-1, -2)) * softmax_scale # [B, H, S_q, S_k]
-    qk_rowmax = qk.amax(dim=-1, keepdim=True)  # => [B, H, S_q, 1]
-    qk_shifted = qk - qk_rowmax
-    p_unnorm = torch.exp(qk_shifted)  # => [B, H, S_q, S_k]
-    p_max = torch.maximum(p_unnorm.abs().amax(dim=(-2, -1)), torch.tensor(1e-9, device=q.device)) # [B, H]
 
 
     # compute max for each batch-head pair across seqlen and dim
@@ -570,9 +564,18 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
     descale_q = q_max / type_max
     descale_k = k_max / type_max
     descale_v = v_max / type_max
-    descale_p = p_max / type_max
-    # descale_p = torch.full((batch, nheads_q), 1.0 / type_max, dtype=torch.float32, device=q.device) 
-    # descale_p = torch.ones((batch, nheads_q), dtype=torch.float32, device=q.device) 
+
+    if False:
+        softmax_scale = dim ** (-0.5)
+        qk = torch.matmul(q.permute(0, 2, 1, 3), k.permute(0, 2, 1, 3).transpose(-1, -2)) * softmax_scale # [B, H, S_q, S_k]
+        qk_rowmax = qk.amax(dim=-1, keepdim=True)  # => [B, H, S_q, 1]
+        qk_shifted = qk - qk_rowmax
+        p_unnorm = torch.exp(qk_shifted)  # => [B, H, S_q, S_k]
+        p_max = torch.maximum(p_unnorm.abs().amax(dim=(-2, -1)), torch.tensor(1e-9, device=q.device)) # [B, H]
+        descale_p = p_max / type_max
+    else:
+        descale_p = torch.full((batch, nheads_q), 1.0 / type_max, dtype=torch.float32, device=q.device) 
+        # descale_p = torch.ones((batch, nheads_q), dtype=torch.float32, device=q.device) 
 
     # launch kernel in fp8
     out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_func(
