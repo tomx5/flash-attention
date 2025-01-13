@@ -267,7 +267,11 @@ def varlen_fwd(
         window_size_right,
         softcap,
         return_softmax,
-        gen_):
+        gen_,
+        descale_q,
+        descale_k,
+        descale_v,
+        descale_p):
 
     if DEBUG:
         print()
@@ -357,7 +361,11 @@ def varlen_fwd(
                                                             metadata.philox_seed,
                                                             metadata.philox_offset, 
                                                             metadata.return_scores, 
-                                                            metadata.use_exp2)
+                                                            metadata.use_exp2,
+                                                            descale_q,
+                                                            descale_k,
+                                                            descale_v,
+                                                            descale_p)
     if DEBUG:
         print("varlen_fwd outputs")
         print("o:", o, o.shape)

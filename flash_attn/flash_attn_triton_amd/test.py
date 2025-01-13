@@ -8,7 +8,7 @@ from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
 from .fwd_decode import dequantize_kv_fp16, quantize_kv_int4
-from flash_attn import flash_attn_func
+from flash_attn import flash_attn_func, flash_attn_varlen_func
 
 # defailt fp16 tolerance is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
 ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 
@@ -485,7 +485,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
         (1, 1, 1, 4, 4, 16),
         (1, 2, 2, 4, 4, 16),
         (2, 1, 1, 4, 4, 16),
-        (1, 2, 2, 4, 4, 16), # fails if batch = 2
+        (1, 2, 2, 4, 4, 16), # NOTE: fails if batch = 2
         (1, 1, 1, 128, 64, 16),
         (2, 2, 2, 2, 128, 1),
         (2, 3, 3, 2, 128, 16),
@@ -511,14 +511,14 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 )
 @pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('dropout_p', [0.0])
-@pytest.mark.parametrize('layout', ["bshd"]) # expects bshd args
 @pytest.mark.parametrize('DEBUG_INPUT', [False])
-def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, DEBUG_INPUT):
+def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, DEBUG_INPUT):
     device = "cuda"
     window_size =  (-1, -1)
     softcap = 0.0
     alibi_slopes = None
     deterministic = False
+    layout = "bshd"
 
     q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, torch.float32, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
 
@@ -546,8 +546,6 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
     # compute p for descaling
     batch, _ , nheads_q, dim = q.shape
     _, _ , nheads_k, _ = k.shape
-
-
 
     # compute max for each batch-head pair across seqlen and dim
     q_max = torch.maximum(q.abs().amax(dim=(1, 3)), torch.tensor(1e-9)).unsqueeze(1).unsqueeze(-1)
@@ -603,6 +601,142 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
         print("out_fp16:", out_fp16, out_fp16.shape)
         print("out_fp8:", out_fp8, out_fp8.shape)
     
+    ATOL_fp8, RTOL_fp8 = 1e-1, 1e-1
+    torch.testing.assert_close(out_fp16.to(torch.float32), out_fp8.to(torch.float32), atol=ATOL_fp8, rtol=RTOL_fp8)
+
+@pytest.mark.parametrize(
+    "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD",
+    [
+        # (1, 1, 1, 1, 1, 1),
+        (1, 1, 1, 2, 4, 16),
+        # (1, 2, 2, 2, 4, 16),
+        # (1, 3, 3, 2, 4, 16),
+        # (1, 4, 4, 2, 4, 16),
+        # (1, 1, 1, 4, 2, 16),
+        # (1, 1, 1, 4, 4, 16),
+        # (1, 2, 2, 4, 4, 16),
+        # (2, 1, 1, 4, 4, 16),
+        # (1, 2, 2, 4, 4, 16),
+        # (1, 1, 1, 128, 64, 16),
+        # (2, 2, 2, 2, 128, 1),
+        # (2, 3, 3, 2, 128, 16),
+        # (3, 2, 2, 256, 512, 16),
+        # (3, 3, 3, 128, 128, 64),
+        # (2, 4, 4, 1024, 1024, 64),
+        # (4, 6, 6, 108, 256, 224),
+        # (4, 8, 8, 2048, 2048, 128),
+        # (4, 16, 16, 4096, 4096, 64),
+        # (2, 4, 4, 8192, 8192, 32),
+        # # # more failures here
+        # (4, 1, 1, 113, 203, 256),
+        # (4, 6, 6, 128, 217, 256),
+        # (4, 2, 2, 113, 211, 128),
+        # (4, 2, 2, 108, 256, 128),
+        # (4, 1, 1, 256, 512, 64),
+        # (4, 6, 6, 512, 256, 64),
+        # (4, 2, 2, 1024, 1024, 32),
+        # (4, 2, 2, 1023, 1024, 32),
+        # (4, 6, 6, 1024, 1023, 32),
+        # (4, 6, 6, 2048, 2048, 32),
+    ],
+)
+@pytest.mark.parametrize('causal', [False])
+@pytest.mark.parametrize('dropout_p', [0.0])
+@pytest.mark.parametrize('DEBUG_INPUT', [True])
+def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, DEBUG_INPUT):
+    device = "cuda"
+    window_size =  (-1, -1)
+    softcap = 0.0
+    alibi_slopes = None
+    deterministic = False
+    layout = "thd"
+
+    q, k, v, metadata = varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, torch.float32, DEBUG_INPUT=DEBUG_INPUT)
+
+    # launch kernel in fp16
+    q_fp16 = q.clone().to(torch.float16)
+    k_fp16 = k.clone().to(torch.float16)
+    v_fp16 = v.clone().to(torch.float16)
+    out_fp16, lse_fp16, S_dmask_fp16 = flash_attn_varlen_func(
+            q_fp16,
+            k_fp16,
+            v_fp16,
+            metadata.cu_seqlens_q,
+            metadata.cu_seqlens_k,
+            metadata.max_seqlens_q,
+            metadata.max_seqlens_k,
+            dropout_p,
+            causal=causal,
+            window_size=window_size,
+            softcap=softcap,
+            alibi_slopes=alibi_slopes,
+            deterministic=deterministic,
+            return_attn_probs=True,
+        )
+    if DEBUG:
+        print("out_fp16", out_fp16)
+        print("lse_fp16", lse_fp16)
+        print("S_dmask_fp16", S_dmask_fp16)
+
+    # thd
+    batch = len(metadata.cu_seqlens_q) - 1
+    nheads_q = q.size(1)
+    nheads_k = k.size(1)
+
+    print("q:", q, q.shape)
+    print("k:", k, k.shape)
+    # compute max for each batch-head pair across seqlen and dim
+    q_max = torch.maximum(q.abs().amax(dim=(-1)), torch.tensor(1e-9)).unsqueeze(-1)
+    k_max = torch.maximum(k.abs().amax(dim=(-1)), torch.tensor(1e-9)).unsqueeze(-1)
+    v_max = torch.maximum(v.abs().amax(dim=(-1)), torch.tensor(1e-9)).unsqueeze(-1)
+    print("q_max:", q_max, q_max.shape)
+    print("k_max:", k_max, k_max.shape)
+
+    # scale values to fp8 range
+    type_max = torch.finfo(torch.float8_e4m3fnuz).max
+    q_fp8 = (q * type_max/ q_max).to(torch.float8_e4m3fnuz)
+    k_fp8 = (k * type_max/ k_max).to(torch.float8_e4m3fnuz)
+    v_fp8 = (v * type_max/ v_max).to(torch.float8_e4m3fnuz)
+
+    print("q_fp8:", q_fp8, q_fp8.shape)
+    print("k_fp8:", k_fp8, k_fp8.shape)
+
+    # compute descale values
+    descale_q = q_max / type_max
+    descale_k = k_max / type_max
+    descale_v = v_max / type_max
+    descale_p = torch.full_like(descale_q, 1.0 / type_max, dtype=torch.float32, device=q.device) 
+
+    # launch kernel in fp8
+    out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_varlen_func(
+            q_fp8,
+            k_fp8,
+            v_fp8,
+            metadata.cu_seqlens_q,
+            metadata.cu_seqlens_k,
+            metadata.max_seqlens_q,
+            metadata.max_seqlens_k,
+            dropout_p,
+            causal=causal,
+            window_size=window_size,
+            softcap=softcap,
+            alibi_slopes=alibi_slopes,
+            deterministic=deterministic,
+            return_attn_probs=True,
+            descale_q=descale_q,
+            descale_k=descale_k,
+            descale_v=descale_v,
+            descale_p=descale_p,
+        )
+    if DEBUG:
+        print("out_fp8", out_fp8)
+        print("lse_fp8", lse_fp8)
+        print("S_dmask_fp8", S_dmask_fp8)
+
+    if DEBUG:
+        print("out_fp16:", out_fp16, out_fp16.shape)
+        print("out_fp8:", out_fp8, out_fp8.shape)
+
     ATOL_fp8, RTOL_fp8 = 1e-1, 1e-1
     torch.testing.assert_close(out_fp16.to(torch.float32), out_fp8.to(torch.float32), atol=ATOL_fp8, rtol=RTOL_fp8)
 

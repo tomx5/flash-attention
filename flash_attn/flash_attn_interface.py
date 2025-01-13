@@ -164,6 +164,10 @@ def _flash_attn_varlen_forward(
     dropout_p: float,
     softmax_scale: float,
     causal: bool,
+    descale_q,
+    descale_k,
+    descale_v,
+    descale_p,
     window_size_left: int = -1,
     window_size_right: int = -1,
     softcap: float = 0.0,
@@ -196,6 +200,10 @@ def _flash_attn_varlen_forward(
         softcap,
         return_softmax,
         None,
+        descale_q,
+        descale_k,
+        descale_v,
+        descale_p
     )
     # if out.isnan().any() or softmax_lse.isnan().any():
     #     breakpoint()
@@ -906,6 +914,10 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         deterministic,
         return_softmax,
         block_table,
+        descale_q,
+        descale_k,
+        descale_v,
+        descale_p
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -931,6 +943,10 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
             block_table=block_table,
+            descale_q=descale_q,
+            descale_k=descale_k,
+            descale_v=descale_v,
+            descale_p=descale_p
         )
         ctx.save_for_backward(
             q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state
@@ -1377,6 +1393,10 @@ def flash_attn_varlen_func(
     deterministic=False,
     return_attn_probs=False,
     block_table=None,
+    descale_q=None, 
+    descale_k=None, 
+    descale_v=None,
+    descale_p=None
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
@@ -1450,6 +1470,10 @@ def flash_attn_varlen_func(
         deterministic,
         return_attn_probs,
         block_table,
+        descale_q,
+        descale_k,
+        descale_v,
+        descale_p
     )
 
 
