@@ -117,7 +117,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
             qk += (tl.dot(q, k) * descale_q * descale_k)
            
             if tl_FP8_DUMP:
-                tl.store(qk_fp8_ptrs, qk_scaled, mask=p_mask)
+                tl.store(qk_fp8_ptrs, qk, mask=p_mask)
         else:
             qk += tl.dot(q, k)
         qk_scaled =  qk * SM_SCALE
@@ -646,10 +646,19 @@ def attention_prefill_forward_triton_impl(
             print("IS_FP8")
 
         type_max = torch.finfo(q.dtype).max
-
-        batch = q.size(0) if layout != "thd" else len(cu_seqlens_q) - 1
-        nheads_q = q.size(1) if layout == "bhsd" else q.size(2)
-        nheads_k = k.size(1) if layout == "bhsd" else k.size(2)
+        
+        if layout == "bshd":
+            batch, _ , nheads_q, dim = q.shape
+            _, _ , nheads_k, _ = k.shape
+        elif layout == "bhsd":
+            batch, nheads_q,_, dim = q.shape
+            _,  nheads_k, _, _ = k.shape
+        elif layout == "thd":
+            batch = len(cu_seqlens_q) - 1
+            nheads_q = q.size(1)
+            nheads_k = k.size(1)
+        else:
+            raise ValueError("Unsupported layout")
 
         # Get strides for the kernel
         descale_q_stride_z = descale_q.stride(0)

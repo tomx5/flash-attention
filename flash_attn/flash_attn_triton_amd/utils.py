@@ -189,25 +189,25 @@ def varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device="cuda
         seqlens_q = torch.full((Z,), N_CTX_Q // Z, dtype=torch.int32)
         seqlens_k = torch.full((Z,), N_CTX_K // Z, dtype=torch.int32)
 
-    # Calculate cumulative sequence lengths
+    # calculate cumulative sequence lengths
     cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), seqlens_q.cumsum(dim=0)])
     cu_seqlens_k = torch.cat([torch.tensor([0], dtype=torch.int32), seqlens_k.cumsum(dim=0)])
     cu_seqlens_q = cu_seqlens_q.to(device=device).to(torch.int32)
     cu_seqlens_k = cu_seqlens_k.to(device=device).to(torch.int32)
 
-    # Total lengths
+    # total lengths
     total_q = cu_seqlens_q[-1].item()
     total_k = cu_seqlens_k[-1].item()
 
     if DEBUG_INPUT:
-        # Initialize q, k, v with deterministic values
+        # initialize q, k, v with deterministic values
         q = torch.arange(total_q, dtype=dtype, device=device).view(total_q, 1, 1)
         q = q.expand(total_q, HQ, D_HEAD).contiguous().requires_grad_()
         k = torch.arange(total_k, dtype=dtype, device=device).view(total_k, 1, 1)
         k = k.expand(total_k, HK, D_HEAD).contiguous().requires_grad_()
         v = torch.arange(total_k, dtype=dtype, device=device).view(total_k, 1, 1)
         v = v.expand(total_k, HK, D_HEAD).contiguous().requires_grad_()
-        sm_scale = 1
+        sm_scale = 1.0
     else:
         # Initialize q, k, v with random values
         q = torch.randn((total_q, HQ, D_HEAD), dtype=dtype, device=device).requires_grad_()

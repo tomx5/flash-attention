@@ -522,6 +522,7 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
 
     q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, torch.float32, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
 
+    # NOTE: use bfp16 becasue it fp32 trunacted
     # launch kernel in fp16
     q_fp16 = q.clone().to(torch.float16)
     k_fp16 = k.clone().to(torch.float16)
@@ -607,42 +608,42 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
 @pytest.mark.parametrize(
     "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD",
     [
-        # (1, 1, 1, 1, 1, 1),
+        (1, 1, 1, 1, 1, 1),
         (1, 1, 1, 2, 4, 16),
-        # (1, 2, 2, 2, 4, 16),
-        # (1, 3, 3, 2, 4, 16),
-        # (1, 4, 4, 2, 4, 16),
-        # (1, 1, 1, 4, 2, 16),
-        # (1, 1, 1, 4, 4, 16),
-        # (1, 2, 2, 4, 4, 16),
-        # (2, 1, 1, 4, 4, 16),
-        # (1, 2, 2, 4, 4, 16),
-        # (1, 1, 1, 128, 64, 16),
-        # (2, 2, 2, 2, 128, 1),
-        # (2, 3, 3, 2, 128, 16),
-        # (3, 2, 2, 256, 512, 16),
-        # (3, 3, 3, 128, 128, 64),
-        # (2, 4, 4, 1024, 1024, 64),
-        # (4, 6, 6, 108, 256, 224),
-        # (4, 8, 8, 2048, 2048, 128),
-        # (4, 16, 16, 4096, 4096, 64),
-        # (2, 4, 4, 8192, 8192, 32),
-        # # # more failures here
-        # (4, 1, 1, 113, 203, 256),
-        # (4, 6, 6, 128, 217, 256),
-        # (4, 2, 2, 113, 211, 128),
-        # (4, 2, 2, 108, 256, 128),
-        # (4, 1, 1, 256, 512, 64),
-        # (4, 6, 6, 512, 256, 64),
-        # (4, 2, 2, 1024, 1024, 32),
-        # (4, 2, 2, 1023, 1024, 32),
-        # (4, 6, 6, 1024, 1023, 32),
-        # (4, 6, 6, 2048, 2048, 32),
+        (1, 2, 2, 2, 4, 16),
+        (1, 3, 3, 2, 4, 16),
+        (1, 4, 4, 2, 4, 16),
+        (1, 1, 1, 4, 2, 16),
+        (1, 1, 1, 4, 4, 16),
+        (1, 2, 2, 4, 4, 16),
+        (2, 1, 1, 4, 4, 16),
+        (1, 2, 2, 4, 4, 16),
+        (1, 1, 1, 128, 64, 16),
+        (2, 2, 2, 2, 128, 1),
+        (2, 3, 3, 2, 128, 16),
+        (3, 2, 2, 256, 512, 16),
+        (3, 3, 3, 128, 128, 64),
+        (2, 4, 4, 1024, 1024, 64),
+        (4, 6, 6, 108, 256, 224),
+        (4, 8, 8, 2048, 2048, 128),
+        (4, 16, 16, 4096, 4096, 64),
+        (2, 4, 4, 8192, 8192, 32),
+        # # more failures here
+        (4, 1, 1, 113, 203, 256),
+        (4, 6, 6, 128, 217, 256),
+        (4, 2, 2, 113, 211, 128),
+        (4, 2, 2, 108, 256, 128),
+        (4, 1, 1, 256, 512, 64),
+        (4, 6, 6, 512, 256, 64),
+        (4, 2, 2, 1024, 1024, 32),
+        (4, 2, 2, 1023, 1024, 32),
+        (4, 6, 6, 1024, 1023, 32),
+        (4, 6, 6, 2048, 2048, 32),
     ],
 )
 @pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('dropout_p', [0.0])
-@pytest.mark.parametrize('DEBUG_INPUT', [True])
+@pytest.mark.parametrize('DEBUG_INPUT', [False])
 def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, DEBUG_INPUT):
     device = "cuda"
     window_size =  (-1, -1)
@@ -683,14 +684,16 @@ def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, drop
     nheads_q = q.size(1)
     nheads_k = k.size(1)
 
-    print("q:", q, q.shape)
-    print("k:", k, k.shape)
+    if DEBUG:
+        print("q:", q, q.shape)
+        print("k:", k, k.shape)
     # compute max for each batch-head pair across seqlen and dim
-    q_max = torch.maximum(q.abs().amax(dim=(-1)), torch.tensor(1e-9)).unsqueeze(-1)
-    k_max = torch.maximum(k.abs().amax(dim=(-1)), torch.tensor(1e-9)).unsqueeze(-1)
-    v_max = torch.maximum(v.abs().amax(dim=(-1)), torch.tensor(1e-9)).unsqueeze(-1)
-    print("q_max:", q_max, q_max.shape)
-    print("k_max:", k_max, k_max.shape)
+    q_max = torch.maximum(q.abs().amax(), torch.tensor(1e-9)).unsqueeze(-1)
+    k_max = torch.maximum(k.abs().amax(), torch.tensor(1e-9)).unsqueeze(-1)
+    v_max = torch.maximum(v.abs().amax(), torch.tensor(1e-9)).unsqueeze(-1)
+    if DEBUG:
+        print("q_max:", q_max, q_max.shape)
+        print("k_max:", k_max, k_max.shape)
 
     # scale values to fp8 range
     type_max = torch.finfo(torch.float8_e4m3fnuz).max
@@ -698,8 +701,9 @@ def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, drop
     k_fp8 = (k * type_max/ k_max).to(torch.float8_e4m3fnuz)
     v_fp8 = (v * type_max/ v_max).to(torch.float8_e4m3fnuz)
 
-    print("q_fp8:", q_fp8, q_fp8.shape)
-    print("k_fp8:", k_fp8, k_fp8.shape)
+    if DEBUG:
+        print("q_fp8:", q_fp8, q_fp8.shape)
+        print("k_fp8:", k_fp8, k_fp8.shape)
 
     # compute descale values
     descale_q = q_max / type_max
