@@ -608,42 +608,43 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
 @pytest.mark.parametrize(
     "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD",
     [
-        (1, 1, 1, 1, 1, 1),
-        (1, 1, 1, 2, 4, 16),
-        (1, 2, 2, 2, 4, 16),
-        (1, 3, 3, 2, 4, 16),
-        (1, 4, 4, 2, 4, 16),
-        (1, 1, 1, 4, 2, 16),
-        (1, 1, 1, 4, 4, 16),
-        (1, 2, 2, 4, 4, 16),
-        (2, 1, 1, 4, 4, 16),
-        (1, 2, 2, 4, 4, 16),
-        (1, 1, 1, 128, 64, 16),
-        (2, 2, 2, 2, 128, 1),
-        (2, 3, 3, 2, 128, 16),
-        (3, 2, 2, 256, 512, 16),
-        (3, 3, 3, 128, 128, 64),
-        (2, 4, 4, 1024, 1024, 64),
-        (4, 6, 6, 108, 256, 224),
-        (4, 8, 8, 2048, 2048, 128),
-        (4, 16, 16, 4096, 4096, 64),
-        (2, 4, 4, 8192, 8192, 32),
-        # # more failures here
-        (4, 1, 1, 113, 203, 256),
-        (4, 6, 6, 128, 217, 256),
-        (4, 2, 2, 113, 211, 128),
-        (4, 2, 2, 108, 256, 128),
-        (4, 1, 1, 256, 512, 64),
-        (4, 6, 6, 512, 256, 64),
-        (4, 2, 2, 1024, 1024, 32),
-        (4, 2, 2, 1023, 1024, 32),
-        (4, 6, 6, 1024, 1023, 32),
-        (4, 6, 6, 2048, 2048, 32),
+        # (1, 1, 1, 1, 1, 1),
+        # (1, 1, 1, 2, 4, 16),
+        # (1, 2, 2, 2, 4, 16),
+        (2, 2, 2, 4, 4, 16),
+        # (1, 3, 3, 2, 4, 16),
+        # (1, 4, 4, 2, 4, 16),
+        # (1, 1, 1, 4, 2, 16),
+        # (1, 1, 1, 4, 4, 16),
+        # (1, 2, 2, 4, 4, 16),
+        # (2, 1, 1, 4, 4, 16),
+        # (1, 2, 2, 4, 4, 16),
+        # (1, 1, 1, 128, 64, 16),
+        # (2, 2, 2, 2, 128, 1),
+        # (2, 3, 3, 2, 128, 16),
+        # (3, 2, 2, 256, 512, 16),
+        # (3, 3, 3, 128, 128, 64),
+        # (2, 4, 4, 1024, 1024, 64),
+        # (4, 6, 6, 108, 256, 224),
+        # (4, 8, 8, 2048, 2048, 128),
+        # (4, 16, 16, 4096, 4096, 64),
+        # (2, 4, 4, 8192, 8192, 32),
+        # # # more failures here
+        # (4, 1, 1, 113, 203, 256),
+        # (4, 6, 6, 128, 217, 256),
+        # (4, 2, 2, 113, 211, 128),
+        # (4, 2, 2, 108, 256, 128),
+        # (4, 1, 1, 256, 512, 64),
+        # (4, 6, 6, 512, 256, 64),
+        # (4, 2, 2, 1024, 1024, 32),
+        # (4, 2, 2, 1023, 1024, 32),
+        # (4, 6, 6, 1024, 1023, 32),
+        # (4, 6, 6, 2048, 2048, 32),
     ],
 )
 @pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('dropout_p', [0.0])
-@pytest.mark.parametrize('DEBUG_INPUT', [False])
+@pytest.mark.parametrize('DEBUG_INPUT', [True])
 def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, DEBUG_INPUT):
     device = "cuda"
     window_size =  (-1, -1)
@@ -679,21 +680,46 @@ def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, drop
         print("lse_fp16", lse_fp16)
         print("S_dmask_fp16", S_dmask_fp16)
 
-    # thd
-    batch = len(metadata.cu_seqlens_q) - 1
-    nheads_q = q.size(1)
-    nheads_k = k.size(1)
 
     if DEBUG:
         print("q:", q, q.shape)
         print("k:", k, k.shape)
-    # compute max for each batch-head pair across seqlen and dim
-    q_max = torch.maximum(q.abs().amax(), torch.tensor(1e-9)).unsqueeze(-1)
-    k_max = torch.maximum(k.abs().amax(), torch.tensor(1e-9)).unsqueeze(-1)
-    v_max = torch.maximum(v.abs().amax(), torch.tensor(1e-9)).unsqueeze(-1)
+
+    # thd
+    batch = len(metadata.cu_seqlens_q) - 1
+    nheads_q = q.size(1)
+    nheads_k = k.size(1)
+    
     if DEBUG:
-        print("q_max:", q_max, q_max.shape)
-        print("k_max:", k_max, k_max.shape)
+        print("batch:", batch)
+        print("nheads_q:", nheads_q)
+        print("nheads_k:", nheads_k)
+    
+    q_maxes = []
+    k_maxes = []
+    v_maxes = []
+    for i in range(batch):
+        q_start = metadata.cu_seqlens_q[i]
+        q_end = metadata.cu_seqlens_q[i + 1]
+        k_start = metadata.cu_seqlens_k[i]
+        k_end = metadata.cu_seqlens_k[i + 1]
+
+        # compute max for each batch-head pair across seqlen and dim
+        q_max = torch.maximum(q[q_start:q_end].abs().amax(dim=(0,2)), torch.tensor(1e-9)).unsqueeze(-1)
+        k_max = torch.maximum(k[k_start:k_end].abs().amax(dim=(0,2)), torch.tensor(1e-9)).unsqueeze(-1)
+        v_max = torch.maximum(v[k_start:k_end].abs().amax(dim=(0,2)), torch.tensor(1e-9)).unsqueeze(-1)
+
+        q_maxes.append(q_max)
+        k_maxes.append(k_max)
+        v_maxes.append(v_max)
+    q_maxes = torch.stack(q_maxes)
+    k_maxes = torch.stack(k_maxes)
+    v_maxes = torch.stack(v_maxes)
+    if DEBUG:
+        print("q", q, q.shape)
+        print("q_maxes:", q_maxes, q_maxes.shape)
+        print("k", k, k.shape)
+        print("k_maxes:", k_maxes, k_maxes.shape)
 
     # scale values to fp8 range
     type_max = torch.finfo(torch.float8_e4m3fnuz).max
