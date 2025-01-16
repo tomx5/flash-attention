@@ -635,13 +635,8 @@ def attention_prefill_forward_triton_impl(
         print("return_scores:", return_softmax)
         print("use_exp2:", use_exp2)
 
-    # Define FP8 types we support
-    FP8_TYPES = {torch.float8_e4m3fnuz, torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e5m2fnuz}
-    
-    # Simple check if tensors are FP8
-    is_fp8 = q.dtype in FP8_TYPES
-    
-    if is_fp8:
+    if descale_q is not None:
+        is_fp8 = True
         if DEBUG:
             print("IS_FP8")
 
@@ -674,6 +669,7 @@ def attention_prefill_forward_triton_impl(
         p_fp8 = torch.zeros((batch, nheads_q, max_seqlens_q, max_seqlens_k), dtype=torch.float32, device=q.device)
         acc_fp8 = torch.zeros(o.shape, dtype=torch.float32, device=q.device)
     else:
+        is_fp8 = False
         # For non-FP8 types, use dummy values (no scaling needed)
         descale_q = descale_k = descale_v = descale_s = 1
         descale_q_stride_z = descale_k_stride_z = descale_v_stride_z = descale_s_stride_z = 0
