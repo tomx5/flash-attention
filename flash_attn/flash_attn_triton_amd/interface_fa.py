@@ -27,7 +27,7 @@ def fwd(q,
         descale_q,
         descale_k,
         descale_v,
-        descale_p):
+        descale_s):
     
     if DEBUG:
         print()
@@ -119,7 +119,7 @@ def fwd(q,
                                                 descale_q,
                                                 descale_k,
                                                 descale_v,
-                                                descale_p)
+                                                descale_s)
 
     if DEBUG:
         print("fwd outputs")
@@ -271,7 +271,7 @@ def varlen_fwd(
         descale_q,
         descale_k,
         descale_v,
-        descale_p):
+        descale_s):
 
     if DEBUG:
         print()
@@ -365,7 +365,7 @@ def varlen_fwd(
                                                             descale_q,
                                                             descale_k,
                                                             descale_v,
-                                                            descale_p)
+                                                            descale_s)
     if DEBUG:
         print("varlen_fwd outputs")
         print("o:", o, o.shape)

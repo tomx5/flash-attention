@@ -563,7 +563,7 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
     descale_q = q_max / type_max
     descale_k = k_max / type_max
     descale_v = v_max / type_max
-    descale_p = torch.full((batch, nheads_q), 1.0 / type_max, dtype=torch.float32, device=q.device) 
+    descale_s = torch.full((batch, nheads_q), 1.0 / type_max, dtype=torch.float32, device=q.device) 
 
     # launch kernel in fp8
     out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_func(
@@ -580,7 +580,7 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
             descale_q=descale_q,
             descale_k=descale_k,
             descale_v=descale_v,
-            descale_p=descale_p,
+            descale_s=descale_s,
         )
     if DEBUG:
         print("out_fp8", out_fp8)
@@ -745,7 +745,7 @@ def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, drop
     descale_q = q_maxes / type_max
     descale_k = k_maxes / type_max
     descale_v = v_maxes / type_max
-    descale_p = torch.full_like(descale_q, 1.0 / type_max, dtype=torch.float32, device=q.device) 
+    descale_s = torch.full_like(descale_q, 1.0 / type_max, dtype=torch.float32, device=q.device) 
 
     # launch kernel in fp8
     out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_varlen_func(
@@ -766,7 +766,7 @@ def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, drop
             descale_q=descale_q,
             descale_k=descale_k,
             descale_v=descale_v,
-            descale_p=descale_p,
+            descale_s=descale_s,
         )
     if DEBUG:
         print("out_fp8", out_fp8)

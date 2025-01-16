@@ -65,7 +65,7 @@ def compute_alibi_block(alibi_slope, seqlen_q, seqlen_k, offs_m, offs_n, transpo
 def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk, stride_bn, stride_sn, start_m,
                     actual_seqlen_k, actual_seqlen_q, dropout_p, philox_seed, philox_ptrs, sd_mask_ptrs, dropout_mask_ptrs,
                     q_fp8_ptrs, k_fp8_ptrs, qk_fp8_ptrs, p_fp8_ptrs, acc_fp8_ptrs, block_min, block_max, offs_n_causal, masked_blocks, n_extra_tokens, alibi_slope,
-                    descale_q, descale_k, descale_v, descale_p, IS_FP8: tl.constexpr,
+                    descale_q, descale_k, descale_v, descale_s, IS_FP8: tl.constexpr,
                     IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
                     OFFS_M: tl.constexpr, OFFS_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, MASK_STEPS: tl.constexpr,
                     ENABLE_DROPOUT: tl.constexpr, PADDED_HEAD: tl.constexpr,
@@ -188,11 +188,11 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         m_i = m_ij
 
         if IS_FP8:
-            p *= (1.0/ descale_p) # put p into fp8 range
+            p *= (1.0/ descale_s) # put p into fp8 range
             if tl_FP8_DUMP:
                 tl.store(p_fp8_ptrs, p, mask=p_mask)
 
-            acc += (tl.dot(p.to(v.type.element_ty), v) * descale_p * descale_v)
+            acc += (tl.dot(p.to(v.type.element_ty), v) * descale_s * descale_v)
             
             if tl_FP8_DUMP:
                 tl.store(acc_fp8_ptrs, acc)
@@ -435,7 +435,7 @@ def attn_fwd(Q, K, V, bias,
         descale_q = tl.load(DESCALE_Q + off_z * stride_q_inv_scale_z + off_h_q)
         descale_k = tl.load(DESCALE_K + off_z * stride_kv_inv_scale_z + off_h_k)
         descale_v = tl.load(DESCALE_V + off_z * stride_kv_inv_scale_z + off_h_k)
-        descale_p = tl.load(DESCALE_P + off_z * stride_p_inv_scale_z + off_h_q)
+        descale_s = tl.load(DESCALE_P + off_z * stride_p_inv_scale_z + off_h_q)
         
         q_fp8_offset = q_fp8 + off_z * stride_qz + off_h_q * stride_qh + cu_seqlens_q_start * stride_qm
         q_fp8_ptrs = q_fp8_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
@@ -454,7 +454,7 @@ def attn_fwd(Q, K, V, bias,
         acc_fp8_offset = acc_fp8 + off_z * stride_qz + off_h_q * stride_qh + cu_seqlens_q_start * stride_qm
         acc_fp8_ptrs = acc_fp8_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk  
     else:
-        descale_q, descale_k, descale_v, descale_p = 1.0, 1.0, 1.0,  1.0
+        descale_q, descale_k, descale_v, descale_s = 1.0, 1.0, 1.0,  1.0
         q_fp8_ptrs = None
         k_fp8_ptrs = None
         qk_fp8_ptrs = None
@@ -486,7 +486,7 @@ def attn_fwd(Q, K, V, bias,
                                         sd_mask_ptrs, dropout_mask_ptrs, q_fp8_ptrs, k_fp8_ptrs, qk_fp8_ptrs, p_fp8_ptrs, acc_fp8_ptrs,
                                         # _, _, offs_n_causal, masked_blocks, n_extra_tokens, _
                                         block_min, block_max, 0, 0, 0, alibi_slope,
-                                        descale_q, descale_k, descale_v, descale_p, IS_FP8,
+                                        descale_q, descale_k, descale_v, descale_s, IS_FP8,
                                         # IS_CAUSAL, ....
                                         False, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                                         # _, MASK_STEPS, ...
@@ -518,7 +518,7 @@ def attn_fwd(Q, K, V, bias,
                                         start_m, seqlen_k, seqlen_q, dropout_p, philox_seed, philox_ptrs,
                                         sd_mask_ptrs, dropout_mask_ptrs, q_fp8_ptrs, k_fp8_ptrs, qk_fp8_ptrs, p_fp8_ptrs, acc_fp8_ptrs, 
                                         block_min, block_max, offs_n_causal, masked_blocks, n_extra_tokens, alibi_slope,
-                                        descale_q, descale_k, descale_v, descale_p, IS_FP8,
+                                        descale_q, descale_k, descale_v, descale_s, IS_FP8,
                                         IS_CAUSAL, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                                         # _, MASK_STEPS, ...
                                         PRE_LOAD_V, True, ENABLE_DROPOUT, PADDED_HEAD,
@@ -611,7 +611,7 @@ def attention_prefill_forward_triton_impl(
                                         descale_q,
                                         descale_k,
                                         descale_v,
-                                        descale_p):
+                                        descale_s):
 
     if DEBUG:
         print()
@@ -664,7 +664,7 @@ def attention_prefill_forward_triton_impl(
         descale_q_stride_z = descale_q.stride(0)
         descale_k_stride_z = descale_k.stride(0)
         descale_v_stride_z = descale_v.stride(0)
-        descale_p_stride_z = descale_p.stride(0)
+        descale_s_stride_z = descale_s.stride(0)
 
         # dump intermedia results
         q_fp8 = torch.zeros_like(q)
@@ -675,8 +675,8 @@ def attention_prefill_forward_triton_impl(
         acc_fp8 = torch.zeros(o.shape, dtype=torch.float32, device=q.device)
     else:
         # For non-FP8 types, use dummy values (no scaling needed)
-        descale_q = descale_k = descale_v = descale_p = 1
-        descale_q_stride_z = descale_k_stride_z = descale_v_stride_z = descale_p_stride_z = 0
+        descale_q = descale_k = descale_v = descale_s = 1
+        descale_q_stride_z = descale_k_stride_z = descale_v_stride_z = descale_s_stride_z = 0
         q_fp8 = None
         k_fp8 = None
         qk_fp8= None
@@ -688,11 +688,11 @@ def attention_prefill_forward_triton_impl(
         print("descale_q:", descale_q)
         print("descale_k:", descale_k)
         print("descale_v:", descale_v)
-        print("descale_p:", descale_p)
+        print("descale_s:", descale_s)
         print("descale_q_stride_z:", descale_q_stride_z)
         print("descale_k_stride_z:", descale_k_stride_z)
         print("descale_v_stride_z:", descale_v_stride_z)
-        print("descale_p_stride_z:", descale_p_stride_z)
+        print("descale_s_stride_z:", descale_s_stride_z)
         if is_fp8:
             print(f"type_max: {type_max}")
             
@@ -763,7 +763,7 @@ def attention_prefill_forward_triton_impl(
         print("k:", k)
 
     attn_fwd[grid](q, k, v, bias,
-                    descale_q, descale_k, descale_v, descale_p, descale_q_stride_z, descale_k_stride_z, descale_p_stride_z,
+                    descale_q, descale_k, descale_v, descale_s, descale_q_stride_z, descale_k_stride_z, descale_s_stride_z,
                     sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
                     *bias_strides, *alibi_strides, *scores_strides, stride_lse_z, stride_lse_h, stride_lse_m, cu_seqlens_q, cu_seqlens_k,
                     dropout_p=dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset, sd_mask=sd_mask, dropout_mask=dropout_mask, alibi_slopes=alibi_slopes, 
