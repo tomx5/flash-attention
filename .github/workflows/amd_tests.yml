@@ -58,17 +58,17 @@ jobs:
         run: |
           export FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
           python setup.py install
-      # - name: Flash Attention Tests Using Reference Impl
-      #   if: matrix.runner[1] == 'gfx90a'
-      #   run: |
-      #     export FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
-      #     export FLASH_ATTENTION_TRITON_AMD_REF=1
-      #     pytest tests/test_flash_attn_triton_amd.py
-      # - name: Flash Attention CDNA Tests
-      #   if: matrix.runner[1] == 'gfx90a'
-      #   run: |
-      #     export FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
-      #     pytest tests/test_flash_attn_triton_amd.py
+      - name: Flash Attention Tests Using Reference Impl
+        if: matrix.runner[1] == 'gfx90a'
+        run: |
+          export FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
+          export FLASH_ATTENTION_TRITON_AMD_REF=1
+          pytest tests/test_flash_attn_triton_amd.py
+      - name: Flash Attention CDNA Tests
+        if: matrix.runner[1] == 'gfx90a'
+        run: |
+          export FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
+          pytest tests/test_flash_attn_triton_amd.py
       - name: Flash Attention RDNA Tests
         if: matrix.runner[1] == 'gfx1100'
         run: |
