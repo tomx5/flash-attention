@@ -1,7 +1,7 @@
 import torch
 import pytest
 
-from .utils import DEBUG, MetaData, get_input_shapes, input_helper, varlen_input_helper, compute_alibi_tensor_ref, arch_supports_fp8
+from .utils import DEBUG, MetaData, get_input_shapes, input_helper, varlen_input_helper, compute_alibi_tensor_ref, get_arch, arch_supports_fp8
 from .interface_torch import attention_prefill, attention_decode
 from .fwd_ref import attention_forward_pytorch_ref_impl
 from .fwd_prefill import attention_prefill_forward_triton_impl
@@ -472,6 +472,266 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
         print("output_ref:", output_ref, output_ref.shape)
     torch.testing.assert_close(output_triton, output_ref, atol=ATOL, rtol=RTOL)
 
+@pytest.mark.parametrize(
+    "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD", [
+    (1, 1, 1, 1, 1, 1),
+    (1, 1, 1, 4, 4, 4),
+    (2, 1, 1, 4, 4, 16),
+    (1, 2, 2, 4, 4, 16),
+    (1, 4, 1, 2, 4, 16),
+    (1, 8, 1, 2, 4, 16),
+    (1, 16, 1, 2, 4, 16),
+    (1, 32, 1, 2, 4, 16),
+    (1, 64, 1, 2, 4, 16),
+    (1, 4, 2, 2, 4, 16),
+    (2, 2, 2, 4, 4, 16),
+    (1, 1, 1, 4, 4, 16),
+    (2, 1, 1, 4, 4 , 16),
+    (4, 6, 6, 8, 8 , 16),
+    (1, 1, 1, 4, 4, 32),
+    (1, 1, 1, 16, 16, 16),
+    (1, 1, 1, 32, 32, 16),
+    (1, 1, 1, 64, 64, 16),
+    (1, 1, 1, 64, 64, 16),
+    (1, 1, 1, 64, 128, 16),
+    (1, 1, 1, 64, 64, 32),
+    (1, 1, 1, 64, 128, 32),
+    (1, 1, 1, 128, 128, 64),
+    (1, 1, 1, 128, 256, 45),
+    (1, 1, 1, 113, 203, 192),
+    (1, 1, 1, 256, 256, 64),
+    (1, 1, 1, 256, 512, 16),
+    (1, 1, 1, 512, 512, 64), 
+    (1, 1, 1, 1024, 1024, 64),
+    # fa configs
+    (2, 2, 2, 128, 128, 65),
+    (2, 2, 2, 128, 128, 224),
+    (4, 6, 6, 108, 256, 224),
+    (1, 1, 1, 256, 512, 16),
+    # old tests that work
+    (4, 48, 6, 1024, 1024, 64),
+    (4, 48, 12, 1024, 1024, 64),
+    (4, 48, 24, 1024, 1024, 64),
+    (4, 48, 48, 1024, 1024, 64),
+    (4, 48, 48, 1024, 1024, 73),
+    (4, 48, 48, 2048, 2048, 64),
+    (1, 24, 24, 4096, 4096, 64),
+    (1, 16, 16, 1024, 1024, 64),
+    (1, 16, 16, 1024, 1024, 128),
+])
+@pytest.mark.parametrize('causal', [True, False])
+@pytest.mark.parametrize('dropout_p', [0.0])
+@pytest.mark.parametrize('use_exp2', [False]) # FIXME: using exp2 causes issue when used with causal
+@pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
+@pytest.mark.parametrize('sequence_parallel', [True, False])
+@pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans on larger tensors
+def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, use_exp2, layout, sequence_parallel, DEBUG_INPUT):
+    # if get_arch() == "gfx90a":
+    #     if Z == 4 and HQ == 48 and HK == 48 and N_CTX_Q == 1024 and D_HEAD == 64:
+    #         pytest.skip("This config doesnot work on MI200 Devices.")
+
+    dtype = torch.float16
+    torch.manual_seed(20) # seed from test_op_bwd
+
+    alibi_slopes = None
+    if layout == "thd":
+        q, k, v, metadata = varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, DEBUG_INPUT=DEBUG_INPUT)
+    else:
+        q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=DEBUG_INPUT)
+    if DEBUG_INPUT:
+        do = torch.ones_like(q).contiguous()
+    else:
+        do = torch.randn_like(q)
+
+    # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
+    if dropout_p > 0.0:
+        metadata.need_dropout(dropout_p)
+
+    # =============================================== Reference ==============================================================
+    q_ref = q.clone() 
+    k_ref = k.clone()
+    v_ref = v.clone()    
+    output_ref, softmax_lse_ref, sd_mask_ref = attention_forward_pytorch_ref_impl(
+        q_ref,
+        k_ref, 
+        v_ref,
+        metadata.sm_scale, 
+        causal, 
+        layout,
+        metadata.cu_seqlens_q,
+        metadata.cu_seqlens_k,
+        metadata.max_seqlens_q,
+        metadata.max_seqlens_k,
+        metadata.dropout_p,
+        metadata.philox_seed, 
+        metadata.philox_offset, 
+        use_exp2
+    )
+
+
+    if DEBUG:
+        if HQ // HK != 1:
+            print("MQA/GQA")
+        else:
+            print("MHA")
+
+    dq = torch.zeros_like(q, dtype=q.dtype) # NOTE: the kernel does inplace accumlation on dq so dq has to be zeros
+    if DEBUG_INPUT:
+        dk = torch.zeros_like(k, dtype=k.dtype)
+        dv = torch.zeros_like(v, dtype=v.dtype)
+    else:
+        dk = torch.empty_like(k, dtype=k.dtype)
+        dv = torch.empty_like(v, dtype=v.dtype)
+
+    do_ref = do.clone()
+    dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
+        do_ref,
+        q_ref,
+        k_ref,
+        v_ref,
+        output_ref,
+        softmax_lse_ref,
+        metadata.sm_scale,
+        causal,
+        layout,
+        metadata.cu_seqlens_q,
+        metadata.cu_seqlens_k,
+        metadata.max_seqlens_q,
+        metadata.max_seqlens_k,
+        metadata.dropout_p,
+        metadata.philox_seed, 
+        metadata.philox_offset, 
+        use_exp2
+    )
+
+    # =============================================== Triton ==============================================================
+    o = output_ref.clone().contiguous()
+    softmax_lse = softmax_lse_ref.clone().contiguous()
+    dq_triton, dk_triton, dv_triton, delta_triton, _, _ = attention_prefill_backward_triton_impl(
+        do,
+        q,
+        k,
+        v,
+        o,
+        softmax_lse,
+        dq,
+        dk,
+        dv,
+        metadata.sm_scale,
+        alibi_slopes,
+        causal,
+        layout,
+        metadata.cu_seqlens_q,
+        metadata.cu_seqlens_k,
+        metadata.max_seqlens_q,
+        metadata.max_seqlens_k,
+        metadata.dropout_p,
+        metadata.philox_seed, 
+        metadata.philox_offset, 
+        use_exp2,
+        sequence_parallel=sequence_parallel
+    )
+
+    # =============================================== Check ==============================================================
+    if DEBUG:
+        print()
+    if DEBUG:
+        print("delta_triton:", delta_triton, delta_triton.shape)
+        print("delta_ref:", delta_ref, delta_ref.shape)
+    torch.testing.assert_close(delta_triton, delta_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
+
+    if DEBUG:
+        print("dv_triton:", dv_triton, dv_triton.shape)
+        print("dv_ref:", dv_ref, dv_ref.shape)
+    torch.testing.assert_close(dv_triton, dv_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
+
+    if DEBUG:
+        print("dk_triton:", dk_triton, dk_triton.shape)
+        print("dk_ref:", dk_ref, dk_ref.shape)
+    torch.testing.assert_close(dk_triton, dk_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
+
+    if DEBUG:
+        print("dq_triton:", dq_triton, dq_triton.shape)
+        print("dq_ref:", dq_ref, dq_ref.shape)
+    torch.testing.assert_close(dq_triton, dq_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
+
+
+@pytest.mark.parametrize('batch_size, seqlen_q, seqlen_k, group_q, group_k, dim', get_input_shapes())
+def test_op_fwd_decode(batch_size, seqlen_q, seqlen_k, group_q, group_k, dim, dtype=torch.bfloat16):
+    if DEBUG:
+        print()
+        print(f"batch_size = {batch_size}, seqlen_q = {seqlen_q}, seqlen_k = {seqlen_k}, group_q = {group_q}, group_k = {group_k}, dim = {dim}")
+    torch.manual_seed(20)
+    query_group_head_size = (group_q + group_k - 1) // group_k
+    q = (torch.empty((batch_size, seqlen_q, group_k, query_group_head_size, dim), dtype=dtype,
+                     device="cuda").normal_(mean=0., std=0.5).requires_grad_())
+    k = (torch.empty((batch_size, seqlen_k, group_k, 1, dim), dtype=dtype,
+                     device="cuda").normal_(mean=0.,
+                                            std=0.5).requires_grad_()).expand(-1, -1, -1, query_group_head_size, -1)
+    v = (torch.empty((batch_size, seqlen_k, group_k, 1, dim), dtype=dtype,
+                     device="cuda").normal_(mean=0.,
+                                            std=0.5).requires_grad_()).expand(-1, -1, -1, query_group_head_size, -1)
+    scale = 1 / dim**0.5
+    input_metadata = MetaData(sm_scale=scale)
+    input_metadata.layout = "bsghd"
+    tri_out, _ = attention_decode(q, k, v, input_metadata)
+
+    q = q.reshape([batch_size, seqlen_q, -1, dim]).permute(0, 2, 1, 3)
+    k = k.reshape([batch_size, seqlen_k, -1, dim]).permute(0, 2, 1, 3)
+    v = v.reshape([batch_size, seqlen_k, -1, dim]).permute(0, 2, 1, 3)
+    attn = (q @ k.transpose(-1, -2) * scale).softmax(-1)
+    ref_out = attn @ v
+
+    # compare
+    torch.testing.assert_close(ref_out, tri_out, atol=1e-3, rtol=0)
+
+def test_quantization():
+    a = torch.randn((2, 4, 32), dtype=torch.float16, device='cuda')
+    qa = quantize_kv_int4(a, num_groups=4)
+    dqa = dequantize_kv_fp16(qa, num_groups=4)
+    torch.testing.assert_close(a, dqa, atol=1.5e-1, rtol=1e-1)
+
+@pytest.mark.parametrize('B, Mq, Mkv, Hq, Hkv, K', get_input_shapes())
+def test_op_fwd_decode_int4_kv(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
+    pytest.skip("Decode kernel doesnot support quantization yet")
+    torch.manual_seed(2)
+    q = (torch.empty((B, Mq, Hkv, (Hq + Hkv - 1) // Hkv, K), dtype=dtype,
+                     device="cuda").normal_(mean=1.0, std=0.5).requires_grad_())
+    k = (torch.empty((B, Mkv, Hkv, 1, K), dtype=dtype,
+                     device="cuda").normal_(mean=1.0,
+                                            std=0.5).requires_grad_()).expand(-1, -1, -1, (Hq + Hkv - 1) // Hkv, -1)
+    v = (torch.empty((B, Mkv, Hkv, 1, K), dtype=dtype,
+                     device="cuda").normal_(mean=1.0,
+                                            std=0.5).requires_grad_()).expand(-1, -1, -1, (Hq + Hkv - 1) // Hkv, -1)
+
+    num_groups = 1
+    quant_k = (quantize_kv_int4(k, num_groups=num_groups).contiguous().view(torch.int32))
+    quant_v = (quantize_kv_int4(v, num_groups=num_groups).contiguous().view(torch.int32))
+    scale = 1 / K**0.5
+    input_metadata = MetaData(sm_scale=scale)
+    input_metadata.layout = "bsghd"
+    tri_out, _ = attention_decode(q, quant_k, quant_v, input_metadata)
+
+    q = q.reshape([B, Mq, -1, K]).permute(0, 2, 1, 3)
+    k = k.reshape([B, Mkv, -1, K]).permute(0, 2, 1, 3)
+    v = v.reshape([B, Mkv, -1, K]).permute(0, 2, 1, 3)
+    attn = (q @ k.transpose(-1, -2) * scale).softmax(-1)
+    ref_out = attn @ v
+    # compare
+    torch.testing.assert_close(ref_out, tri_out, atol=2.1e-2, rtol=0)
+
+    # since quantization introduces rounding error, use the
+    # dequantized kv as inputs to the ref implementation to reduce
+    # the tolerance to 1e-3
+    dqk = dequantize_kv_fp16(quant_k, num_groups=num_groups)
+    dqv = dequantize_kv_fp16(quant_v, num_groups=num_groups)
+    dqk = dqk.reshape([B, Mkv, -1, K]).permute(0, 2, 1, 3)
+    dqv = dqv.reshape([B, Mkv, -1, K]).permute(0, 2, 1, 3)
+    dq_attn = (q @ dqk.transpose(-1, -2) * scale).softmax(-1)
+    dq_ref_out = dq_attn @ dqv
+    torch.testing.assert_close(dq_ref_out, tri_out, atol=1e-3, rtol=0)
+
+
 
 @pytest.mark.parametrize(
     "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD",
@@ -786,258 +1046,3 @@ def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, drop
 
     ATOL_fp8, RTOL_fp8 = 1e-1, 1e-1
     torch.testing.assert_close(out_bfp16.to(torch.float32), out_fp8.to(torch.float32), atol=ATOL_fp8, rtol=RTOL_fp8)
-
-@pytest.mark.parametrize(
-    "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD", [
-    (1, 1, 1, 1, 1, 1),
-    (1, 1, 1, 4, 4, 4),
-    (2, 1, 1, 4, 4, 16),
-    (1, 2, 2, 4, 4, 16),
-    (1, 4, 1, 2, 4, 16),
-    (1, 8, 1, 2, 4, 16),
-    (1, 16, 1, 2, 4, 16),
-    (1, 32, 1, 2, 4, 16),
-    (1, 64, 1, 2, 4, 16),
-    (1, 4, 2, 2, 4, 16),
-    (2, 2, 2, 4, 4, 16),
-    (1, 1, 1, 4, 4, 16),
-    (2, 1, 1, 4, 4 , 16),
-    (4, 6, 6, 8, 8 , 16),
-    (1, 1, 1, 4, 4, 32),
-    (1, 1, 1, 16, 16, 16),
-    (1, 1, 1, 32, 32, 16),
-    (1, 1, 1, 64, 64, 16),
-    (1, 1, 1, 64, 64, 16),
-    (1, 1, 1, 64, 128, 16),
-    (1, 1, 1, 64, 64, 32),
-    (1, 1, 1, 64, 128, 32),
-    (1, 1, 1, 128, 128, 64),
-    (1, 1, 1, 128, 256, 45),
-    (1, 1, 1, 113, 203, 192),
-    (1, 1, 1, 256, 256, 64),
-    (1, 1, 1, 256, 512, 16),
-    (1, 1, 1, 512, 512, 64), 
-    (1, 1, 1, 1024, 1024, 64),
-    # fa configs
-    (2, 2, 2, 128, 128, 65),
-    (2, 2, 2, 128, 128, 224),
-    (4, 6, 6, 108, 256, 224),
-    (1, 1, 1, 256, 512, 16),
-    # old tests that work
-    (4, 48, 6, 1024, 1024, 64),
-    (4, 48, 12, 1024, 1024, 64),
-    (4, 48, 24, 1024, 1024, 64),
-    (4, 48, 48, 1024, 1024, 64),
-    (4, 48, 48, 1024, 1024, 73),
-    (4, 48, 48, 2048, 2048, 64),
-    (1, 24, 24, 4096, 4096, 64),
-    (1, 16, 16, 1024, 1024, 64),
-    (1, 16, 16, 1024, 1024, 128),
-])
-@pytest.mark.parametrize('causal', [True, False])
-@pytest.mark.parametrize('dropout_p', [0.0])
-@pytest.mark.parametrize('use_exp2', [False]) # FIXME: using exp2 causes issue when used with causal
-@pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
-@pytest.mark.parametrize('sequence_parallel', [True, False])
-@pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans on larger tensors
-def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, use_exp2, layout, sequence_parallel, DEBUG_INPUT):
-    dtype = torch.float16
-    torch.manual_seed(20) # seed from test_op_bwd
-
-    alibi_slopes = None
-    if layout == "thd":
-        q, k, v, metadata = varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, DEBUG_INPUT=DEBUG_INPUT)
-    else:
-        q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=DEBUG_INPUT)
-    if DEBUG_INPUT:
-        do = torch.ones_like(q).contiguous()
-    else:
-        do = torch.randn_like(q)
-
-    # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
-    if dropout_p > 0.0:
-        metadata.need_dropout(dropout_p)
-
-    # =============================================== Reference ==============================================================
-    q_ref = q.clone() 
-    k_ref = k.clone()
-    v_ref = v.clone()    
-    output_ref, softmax_lse_ref, sd_mask_ref = attention_forward_pytorch_ref_impl(
-        q_ref,
-        k_ref, 
-        v_ref,
-        metadata.sm_scale, 
-        causal, 
-        layout,
-        metadata.cu_seqlens_q,
-        metadata.cu_seqlens_k,
-        metadata.max_seqlens_q,
-        metadata.max_seqlens_k,
-        metadata.dropout_p,
-        metadata.philox_seed, 
-        metadata.philox_offset, 
-        use_exp2
-    )
-
-
-    if DEBUG:
-        if HQ // HK != 1:
-            print("MQA/GQA")
-        else:
-            print("MHA")
-
-    dq = torch.zeros_like(q, dtype=q.dtype) # NOTE: the kernel does inplace accumlation on dq so dq has to be zeros
-    if DEBUG_INPUT:
-        dk = torch.zeros_like(k, dtype=k.dtype)
-        dv = torch.zeros_like(v, dtype=v.dtype)
-    else:
-        dk = torch.empty_like(k, dtype=k.dtype)
-        dv = torch.empty_like(v, dtype=v.dtype)
-
-    do_ref = do.clone()
-    dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
-        do_ref,
-        q_ref,
-        k_ref,
-        v_ref,
-        output_ref,
-        softmax_lse_ref,
-        metadata.sm_scale,
-        causal,
-        layout,
-        metadata.cu_seqlens_q,
-        metadata.cu_seqlens_k,
-        metadata.max_seqlens_q,
-        metadata.max_seqlens_k,
-        metadata.dropout_p,
-        metadata.philox_seed, 
-        metadata.philox_offset, 
-        use_exp2
-    )
-
-    # =============================================== Triton ==============================================================
-    o = output_ref.clone().contiguous()
-    softmax_lse = softmax_lse_ref.clone().contiguous()
-    dq_triton, dk_triton, dv_triton, delta_triton, _, _ = attention_prefill_backward_triton_impl(
-        do,
-        q,
-        k,
-        v,
-        o,
-        softmax_lse,
-        dq,
-        dk,
-        dv,
-        metadata.sm_scale,
-        alibi_slopes,
-        causal,
-        layout,
-        metadata.cu_seqlens_q,
-        metadata.cu_seqlens_k,
-        metadata.max_seqlens_q,
-        metadata.max_seqlens_k,
-        metadata.dropout_p,
-        metadata.philox_seed, 
-        metadata.philox_offset, 
-        use_exp2,
-        sequence_parallel=sequence_parallel
-    )
-
-    # =============================================== Check ==============================================================
-    if DEBUG:
-        print()
-    if DEBUG:
-        print("delta_triton:", delta_triton, delta_triton.shape)
-        print("delta_ref:", delta_ref, delta_ref.shape)
-    torch.testing.assert_close(delta_triton, delta_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
-
-    if DEBUG:
-        print("dv_triton:", dv_triton, dv_triton.shape)
-        print("dv_ref:", dv_ref, dv_ref.shape)
-    torch.testing.assert_close(dv_triton, dv_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
-
-    if DEBUG:
-        print("dk_triton:", dk_triton, dk_triton.shape)
-        print("dk_ref:", dk_ref, dk_ref.shape)
-    torch.testing.assert_close(dk_triton, dk_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
-
-    if DEBUG:
-        print("dq_triton:", dq_triton, dq_triton.shape)
-        print("dq_ref:", dq_ref, dq_ref.shape)
-    torch.testing.assert_close(dq_triton, dq_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
-
-
-@pytest.mark.parametrize('batch_size, seqlen_q, seqlen_k, group_q, group_k, dim', get_input_shapes())
-def test_op_fwd_decode(batch_size, seqlen_q, seqlen_k, group_q, group_k, dim, dtype=torch.bfloat16):
-    if DEBUG:
-        print()
-        print(f"batch_size = {batch_size}, seqlen_q = {seqlen_q}, seqlen_k = {seqlen_k}, group_q = {group_q}, group_k = {group_k}, dim = {dim}")
-    torch.manual_seed(20)
-    query_group_head_size = (group_q + group_k - 1) // group_k
-    q = (torch.empty((batch_size, seqlen_q, group_k, query_group_head_size, dim), dtype=dtype,
-                     device="cuda").normal_(mean=0., std=0.5).requires_grad_())
-    k = (torch.empty((batch_size, seqlen_k, group_k, 1, dim), dtype=dtype,
-                     device="cuda").normal_(mean=0.,
-                                            std=0.5).requires_grad_()).expand(-1, -1, -1, query_group_head_size, -1)
-    v = (torch.empty((batch_size, seqlen_k, group_k, 1, dim), dtype=dtype,
-                     device="cuda").normal_(mean=0.,
-                                            std=0.5).requires_grad_()).expand(-1, -1, -1, query_group_head_size, -1)
-    scale = 1 / dim**0.5
-    input_metadata = MetaData(sm_scale=scale)
-    input_metadata.layout = "bsghd"
-    tri_out, _ = attention_decode(q, k, v, input_metadata)
-
-    q = q.reshape([batch_size, seqlen_q, -1, dim]).permute(0, 2, 1, 3)
-    k = k.reshape([batch_size, seqlen_k, -1, dim]).permute(0, 2, 1, 3)
-    v = v.reshape([batch_size, seqlen_k, -1, dim]).permute(0, 2, 1, 3)
-    attn = (q @ k.transpose(-1, -2) * scale).softmax(-1)
-    ref_out = attn @ v
-
-    # compare
-    torch.testing.assert_close(ref_out, tri_out, atol=1e-3, rtol=0)
-
-def test_quantization():
-    a = torch.randn((2, 4, 32), dtype=torch.float16, device='cuda')
-    qa = quantize_kv_int4(a, num_groups=4)
-    dqa = dequantize_kv_fp16(qa, num_groups=4)
-    torch.testing.assert_close(a, dqa, atol=1.5e-1, rtol=1e-1)
-
-@pytest.mark.parametrize('B, Mq, Mkv, Hq, Hkv, K', get_input_shapes())
-def test_op_fwd_decode_int4_kv(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
-    pytest.skip("Decode kernel doesnot support quantization yet")
-    torch.manual_seed(2)
-    q = (torch.empty((B, Mq, Hkv, (Hq + Hkv - 1) // Hkv, K), dtype=dtype,
-                     device="cuda").normal_(mean=1.0, std=0.5).requires_grad_())
-    k = (torch.empty((B, Mkv, Hkv, 1, K), dtype=dtype,
-                     device="cuda").normal_(mean=1.0,
-                                            std=0.5).requires_grad_()).expand(-1, -1, -1, (Hq + Hkv - 1) // Hkv, -1)
-    v = (torch.empty((B, Mkv, Hkv, 1, K), dtype=dtype,
-                     device="cuda").normal_(mean=1.0,
-                                            std=0.5).requires_grad_()).expand(-1, -1, -1, (Hq + Hkv - 1) // Hkv, -1)
-
-    num_groups = 1
-    quant_k = (quantize_kv_int4(k, num_groups=num_groups).contiguous().view(torch.int32))
-    quant_v = (quantize_kv_int4(v, num_groups=num_groups).contiguous().view(torch.int32))
-    scale = 1 / K**0.5
-    input_metadata = MetaData(sm_scale=scale)
-    input_metadata.layout = "bsghd"
-    tri_out, _ = attention_decode(q, quant_k, quant_v, input_metadata)
-
-    q = q.reshape([B, Mq, -1, K]).permute(0, 2, 1, 3)
-    k = k.reshape([B, Mkv, -1, K]).permute(0, 2, 1, 3)
-    v = v.reshape([B, Mkv, -1, K]).permute(0, 2, 1, 3)
-    attn = (q @ k.transpose(-1, -2) * scale).softmax(-1)
-    ref_out = attn @ v
-    # compare
-    torch.testing.assert_close(ref_out, tri_out, atol=2.1e-2, rtol=0)
-
-    # since quantization introduces rounding error, use the
-    # dequantized kv as inputs to the ref implementation to reduce
-    # the tolerance to 1e-3
-    dqk = dequantize_kv_fp16(quant_k, num_groups=num_groups)
-    dqv = dequantize_kv_fp16(quant_v, num_groups=num_groups)
-    dqk = dqk.reshape([B, Mkv, -1, K]).permute(0, 2, 1, 3)
-    dqv = dqv.reshape([B, Mkv, -1, K]).permute(0, 2, 1, 3)
-    dq_attn = (q @ dqk.transpose(-1, -2) * scale).softmax(-1)
-    dq_ref_out = dq_attn @ dqv
-    torch.testing.assert_close(dq_ref_out, tri_out, atol=1e-3, rtol=0)

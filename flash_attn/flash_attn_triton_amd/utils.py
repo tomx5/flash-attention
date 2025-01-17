@@ -361,15 +361,19 @@ def get_input_shapes():
              for i in range(8, 18)] + [(max(1, 2**(16 - i)), 1, 2**i, 16, 2, 128) for i in range(8, 18)]
     return cases
 
+@functools.cache
 def is_hip():
     return triton.runtime.driver.active.get_current_target().backend == "hip"
 
+@functools.cache
 def get_arch():
     return triton.runtime.driver.active.get_current_target().arch
 
+@functools.cache
 def is_cdna():
     return is_hip() and get_arch() in ('gfx908', 'gfx90a', 'gfx940', 'gfx941', 'gfx942')
 
+@functools.cache
 def is_rdna():
     return is_hip() and get_arch() in ("gfx1030", "gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201")
 
