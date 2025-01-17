@@ -114,7 +114,7 @@ def cudnn_spda_setup(qkv, seqlen_q, seqlen_k, causal=False):
     descale_q = get_default_scale_tensor()
     descale_k = get_default_scale_tensor()
     descale_v = get_default_scale_tensor()
-    descale_s = get_default_scale_tensor()
+    descale_p = get_default_scale_tensor()
     scale_s = get_default_scale_tensor()
     scale_o = get_default_scale_tensor()
 
@@ -125,7 +125,7 @@ def cudnn_spda_setup(qkv, seqlen_q, seqlen_k, causal=False):
         descale_q=descale_q,
         descale_k=descale_k,
         descale_v=descale_v,
-        descale_s=descale_s,
+        descale_p=descale_p,
         scale_s=scale_s,
         scale_o=scale_o,
         is_inference=True,
@@ -153,7 +153,7 @@ def cudnn_spda_setup(qkv, seqlen_q, seqlen_k, causal=False):
         descale_q: default_scale_gpu,
         descale_k: default_scale_gpu,
         descale_v: default_scale_gpu,
-        descale_s: default_scale_gpu,
+        descale_p: default_scale_gpu,
         scale_s: default_scale_gpu,
         scale_o: default_scale_gpu,
         o: o_gpu_transposed,

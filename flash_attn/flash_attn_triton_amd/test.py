@@ -526,9 +526,9 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 @pytest.mark.parametrize('sequence_parallel', [True, False])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans on larger tensors
 def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, use_exp2, layout, sequence_parallel, DEBUG_INPUT):
-    # if get_arch() == "gfx90a":
-    #     if Z == 4 and HQ == 48 and HK == 48 and N_CTX_Q == 1024 and D_HEAD == 64:
-    #         pytest.skip("This config doesnot work on MI200 Devices.")
+    if get_arch() == "gfx90a":
+        if layout == "thd" and Z == 4 and HQ == 48 and HK == 48 and N_CTX_Q == 1024 and N_CTX_K == 1024:
+            pytest.skip("This config doesnot work on MI200 Devices.")
 
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
@@ -826,7 +826,7 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
     descale_q = q_max / type_max
     descale_k = k_max / type_max
     descale_v = v_max / type_max
-    descale_s = torch.full((batch, nheads_q), 1.0 / type_max, dtype=torch.float32, device=q.device) 
+    descale_p = torch.full((batch, nheads_q), 1.0 / type_max, dtype=torch.float32, device=q.device) 
 
     # launch kernel in fp8
     out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_func(
@@ -843,7 +843,7 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
             descale_q=descale_q,
             descale_k=descale_k,
             descale_v=descale_v,
-            descale_s=descale_s,
+            descale_p=descale_p,
         )
     if DEBUG:
         print("out_fp8", out_fp8)
@@ -1012,7 +1012,7 @@ def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, drop
     descale_q = q_maxes / type_max
     descale_k = k_maxes / type_max
     descale_v = v_maxes / type_max
-    descale_s = torch.full_like(descale_q, 1.0 / type_max, dtype=torch.float32, device=q.device) 
+    descale_p = torch.full_like(descale_q, 1.0 / type_max, dtype=torch.float32, device=q.device) 
 
     # launch kernel in fp8
     out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_varlen_func(
@@ -1033,7 +1033,7 @@ def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, drop
             descale_q=descale_q,
             descale_k=descale_k,
             descale_v=descale_v,
-            descale_s=descale_s,
+            descale_p=descale_p,
         )
     if DEBUG:
         print("out_fp8", out_fp8)
