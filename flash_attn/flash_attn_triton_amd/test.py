@@ -1,7 +1,7 @@
 import torch
 import pytest
 
-from .utils import DEBUG, MetaData, get_input_shapes, input_helper, varlen_input_helper, compute_alibi_tensor_ref
+from .utils import DEBUG, MetaData, get_input_shapes, input_helper, varlen_input_helper, compute_alibi_tensor_ref, arch_supports_fp8
 from .interface_torch import attention_prefill, attention_decode
 from .fwd_ref import attention_forward_pytorch_ref_impl
 from .fwd_prefill import attention_prefill_forward_triton_impl
@@ -513,6 +513,9 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 @pytest.mark.parametrize('dropout_p', [0.0, 0.25])
 @pytest.mark.parametrize('DEBUG_INPUT', [False])
 def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, DEBUG_INPUT):
+    if not arch_supports_fp8():
+        pytest.skip("fp8 not supported on this device")
+
     device = "cuda"
     window_size =  (-1, -1)
     softcap = 0.0
@@ -634,6 +637,10 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
 @pytest.mark.parametrize('dropout_p', [0.0, 0.25])
 @pytest.mark.parametrize('DEBUG_INPUT', [False])
 def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, DEBUG_INPUT):
+    if not arch_supports_fp8():
+        pytest.skip("fp8 not supported on this device")
+
+
     device = "cuda"
     window_size =  (-1, -1)
     softcap = 0.0

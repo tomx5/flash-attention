@@ -368,8 +368,10 @@ def get_arch():
     return triton.runtime.driver.active.get_current_target().arch
 
 def is_cdna():
-    return is_hip() and get_arch() in ('gfx940', 'gfx941', 'gfx942', 'gfx90a', 'gfx908')
-
+    return is_hip() and get_arch() in ('gfx908', 'gfx90a', 'gfx940', 'gfx941', 'gfx942')
 
 def is_rdna():
     return is_hip() and get_arch() in ("gfx1030", "gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201")
+
+def arch_supports_fp8():
+    return is_hip() and get_arch() in ('gfx942')

@@ -1,7 +1,7 @@
 import torch
 import triton
 import triton.language as tl
-from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, AUTOTUNE, get_shape_from_layout, get_strides_from_layout, is_cdna, is_rdna, write_dropout_mask, create_dropout_mask
+from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, AUTOTUNE, arch_supports_fp8, get_shape_from_layout, get_strides_from_layout, is_cdna, is_rdna, write_dropout_mask, create_dropout_mask
 
 # NOTE: triton fails to import tl.constexprs so create them here for the file
 tl_DROPOUT_USE_PYTORCH: tl.constexpr = DROPOUT_USE_PYTORCH
@@ -608,10 +608,10 @@ def attention_prefill_forward_triton_impl(
                                         return_softmax,
                                         use_exp2,
                                         # fp8
-                                        descale_q,
-                                        descale_k,
-                                        descale_v,
-                                        descale_s):
+                                        descale_q=None,
+                                        descale_k=None,
+                                        descale_v=None,
+                                        descale_s=None):
 
     if DEBUG:
         print()
@@ -635,11 +635,11 @@ def attention_prefill_forward_triton_impl(
         print("return_scores:", return_softmax)
         print("use_exp2:", use_exp2)
 
-    if descale_q is not None:
-        is_fp8 = True
+    if arch_supports_fp8() and q.dtype in {torch.float8_e4m3fnuz, torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e5m2fnuz}:
         if DEBUG:
             print("IS_FP8")
-
+        
+        is_fp8 = True
         type_max = torch.finfo(q.dtype).max
         
         if layout == "bshd":
