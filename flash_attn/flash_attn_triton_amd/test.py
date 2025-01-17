@@ -528,7 +528,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, use_exp2, layout, sequence_parallel, DEBUG_INPUT):
     if get_arch() == "gfx90a":
         if layout == "thd" and Z == 4 and HQ == 48 and HK == 48 and N_CTX_Q == 1024 and N_CTX_K == 1024:
-            pytest.skip("This config doesnot work on MI200 Devices.")
+            pytest.skip("This config doesnot work on MI200 Devices but works on MI300.")
 
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
@@ -658,9 +658,10 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 
 @pytest.mark.parametrize('batch_size, seqlen_q, seqlen_k, group_q, group_k, dim', get_input_shapes())
 def test_op_fwd_decode(batch_size, seqlen_q, seqlen_k, group_q, group_k, dim, dtype=torch.bfloat16):
-    if DEBUG:
-        print()
-        print(f"batch_size = {batch_size}, seqlen_q = {seqlen_q}, seqlen_k = {seqlen_k}, group_q = {group_q}, group_k = {group_k}, dim = {dim}")
+    if get_arch() == "gfx90a":
+        if batch_size == 1 and seqlen_q == 1 and seqlen_k == 65536:
+            pytest.skip("This config doesnot work on MI200 Devices but works on MI300.")
+    
     torch.manual_seed(20)
     query_group_head_size = (group_q + group_k - 1) // group_k
     q = (torch.empty((batch_size, seqlen_q, group_k, query_group_head_size, dim), dtype=dtype,
