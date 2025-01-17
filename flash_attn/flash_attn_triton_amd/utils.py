@@ -1,10 +1,10 @@
 
 import csv
-import json
 import math
 import torch
 import os
 import random
+import functools
 import triton
 import triton.language as tl
 
@@ -373,5 +373,6 @@ def is_cdna():
 def is_rdna():
     return is_hip() and get_arch() in ("gfx1030", "gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201")
 
+@functools.cache
 def arch_supports_fp8():
     return is_hip() and get_arch() in ('gfx942')
