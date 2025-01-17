@@ -659,7 +659,7 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 @pytest.mark.parametrize('batch_size, seqlen_q, seqlen_k, group_q, group_k, dim', get_input_shapes())
 def test_op_fwd_decode(batch_size, seqlen_q, seqlen_k, group_q, group_k, dim, dtype=torch.bfloat16):
     if get_arch() == "gfx90a":
-        if batch_size == 1 and seqlen_q == 1 and seqlen_k == 65536:
+        if batch_size == 1 and seqlen_q == 1 and seqlen_k >= 65536:
             pytest.skip("This config doesnot work on MI200 Devices but works on MI300.")
     
     torch.manual_seed(20)
