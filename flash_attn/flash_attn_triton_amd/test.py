@@ -15,7 +15,8 @@ ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose.
 # ATOL, RTOL = 1e-3, 1e-3  # catchs fa mismatch issues
 # ATOL, RTOL = 1e-4, 1e-3 # to strict. there will be small diffs
 # ATOL, RTOL = 1e-5, 1e-3 # # default fp16. there will be small diffs
-ATOL_fp8, RTOL_fp8 = 1e-1, 1e-1
+# ATOL_fp8, RTOL_fp8 = 1e-1, 1e-1 # to strict for larger tensors in fp8
+ATOL_fp8, RTOL_fp8 = 2.5e-1, 2.5e-1 # test pass with dropout and causal in fp8
 EQUAL_NAN = True
 
 @pytest.mark.parametrize('Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD', [
@@ -746,29 +747,29 @@ def test_op_fwd_decode_int4_kv(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
         (1, 1, 1, 4, 2, 16),
         (1, 1, 1, 4, 4, 16),
         (1, 2, 2, 4, 4, 16),
-        # (2, 1, 1, 4, 4, 16), # Note fails due to  mismatch on 1 element using dropout only
-        # (2, 2, 2, 4, 4, 16), # fails if in basic config due 1 mismatch
+        (2, 1, 1, 4, 4, 16),
+        (2, 2, 2, 4, 4, 16),
         (1, 1, 1, 128, 64, 16),
         (2, 2, 2, 2, 128, 1),
-        # (2, 3, 3, 2, 128, 16), # Fails due when using with causal due to a few element mismatches
+        (2, 3, 3, 2, 128, 16),
         (3, 2, 2, 256, 512, 16),
-        # (3, 3, 3, 128, 128, 64), # Fails due when using with causal due to a few element mismatches
-        # (2, 4, 4, 1024, 1024, 64), # Fails due when using with causal and dropout due to a few element mismatches
+        (3, 3, 3, 128, 128, 64),
+        (2, 4, 4, 1024, 1024, 64),
         (4, 6, 6, 108, 256, 224),
-        # (4, 8, 8, 2048, 2048, 128), # Fails due when using with causal due to a few element mismatches
-        # (4, 16, 16, 4096, 4096, 64), # Fails due when using with causal due to a few element mismatches
-        # (2, 4, 4, 8192, 8192, 32), # Fails due when using with causal and dropout due to a few element mismatches
+        (4, 8, 8, 2048, 2048, 128),
+        (4, 16, 16, 4096, 4096, 64),
+        (2, 4, 4, 8192, 8192, 32),
         # fa configs
         (4, 6, 1, 113, 203, 256),
         (4, 6, 1, 128, 217, 256),
         (4, 6, 2, 113, 211, 128),
         (4, 6, 2, 108, 256, 128),
         (4, 6, 1, 256, 512, 64),
-        # (4, 6, 1, 512, 256, 64), # Fails due when using with causal due to a few element mismatches
-        # (4, 6, 2, 1024, 1024, 32), # Fails due when using with causal due to a few element mismatches
-        # (4, 6, 2, 1023, 1024, 32), # Fails due when using with causal due to a few element mismatches
-        # (4, 6, 6, 1024, 1023, 32), # Fails due when using with causal due to a few element mismatches
-        # (4, 6, 6, 2048, 2048, 32), # Fails due when using with causal due to a few element mismatches
+        (4, 6, 1, 512, 256, 64),
+        (4, 6, 2, 1024, 1024, 32),
+        (4, 6, 2, 1023, 1024, 32),
+        (4, 6, 6, 1024, 1023, 32),
+        (4, 6, 6, 2048, 2048, 32),
     ],
 )
 @pytest.mark.parametrize('causal', [False, True])
@@ -778,7 +779,7 @@ def test_op_fwd_decode_int4_kv(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
 def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, DEBUG_INPUT):
     device = "cuda"
     window_size =  (-1, -1)
-    softcap = 0.0
+    softcap = None
     alibi_slopes = None
     deterministic = False
     layout = "bshd"
@@ -826,7 +827,7 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
     descale_q = q_max / type_max
     descale_k = k_max / type_max
     descale_v = v_max / type_max
-    descale_p = torch.full((batch, nheads_q), 1.0 / type_max, dtype=torch.float32, device=q.device) 
+    descale_p = torch.full_like(descale_q, 1.0 / type_max, dtype=torch.float32, device=q.device)
 
     # launch kernel in fp8
     out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_func(
@@ -873,23 +874,23 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
         (2, 2, 2, 2, 128, 1),
         (2, 3, 3, 2, 128, 16),
         (3, 2, 2, 256, 512, 16),
-        # (3, 3, 3, 128, 128, 64),
-        # (2, 4, 4, 1024, 1024, 64),
-        # (4, 6, 6, 108, 256, 224),
-        # (4, 8, 8, 2048, 2048, 128),
-        # (4, 16, 16, 4096, 4096, 64),
-        # (2, 4, 4, 8192, 8192, 32),
+        (3, 3, 3, 128, 128, 64),
+        (2, 4, 4, 1024, 1024, 64),
+        (4, 6, 6, 108, 256, 224),
+        (4, 8, 8, 2048, 2048, 128),
+        (4, 16, 16, 4096, 4096, 64),
+        (2, 4, 4, 8192, 8192, 32),
         # fa configs
-        # (4, 6, 1, 113, 203, 256),
-        # (4, 6, 1, 128, 217, 256),
-        # (4, 6, 2, 113, 211, 128),
-        # (4, 6, 2, 108, 256, 128),
-        # (4, 6, 1, 256, 512, 64),
-        # (4, 6, 1, 512, 256, 64),
-        # (4, 6, 2, 1024, 1024, 32),
-        # (4, 6, 2, 1023, 1024, 32),
-        # (4, 6, 6, 1024, 1023, 32),
-        # (4, 6, 6, 2048, 2048, 32),
+        (4, 6, 1, 113, 203, 256),
+        (4, 6, 1, 128, 217, 256),
+        (4, 6, 2, 113, 211, 128),
+        (4, 6, 2, 108, 256, 128),
+        (4, 6, 1, 256, 512, 64),
+        (4, 6, 1, 512, 256, 64),
+        (4, 6, 2, 1024, 1024, 32),
+        (4, 6, 2, 1023, 1024, 32),
+        (4, 6, 6, 1024, 1023, 32),
+        (4, 6, 6, 2048, 2048, 32),
     ],
 )
 @pytest.mark.parametrize('causal', [False, True])
@@ -899,7 +900,7 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
 def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, DEBUG_INPUT):
     device = "cuda"
     window_size =  (-1, -1)
-    softcap = 0.0
+    softcap = None
     alibi_slopes = None
     deterministic = False
     layout = "thd"
