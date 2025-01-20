@@ -590,13 +590,12 @@ def attention_prefill_forward_triton_impl(
         print("return_scores:", return_softmax)
         print("use_exp2:", use_exp2)
 
-    if arch_supports_fp8() and q.dtype in {torch.float8_e4m3fnuz, torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e5m2fnuz}:
+    is_fp8 = arch_supports_fp8() and q.dtype in {torch.float8_e4m3fnuz, torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e5m2fnuz}
+    if is_fp8:
         if DEBUG:
             print("IS_FP8")
         
-        is_fp8 = True
         type_max = torch.finfo(q.dtype).max
-        
         if layout == "bshd":
             batch, _ , nheads_q, dim = q.shape
             _, _ , nheads_k, _ = k.shape
@@ -616,7 +615,6 @@ def attention_prefill_forward_triton_impl(
         descale_v_stride_z = descale_v.stride(0)
         descale_p_stride_z = descale_p.stride(0)
     else:
-        is_fp8 = False
         # For non-FP8 types, use dummy values (no scaling needed)
         descale_q = descale_k = descale_v = descale_p = 1
         descale_q_stride_z = descale_k_stride_z = descale_v_stride_z = descale_p_stride_z = 0

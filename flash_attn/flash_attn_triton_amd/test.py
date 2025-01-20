@@ -15,6 +15,7 @@ ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose.
 # ATOL, RTOL = 1e-3, 1e-3  # catchs fa mismatch issues
 # ATOL, RTOL = 1e-4, 1e-3 # to strict. there will be small diffs
 # ATOL, RTOL = 1e-5, 1e-3 # # default fp16. there will be small diffs
+ATOL_fp8, RTOL_fp8 = 1e-1, 1e-1
 EQUAL_NAN = True
 
 @pytest.mark.parametrize('Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD', [
@@ -773,10 +774,8 @@ def test_op_fwd_decode_int4_kv(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
 @pytest.mark.parametrize('causal', [False, True])
 @pytest.mark.parametrize('dropout_p', [0.0, 0.25])
 @pytest.mark.parametrize('DEBUG_INPUT', [False])
+@pytest.mark.skipif(not arch_supports_fp8(), reason="fp8 not supported on this device")
 def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, DEBUG_INPUT):
-    if not arch_supports_fp8():
-        pytest.skip("fp8 not supported on this device")
-
     device = "cuda"
     window_size =  (-1, -1)
     softcap = 0.0
@@ -855,7 +854,6 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
         print("out_bfp16:", out_bfp16, out_bfp16.shape)
         print("out_fp8:", out_fp8, out_fp8.shape)
     
-    ATOL_fp8, RTOL_fp8 = 1e-1, 1e-1
     torch.testing.assert_close(out_bfp16.to(torch.float32), out_fp8.to(torch.float32), atol=ATOL_fp8, rtol=RTOL_fp8)
 
 @pytest.mark.parametrize(
@@ -897,11 +895,8 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
 @pytest.mark.parametrize('causal', [False, True])
 @pytest.mark.parametrize('dropout_p', [0.0, 0.25])
 @pytest.mark.parametrize('DEBUG_INPUT', [False])
+@pytest.mark.skipif(not arch_supports_fp8(), reason="fp8 not supported on this device")
 def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, DEBUG_INPUT):
-    if not arch_supports_fp8():
-        pytest.skip("fp8 not supported on this device")
-
-
     device = "cuda"
     window_size =  (-1, -1)
     softcap = 0.0
@@ -1045,5 +1040,4 @@ def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, drop
         print("out_bfp16:", out_bfp16, out_bfp16.shape)
         print("out_fp8:", out_fp8, out_fp8.shape)
 
-    ATOL_fp8, RTOL_fp8 = 1e-1, 1e-1
     torch.testing.assert_close(out_bfp16.to(torch.float32), out_fp8.to(torch.float32), atol=ATOL_fp8, rtol=RTOL_fp8)
