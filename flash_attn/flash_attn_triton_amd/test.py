@@ -836,6 +836,25 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
     out_max = torch.maximum(out_fp32.abs().amax(dim=(1, 3)), torch.tensor(1e-9)).unsqueeze(1).unsqueeze(-1)
     do_max = torch.maximum(do.abs().amax(dim=(1, 3)), torch.tensor(1e-9)).unsqueeze(1).unsqueeze(-1)
 
+    # compute max p and max ds from a reference implementation
+    def max_p_ds():
+        q_r = q.transpose(1, 2).contiguous().reshape(Z * HQ, N_CTX_Q, D_HEAD)
+        k_r = k.transpose(1, 2).contiguous().reshape(Z * HK, N_CTX_K, D_HEAD)
+        v_r = v.transpose(1, 2).contiguous().reshape(Z * HK, N_CTX_K, D_HEAD)
+        o_r = out_fp16.transpose(1, 2).contiguous().reshape(Z * HQ, N_CTX_Q, D_HEAD).to(fp32_dtype)
+        lse_r = lse_fp16.reshape(Z * HQ, N_CTX_Q).to(fp32_dtype)
+        do_r = do.transpose(1, 2).contiguous().reshape(Z * HQ, N_CTX_Q, D_HEAD)
+        scores = torch.matmul(q_r, k_r.transpose(-2, -1)) * D_HEAD**-0.5
+        p = torch.exp(scores - lse_r.unsqueeze(-1))
+        dp = torch.matmul(do_r, v_r.transpose(-2, -1))
+        delta = torch.sum(o_r * do_r, axis=-1).unsqueeze(-1)
+        ds = p * (dp - delta) * D_HEAD**-0.5
+        return max(p.abs().max().item(), 1e-9), max(ds.abs().max().item(), 1e-9)
+    p_max, ds_max = max_p_ds()
+    if DEBUG:
+        print("p_max:", p_max)
+        print("ds_max:", ds_max)
+
     # scale values to fp8 range
     q_fp8 = (q * fp8_max / q_max).to(fp8_dtype)
     k_fp8 = (k * fp8_max / k_max).to(fp8_dtype)
@@ -849,9 +868,16 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
     descale_v = v_max / fp8_max
     descale_out = out_max / fp8_max
     descale_do = do_max / fp8_max
-    descale_p = torch.full_like(descale_q, 1.0 / fp8_max, dtype=fp32_dtype, device=q.device)
-    # TODO: compute `descale_ds` correctly
-    descale_ds = torch.full_like(descale_q, 1.0 / fp8_max, dtype=fp32_dtype, device=q.device)
+    descale_p = torch.full_like(descale_q, p_max / fp8_max, dtype=fp32_dtype, device=q.device)
+    descale_ds = torch.full_like(descale_q, ds_max / fp8_max, dtype=fp32_dtype, device=q.device)
+    if DEBUG:
+        print("descale_q:", descale_q, descale_q.shape)
+        print("descale_k:", descale_k, descale_k.shape)
+        print("descale_v:", descale_v, descale_v.shape)
+        print("descale_out:", descale_out, descale_out.shape)
+        print("descale_do:", descale_do, descale_do.shape)
+        print("descale_p:", descale_p, descale_p.shape)
+        print("descale_ds:", descale_ds, descale_ds.shape)
 
     # launch fwd kernel in fp8
     out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_func(
