@@ -2,8 +2,9 @@ name: AMD Perf Kernel Tests
 
 on:
   workflow_dispatch:
-  pull_request:
-    branches: [main_perf]
+  # disable ci for now
+  # pull_request:
+  #   branches: [main_perf]
 
 concurrency:
   group: ${{ github.ref }}

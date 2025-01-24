@@ -9,6 +9,7 @@ from .bwd_ref import attention_backward_pytorch_ref_impl
 from .utils import MetaData, get_shape_from_layout, DEBUG, USE_SINGLE_BWD_KERNEL
 from einops import rearrange, repeat
 from flash_attn.layers.rotary import apply_rotary_emb
+from typing import Optional
 
 USE_REF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_REF', '0').lower() in ('1', 'true', 'yes')
 
@@ -25,10 +26,9 @@ def fwd(q,
         softcap,
         return_softmax,
         gen_,
-        descale_q,
-        descale_k,
-        descale_v,
-        descale_p):
+        descale_q: Optional[torch.Tensor] = None,
+        descale_k: Optional[torch.Tensor] = None,
+        descale_v: Optional[torch.Tensor] = None):
 
     if DEBUG:
         print()
@@ -46,6 +46,10 @@ def fwd(q,
         print("softcap:", softcap)
         print("return_softmax:", return_softmax)
 
+    # ensure q, k, and v require gradients
+    q.requires_grad_(True)
+    k.requires_grad_(True)
+    v.requires_grad_(True)
 
     if o is None:
         o = torch.empty_like(q)
@@ -119,8 +123,7 @@ def fwd(q,
                                                 metadata.use_exp2,
                                                 descale_q,
                                                 descale_k,
-                                                descale_v,
-                                                descale_p)
+                                                descale_v)
 
     if DEBUG:
         print("fwd outputs")
@@ -150,6 +153,10 @@ def bwd(
     deterministic,
     gen_,
     rng_state,
+    descale_q: Optional[torch.Tensor] = None,
+    descale_k: Optional[torch.Tensor] = None,
+    descale_v: Optional[torch.Tensor] = None,
+    descale_do: Optional[torch.Tensor] = None
 ):
     # NOTE: this might have perf costs
     dq.zero_()
@@ -178,6 +185,11 @@ def bwd(
         print("deterministic:", deterministic)
         print("gen_:", gen_)
         print("rng_state:", rng_state)
+
+    # ensure q, k, and v require gradients
+    q.requires_grad_(True)
+    k.requires_grad_(True)
+    v.requires_grad_(True)
 
     if dropout_p > 0.0:
         philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
@@ -241,6 +253,10 @@ def bwd(
             philox_seed,
             philox_offset,
             False,
+            descale_q = descale_q,
+            descale_k = descale_k,
+            descale_v = descale_v,
+            descale_do = descale_do
         )
         delta = delta_triton
 
@@ -273,10 +289,9 @@ def varlen_fwd(
         softcap,
         return_softmax,
         gen_,
-        descale_q,
-        descale_k,
-        descale_v,
-        descale_p):
+        descale_q: Optional[torch.Tensor] = None,
+        descale_k: Optional[torch.Tensor] = None,
+        descale_v: Optional[torch.Tensor] = None):
 
     if DEBUG:
         print()
@@ -295,6 +310,11 @@ def varlen_fwd(
         print("window_size_left:", window_size_left)
         print("window_size_right:", window_size_right)
         print("gen_:", gen_)
+
+    # ensure q, k, and v require gradients
+    q.requires_grad_(True)
+    k.requires_grad_(True)
+    v.requires_grad_(True)
 
     if o is None:
         o = torch.empty_like(q)
@@ -369,8 +389,7 @@ def varlen_fwd(
                                                             metadata.use_exp2,
                                                             descale_q,
                                                             descale_k,
-                                                            descale_v,
-                                                            descale_p)
+                                                            descale_v)
     if DEBUG:
         print("varlen_fwd outputs")
         print("o:", o, o.shape)
@@ -405,6 +424,10 @@ def varlen_bwd(
     deterministic,
     gen_,
     rng_state,
+    descale_q: Optional[torch.Tensor] = None,
+    descale_k: Optional[torch.Tensor] = None,
+    descale_v: Optional[torch.Tensor] = None,
+    descale_do: Optional[torch.Tensor] = None
 ):
     if DEBUG:
         print()
@@ -431,6 +454,11 @@ def varlen_bwd(
         print("deterministic:", deterministic)
         print("gen_:", gen_)
         print("rng_state:", rng_state)
+
+    # ensure q, k, and v require gradients
+    q.requires_grad_(True)
+    k.requires_grad_(True)
+    v.requires_grad_(True)
 
     if dropout_p > 0.0:
         philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
@@ -493,6 +521,10 @@ def varlen_bwd(
             philox_seed,
             philox_offset,
             False,
+            descale_q = descale_q,
+            descale_k = descale_k,
+            descale_v = descale_v,
+            descale_do = descale_do
         )
         delta = delta_triton
 
@@ -526,6 +558,11 @@ def fwd_kvcache(
         softcap,
         rotary_interleaved,
         num_splits):
+
+    # ensure q, k, and v require gradients
+    q.requires_grad_(True)
+    k.requires_grad_(True)
+    v.requires_grad_(True)
 
     if out is None:
         out = torch.empty_like(q)
