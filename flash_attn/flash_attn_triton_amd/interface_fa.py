@@ -10,6 +10,7 @@ from einops import rearrange, repeat
 from flash_attn.layers.rotary import apply_rotary_emb
 
 USE_REF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_REF', '0').lower() in ('1', 'true', 'yes')
+USE_SPLIT = os.environ.get('USE_SPLIT', '0').lower() in ('1', 'true', 'yes')
 
 def fwd(q,
         k,
@@ -214,7 +215,12 @@ def bwd(
     else:
         if DEBUG:
             print("Using Triton implementation")
-        dq_triton, dk_triton, dv_triton, delta_triton, _, _ = attention_prefill_backward_triton_impl(
+        if USE_SPLIT:
+            bwd = attention_prefill_backward_triton_split_impl
+        else:
+            bwd = attention_prefill_backward_triton_impl
+        # dq_triton, dk_triton, dv_triton, delta_triton, _, _ = attention_prefill_backward_triton_split_impl(
+        dq_triton, dk_triton, dv_triton, delta_triton, _, _ = bwd(
             dout,
             q,
             k,
@@ -462,7 +468,12 @@ def varlen_bwd(
     else:
         if DEBUG:
             print("Using Triton implementation")
-        dq_triton, dk_triton, dv_triton, delta_triton, _, _ = attention_prefill_backward_triton_impl(
+        if USE_SPLIT:
+            bwd = attention_prefill_backward_triton_split_impl
+        else:
+            bwd = attention_prefill_backward_triton_impl
+        # dq_triton, dk_triton, dv_triton, delta_triton, _, _ = attention_prefill_backward_triton_split_impl(
+        dq_triton, dk_triton, dv_triton, delta_triton, _, _ = bwd(
             dout,
             q,
             k,
