@@ -883,6 +883,13 @@ def attention_prefill_backward_triton_split_impl(
     softmax_lse = softmax_lse.contiguous()  # (batch, head_q, seqlen_q)
     do = do.contiguous()
 
+    if dq is None:
+        dq = torch.zeros_like(q)
+    if dk is None:
+        dk = torch.zeros_like(k)
+    if dv is None:
+        dv = torch.zeros_like(v)
+
     # get strides and shape
     batch, nheads_q, nheads_k, head_size, max_seqlen_q, max_seqlen_k = \
         get_shape_from_layout(
@@ -956,12 +963,8 @@ def attention_prefill_backward_triton_split_impl(
                     dropout_p, batch, nheads_q,
                     cu_seqlens_q, cu_seqlens_k, philox_seed
                 )
-        stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn = ( \
-            dropout_mask.stride(0),
-            dropout_mask.stride(1),
-            dropout_mask.stride(2),
-            dropout_mask.stride(3)
-        )
+        stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn = \
+            dropout_mask.stride()
 
     grid_dkdv = ((max_seqlen_k + BLOCK_N1 - 1) // BLOCK_N1, batch, nheads_k)
     grid_dq = ((max_seqlen_q + BLOCK_M2 - 1) // BLOCK_M2, batch, nheads_k)
