@@ -1,7 +1,7 @@
 import torch
 import pytest
 
-from .utils import DEBUG, DEBUG_TRITON, DEBUG_TRITON_DETAIL, MetaData, get_input_shapes, input_helper, varlen_input_helper, compute_alibi_tensor_ref
+from .utils import DEBUG, DEBUG_TRITON, DEBUG_TRITON_DETAIL, MetaData, get_input_shapes, input_helper, varlen_input_helper, compute_alibi_tensor_ref, get_arch, arch_supports_fp8
 from .interface_torch import attention_prefill, attention_decode
 from .fwd_ref import attention_forward_pytorch_ref_impl
 from .fwd_prefill import attention_prefill_forward_triton_impl
