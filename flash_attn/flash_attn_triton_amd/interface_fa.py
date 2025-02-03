@@ -2,6 +2,7 @@ import torch
 import os
 from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
+from .bwd_prefill_split import attention_prefill_backward_triton_split_impl
 from .fwd_decode import attention_decode_forward_triton_impl
 from .fwd_ref import attention_forward_pytorch_ref_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
@@ -470,7 +471,6 @@ def varlen_bwd(
             bwd = attention_prefill_backward_triton_impl
         else:
             bwd = attention_prefill_backward_triton_split_impl
-        # dq_triton, dk_triton, dv_triton, delta_triton, _, _ = attention_prefill_backward_triton_split_impl(
         dq_triton, dk_triton, dv_triton, delta_triton, _, _ = bwd(
             dout,
             q,
