@@ -53,9 +53,9 @@ def _bwd_preprocess(
     if PADDED_HEAD:
         mask_md &= offs_k[None, :] < ACTUAL_HEAD_DIM
     # compute pointers
-    offs_o = offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok
-    out_ptrs = O + offs_o
-    do_ptrs = DO + offs_o
+    offs_do = offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok
+    out_ptrs = O + offs_do
+    do_ptrs = DO + offs_do
     # load
     o = tl.load(out_ptrs, mask=mask_md, other=0.0).to(tl.float32)
     do = tl.load(do_ptrs, mask=mask_md, other=0.0).to(tl.float32)
@@ -70,7 +70,8 @@ def _bwd_preprocess(
 def _bwd_dkdv_inner(
     dk, dv,  # output
     Q, k, v, DO, M, D, sm_scale,  # input tensor
-    stride_qm, stride_qk,  # shared by Q/DO.
+    stride_qm, stride_qk,
+    stride_dom, stride_dok,
     stride_dropoutm, stride_dropoutn,  #
     stride_deltam,
     BLOCK_M: tl.constexpr,  # 16
@@ -99,7 +100,7 @@ def _bwd_dkdv_inner(
     # qT_ptrs = (1, BLOCK_M) + (HEAD_DIM, 1), transpose of q
     qT_ptrs = Q + offs_m[None, :] * stride_qm + offs_k[:, None] * stride_qk
     # do_ptrs = (BLOCK_M, 1) + (1, HEAD_DIM), NOT transposed
-    do_ptrs = DO + offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk
+    do_ptrs = DO + offs_m[:, None] * stride_dom + offs_k[None, :] * stride_dok
     # BLOCK_N must be a multiple of BLOCK_M, otherwise the code wouldn't work.
     tl.static_assert(BLOCK_N % BLOCK_M == 0)
     curr_m = start_m
@@ -186,18 +187,20 @@ def _bwd_dkdv_inner(
         # Increment pointers.
         curr_m += step_m
         qT_ptrs += step_m * stride_qm
-        do_ptrs += step_m * stride_qm
+        do_ptrs += step_m * stride_dom
     return dk, dv
 
 
 # grid = (max_seqlen_k // BLOCK_N, batch, nheads_q)
 @triton.jit
 def _bwd_kernel_dkdv(
-    Q, K, V, sm_scale, Out, DO, DK, DV,
+    Q, K, V, sm_scale, DO, DK, DV,
     M, Delta,
     stride_qb, stride_qh, stride_qm, stride_qk,
     stride_kb, stride_kh, stride_kn, stride_kk,
+    stride_dkb, stride_dkh, stride_dkn, stride_dkk,
     stride_deltab, stride_deltah, stride_deltam,
+    stride_dob, stride_doh, stride_dom, stride_dok,
     stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
     HQ, HK,
     cu_seqlens_q, cu_seqlens_k,
@@ -295,7 +298,8 @@ def _bwd_kernel_dkdv(
         # offset input and output tensor by batch and Q/K heads
         adj_q = bid * stride_qb + hqid * stride_qh + q_start * stride_qm
         Q_ptr = Q + adj_q
-        DO_ptr = DO + adj_q
+        adj_do = bid * stride_dob + hqid * stride_doh + q_start * stride_dom
+        DO_ptr = DO + adj_do
         adj_delta = bid * stride_deltab + hqid * stride_deltah + q_start * stride_deltam
         M_ptr = M + adj_delta
         Delta_ptr = Delta + adj_delta
@@ -325,6 +329,7 @@ def _bwd_kernel_dkdv(
             dk, dv,  # output tensors
             Q_ptr, k, v, DO_ptr, M_ptr, Delta_ptr, sm_scale, # input tensors
             stride_qm, stride_qk,  # strides for q
+            stride_dom, stride_dok,  # strides for o
             stride_dropoutm, stride_dropoutn,  # strides for dropout
             stride_deltam,
             MASK_BLOCK_M, BLOCK_N,  # block dim
@@ -349,6 +354,7 @@ def _bwd_kernel_dkdv(
             dk, dv,  # output tensors
             Q_ptr, k, v, DO_ptr, M_ptr, Delta_ptr, sm_scale, # input tensors
             stride_qm, stride_qk,  # strides for q
+            stride_dom, stride_dok,  # strides for o
             stride_dropoutm, stride_dropoutn,  # strides for dropout
             stride_deltam,
             BLOCK_M, BLOCK_N,  # block dim
@@ -364,9 +370,11 @@ def _bwd_kernel_dkdv(
         )
 
     # Write back dV and dK.
-    tl.store(DV + adj_kv + offs_kv, dv, mask=mask_kv)
+    adj_dkdv = bid * stride_dkb + hkid * stride_kh + k_start * stride_dkn
+    offs_dkdv = offs_n[:, None] * stride_dkn + offs_k[None, :] * stride_dkk
+    tl.store(DV + adj_dkdv + offs_dkdv, dv, mask=mask_kv)
     dk *= sm_scale
-    tl.store(DK + adj_kv + offs_kv, dk, mask=mask_kv)
+    tl.store(DK + adj_dkdv + offs_dkdv, dk, mask=mask_kv)
 
 
 # the main inner-loop logic for computing dQ
@@ -374,7 +382,7 @@ def _bwd_kernel_dkdv(
 def _bwd_dq_inner(
     dq,  # output
     q, K, V, do, m, Delta, sm_scale, # input
-    # shared by Q/K/V/DO.
+    # shared by Q/K/V.
     stride_qm, stride_qk, stride_kn,
     stride_dropoutm, stride_dropoutn,  # stride for dropout
     stride_deltam,
@@ -476,11 +484,13 @@ def _bwd_dq_inner(
 # grid = (tl.cdiv(max_seqlen_q // BLOCK_M2), batch, nheads_q)
 @triton.jit
 def _bwd_kernel_dq(
-    Q, K, V, sm_scale, Out, DO, DQ,
+    Q, K, V, sm_scale, DO, DQ,
     M, Delta,
     stride_qb, stride_qh, stride_qm, stride_qk,
     stride_kb, stride_kh, stride_kn, stride_kk,
+    stride_dqb, stride_dqh, stride_dqm, stride_dqk,
     stride_deltab, stride_deltah, stride_deltam,
+    stride_dob, stride_doh, stride_dom, stride_dok,
     stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
     HQ, HK,
     cu_seqlens_q, cu_seqlens_k,
@@ -540,6 +550,7 @@ def _bwd_kernel_dq(
         mask_k = offs_k < ACTUAL_HEAD_DIM
         mask_q &= mask_k[None, :]
     offs_q = offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk
+    offs_do = offs_m[:, None] * stride_dom + offs_k[None, :] * stride_dok
     adj_kv = bid * stride_kb + hkid * stride_kh + k_start * stride_kn
     K +=  adj_kv
     V +=  adj_kv
@@ -554,6 +565,7 @@ def _bwd_kernel_dq(
         if DEBUG_TRITON: print(f"delta_qk: {delta_qk}; end_n: {end_n}")  # noqa: E701
         # offset input and output tensor by batch and Q/K heads
         adj_q = bid * stride_qb + hqid * stride_qh + q_start * stride_qm
+        adj_do = bid * stride_dob + hqid * stride_doh + q_start * stride_dom
         adj_delta = \
             bid * stride_deltab + hqid * stride_deltah + q_start * stride_deltam
         Delta_ptr = Delta + adj_delta
@@ -570,7 +582,7 @@ def _bwd_kernel_dq(
                 dropout_mask + bid * stride_dropoutb + hqid * stride_dropouth
 
         q = tl.load(Q + adj_q + offs_q, mask=mask_q, other=0.0)
-        do = tl.load(DO + adj_q + offs_q, mask=mask_q, other=0.0)
+        do = tl.load(DO + adj_do + offs_do, mask=mask_q, other=0.0)
         m = tl.load(M + adj_delta + offs_m * stride_deltam,
                     mask=offs_m < seqlen_q)
         m = m[:, None]
@@ -627,18 +639,21 @@ def _bwd_kernel_dq(
             DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
         # Write back dQ.
-        offs_dq = offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk
+        adj_dq = bid * stride_dqb + hqid * stride_dqh + q_start * stride_dqm
+        offs_dq = offs_m[:, None] * stride_dqm + offs_k[None, :] * stride_dqk
         dq *= sm_scale
-        tl.store(DQ + adj_q + offs_dq, dq, mask=mask_q)
+        tl.store(DQ + adj_dq + offs_dq, dq, mask=mask_q)
 
 
 @triton.jit
 def _bwd_kernel_dkdv_noncausal(
-    Q, K, V, sm_scale, Out, DO, DK, DV,
+    Q, K, V, sm_scale, DO, DK, DV,
     M, Delta,
     stride_qb, stride_qh, stride_qm, stride_qk,
     stride_kb, stride_kh, stride_kn, stride_kk,
+    stride_dkb, stride_dkh, stride_dkn, stride_dkk,
     stride_deltab, stride_deltah, stride_deltam,
+    stride_dob, stride_doh, stride_dom, stride_dok,
     stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
     HQ, HK,
     cu_seqlens_q, cu_seqlens_k,
@@ -699,7 +714,8 @@ def _bwd_kernel_dkdv_noncausal(
         # offset input and output tensor by batch and Q/K heads
         adj_q = bid * stride_qb + hqid * stride_qh + q_start * stride_qm
         Q_ptr = Q + adj_q
-        DO_ptr = DO + adj_q
+        adj_do = bid * stride_dob + hqid * stride_doh + q_start * stride_dom
+        DO_ptr = DO + adj_do
         adj_delta = bid * stride_deltab + hqid * stride_deltah + q_start * stride_deltam
         M_ptr = M + adj_delta
         Delta_ptr = Delta + adj_delta
@@ -721,6 +737,7 @@ def _bwd_kernel_dkdv_noncausal(
             dk, dv,  # output tensors
             Q_ptr, k, v, DO_ptr, M_ptr, Delta_ptr, sm_scale, # input tensors
             stride_qm, stride_qk,  # strides for q
+            stride_dom, stride_dok,  # strides for o
             stride_dropoutm, stride_dropoutn,  # strides for dropout
             stride_deltam,
             BLOCK_M, BLOCK_N,  # block dim
@@ -736,18 +753,22 @@ def _bwd_kernel_dkdv_noncausal(
         )
 
     # Write back dV and dK.
-    tl.store(DV + adj_kv + offs_kv, dv, mask=mask_kv)
+    adj_dkdv = bid * stride_dkb + hkid * stride_kh + k_start * stride_dkn
+    offs_dkdv = offs_n[:, None] * stride_dkn + offs_k[None, :] * stride_dkk
+    tl.store(DV + adj_dkdv + offs_dkdv, dv, mask=mask_kv)
     dk *= sm_scale
-    tl.store(DK + adj_kv + offs_kv, dk, mask=mask_kv)
+    tl.store(DK + adj_dkdv + offs_dkdv, dk, mask=mask_kv)
 
 
 @triton.jit
 def _bwd_kernel_dq_noncausal(
-    Q, K, V, sm_scale, Out, DO, DQ,
+    Q, K, V, sm_scale, DO, DQ,
     M, Delta,
     stride_qb, stride_qh, stride_qm, stride_qk,
     stride_kb, stride_kh, stride_kn, stride_kk,
+    stride_dqb, stride_dqh, stride_dqm, stride_dqk,
     stride_deltab, stride_deltah, stride_deltam,
+    stride_dob, stride_doh, stride_dom, stride_dok,
     stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
     HQ, HK,
     cu_seqlens_q, cu_seqlens_k,
@@ -793,6 +814,7 @@ def _bwd_kernel_dq_noncausal(
         mask_k = offs_k < ACTUAL_HEAD_DIM
         mask_q &= mask_k[None, :]
     offs_q = offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk
+    offs_do = offs_m[:, None] * stride_dom + offs_k[None, :] * stride_dok
     adj_kv = bid * stride_kb + hkid * stride_kh + k_start * stride_kn
     K +=  adj_kv
     V +=  adj_kv
@@ -801,6 +823,7 @@ def _bwd_kernel_dq_noncausal(
     for hqid in range(hkid * GROUP_SIZE, hkid * GROUP_SIZE + GROUP_SIZE):
         # offset input and output tensor by batch and Q/K heads
         adj_q = bid * stride_qb + hqid * stride_qh + q_start * stride_qm
+        adj_do = bid * stride_dob + hqid * stride_doh + q_start * stride_dom
         adj_delta = \
             bid * stride_deltab + hqid * stride_deltah + q_start * stride_deltam
         Delta_ptr = Delta + adj_delta
@@ -817,7 +840,7 @@ def _bwd_kernel_dq_noncausal(
                 dropout_mask + bid * stride_dropoutb + hqid * stride_dropouth
 
         q = tl.load(Q + adj_q + offs_q, mask=mask_q, other=0.0)
-        do = tl.load(DO + adj_q + offs_q, mask=mask_q, other=0.0)
+        do = tl.load(DO + adj_do + offs_do, mask=mask_q, other=0.0)
         m = tl.load(M + adj_delta + offs_m * stride_deltam,
                     mask=offs_m < seqlen_q)
         m = m[:, None]
@@ -846,9 +869,10 @@ def _bwd_kernel_dq_noncausal(
             DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
         # Write back dQ.
-        offs_dq = offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk
+        adj_dq = bid * stride_dqb + hqid * stride_dqh + q_start * stride_dqm
+        offs_dq = offs_m[:, None] * stride_dqm + offs_k[None, :] * stride_dqk
         dq *= sm_scale
-        tl.store(DQ + adj_q + offs_dq, dq, mask=mask_q)
+        tl.store(DQ + adj_dq + offs_dq, dq, mask=mask_q)
 
 
 def attention_prefill_backward_triton_split_impl(
@@ -876,13 +900,6 @@ def attention_prefill_backward_triton_split_impl(
     DEBUG_TRITON: bool = False,
     DEBUG_TRITON_DETAIL: bool = False,
 ):
-    # make contigious
-    q = q.contiguous()
-    k = k.contiguous()
-    v = v.contiguous()
-    softmax_lse = softmax_lse.contiguous()  # (batch, head_q, seqlen_q)
-    do = do.contiguous()
-
     if dq is None:
         dq = torch.zeros_like(q)
     if dk is None:
@@ -897,12 +914,16 @@ def attention_prefill_backward_triton_split_impl(
             cu_seqlens_q, cu_seqlens_k,
             max_seqlen_q, max_seqlen_k
         )
-    q_strides, k_strides, v_strides, o_strides = \
+    q_strides, k_strides, _, o_strides = \
         get_strides_from_layout(q, k, v, o, layout)
     stride_qb, stride_qh, stride_qm, stride_qk =  q_strides
     stride_kb, stride_kh, stride_kn, stride_kk = k_strides
-    stride_vb, stride_vh, stride_vn, stride_vk = v_strides
     stride_ob, stride_oh, stride_om, stride_ok = o_strides
+    dq_strides, dk_strides, _, do_strides = \
+        get_strides_from_layout(dq, dk, dv, do, layout)
+    stride_dqb, stride_dqh, stride_dqm, stride_dqk =  dq_strides
+    stride_dkb, stride_dkh, stride_dkn, stride_dkk = dk_strides
+    stride_dob, stride_doh, stride_dom, stride_dok = do_strides
     IS_VARLEN = layout == "thd"
     use_dropout = (dropout_p > 0.0)
 
@@ -971,11 +992,13 @@ def attention_prefill_backward_triton_split_impl(
     if causal:
         if DEBUG_TRITON: print(f"_bwd_kernel_dkdv: grid = {grid_dkdv}, block_size = ({BLOCK_M1, BLOCK_N1})", )  # noqa: E701
         _bwd_kernel_dkdv[grid_dkdv](
-            q, k, v, sm_scale, o, do, dk, dv,
+            q, k, v, sm_scale, do, dk, dv,
             softmax_lse, delta,
             stride_qb, stride_qh, stride_qm, stride_qk,
             stride_kb, stride_kh, stride_kn, stride_kk,
+            stride_dkb, stride_dkh, stride_dkn, stride_dkk,
             stride_deltab, stride_deltah, stride_deltam,
+            stride_dob, stride_doh, stride_dom, stride_dok,
             stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
             nheads_q, nheads_k,
             cu_seqlens_q, cu_seqlens_k,
@@ -995,11 +1018,13 @@ def attention_prefill_backward_triton_split_impl(
 
         if DEBUG_TRITON: print(f"\n_bwd_kernel_dq: grid = {grid_dq}, block_size = ({BLOCK_M2, BLOCK_N2})", )  # noqa: E701
         _bwd_kernel_dq[grid_dq](
-            q, k, v, sm_scale, o, do, dq,
+            q, k, v, sm_scale, do, dq,
             softmax_lse, delta,
             stride_qb, stride_qh, stride_qm, stride_qk,
             stride_kb, stride_kh, stride_kn, stride_kk,
+            stride_dqb, stride_dqh, stride_dqm, stride_dqk,
             stride_deltab, stride_deltah, stride_deltam,
+            stride_dob, stride_doh, stride_dom, stride_dok,
             stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
             nheads_q, nheads_k,
             cu_seqlens_q, cu_seqlens_k,
@@ -1018,11 +1043,13 @@ def attention_prefill_backward_triton_split_impl(
         )
     else:
         _bwd_kernel_dkdv_noncausal[grid_dkdv](
-            q, k, v, sm_scale, o, do, dk, dv,
+            q, k, v, sm_scale, do, dk, dv,
             softmax_lse, delta,
             stride_qb, stride_qh, stride_qm, stride_qk,
             stride_kb, stride_kh, stride_kn, stride_kk,
+            stride_dkb, stride_dkh, stride_dkn, stride_dkk,
             stride_deltab, stride_deltah, stride_deltam,
+            stride_dob, stride_doh, stride_dom, stride_dok,
             stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
             nheads_q, nheads_k,
             cu_seqlens_q, cu_seqlens_k,
@@ -1041,11 +1068,13 @@ def attention_prefill_backward_triton_split_impl(
         )
 
         _bwd_kernel_dq_noncausal[grid_dq](
-            q, k, v, sm_scale, o, do, dq,
+            q, k, v, sm_scale, do, dq,
             softmax_lse, delta,
             stride_qb, stride_qh, stride_qm, stride_qk,
             stride_kb, stride_kh, stride_kn, stride_kk,
+            stride_dqb, stride_dqh, stride_dqm, stride_dqk,
             stride_deltab, stride_deltah, stride_deltam,
+            stride_dob, stride_doh, stride_dom, stride_dok,
             stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
             nheads_q, nheads_k,
             cu_seqlens_q, cu_seqlens_k,
