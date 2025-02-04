@@ -901,11 +901,14 @@ def attention_prefill_backward_triton_split_impl(
     DEBUG_TRITON_DETAIL: bool = False,
 ):
     if dq is None:
-        dq = torch.zeros_like(q)
+        dq = torch.empty_like(q)
     if dk is None:
-        dk = torch.zeros_like(k)
+        dk = torch.empty_like(k)
     if dv is None:
-        dv = torch.zeros_like(v)
+        dv = torch.empty_like(v)
+    dq.zero_()
+    dk.zero_()
+    dv.zero_()
 
     # get strides and shape
     batch, nheads_q, nheads_k, head_size, max_seqlen_q, max_seqlen_k = \
