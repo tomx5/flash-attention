@@ -7,6 +7,24 @@
 #include "fmha_bwd.hpp"
 #include "mask.hpp"
 
+#include <iostream>
+
+bool should_print_debug() {
+    const char* debug_env = std::getenv("FMHA_DEBUG");
+    return debug_env != nullptr && std::string(debug_env) == "1";
+}
+
+void print_tensor_info(const char* name, const at::Tensor& tensor) {
+    if (!should_print_debug()) return;
+    if (tensor.defined()) {
+        std::cout << name << " ptr: " << tensor.data_ptr()
+                 << " size: " << tensor.sizes()
+                 << " stride: " << tensor.strides() << std::endl;
+    } else {
+        std::cout << name << ": undefined" << std::endl;
+    }
+}
+
 fmha_bwd_traits get_ck_fmha_bwd_traits(const mask_info &mask,
                                        std::string dtype,
                                        int head_size,
@@ -121,6 +139,85 @@ fmha_bwd_args get_ck_fmha_bwd_args(const mask_info &mask,
         alibi_slopes_ptr = alibi_slopes.data_ptr();
         // alibi_slopes:(batch_size, nheads) or (nhead)
         stride_alibi_slopes = alibi_slopes.dim() == 2 ? alibi_slopes.stride(0) : 0;
+    }
+
+    if (should_print_debug()) {
+        // Print debug information
+        std::cout << "\n=== FMHA Backward Arguments ===" << std::endl;
+
+        // Print tensor information
+        print_tensor_info("q", q);
+        print_tensor_info("k", k);
+        print_tensor_info("v", v);
+        print_tensor_info("out", out);
+        print_tensor_info("softmax_lse", softmax_lse);
+        print_tensor_info("dout", dout);
+        print_tensor_info("d", d);
+        print_tensor_info("dq", dq);
+        print_tensor_info("dk", dk);
+        print_tensor_info("dv", dv);
+        print_tensor_info("dq_acc", dq_acc);
+
+        // Print dimensions
+        std::cout << "\n=== Dimensions ===" << std::endl;
+        std::cout << "seqlen_q: " << seqlen_q << std::endl;
+        std::cout << "seqlen_k: " << seqlen_k << std::endl;
+        std::cout << "b (batch_size): " << b << std::endl;
+        std::cout << "hdim: " << hdim << std::endl;
+        std::cout << "h (num_heads): " << h << std::endl;
+        std::cout << "h_k (num_heads_k): " << h_k << std::endl;
+
+        // Print strides
+        std::cout << "\n=== Strides ===" << std::endl;
+        std::cout << "stride_q: " << stride_q << std::endl;
+        std::cout << "stride_k: " << stride_k << std::endl;
+        std::cout << "stride_v: " << stride_v << std::endl;
+        std::cout << "stride_alibi_slopes: " << stride_alibi_slopes << std::endl;
+        std::cout << "stride_o: " << stride_o << std::endl;
+        std::cout << "stride_do: " << stride_do << std::endl;
+        std::cout << "stride_dq_acc: " << stride_dq_acc << std::endl;
+        std::cout << "stride_dq: " << stride_dq << std::endl;
+        std::cout << "stride_dk: " << stride_dk << std::endl;
+        std::cout << "stride_dv: " << stride_dv << std::endl;
+
+        // Print nhead strides
+        std::cout << "\n=== Nhead Strides ===" << std::endl;
+        std::cout << "nhead_stride_q: " << nhead_stride_q << std::endl;
+        std::cout << "nhead_stride_k: " << nhead_stride_k << std::endl;
+        std::cout << "nhead_stride_v: " << nhead_stride_v << std::endl;
+        std::cout << "nhead_stride_o: " << nhead_stride_o << std::endl;
+        std::cout << "nhead_stride_do: " << nhead_stride_do << std::endl;
+        std::cout << "nhead_stride_lse: " << nhead_stride_lse << std::endl;
+        std::cout << "nhead_stride_dq_acc: " << nhead_stride_dq_acc << std::endl;
+        std::cout << "nhead_stride_dq: " << nhead_stride_dq << std::endl;
+        std::cout << "nhead_stride_dk: " << nhead_stride_dk << std::endl;
+        std::cout << "nhead_stride_dv: " << nhead_stride_dv << std::endl;
+
+        // Print batch strides
+        std::cout << "\n=== Batch Strides ===" << std::endl;
+        std::cout << "batch_stride_q: " << batch_stride_q << std::endl;
+        std::cout << "batch_stride_k: " << batch_stride_k << std::endl;
+        std::cout << "batch_stride_v: " << batch_stride_v << std::endl;
+        std::cout << "batch_stride_o: " << batch_stride_o << std::endl;
+        std::cout << "batch_stride_do: " << batch_stride_do << std::endl;
+        std::cout << "batch_stride_lse: " << batch_stride_lse << std::endl;
+        std::cout << "batch_stride_dq_acc: " << batch_stride_dq_acc << std::endl;
+        std::cout << "batch_stride_dq: " << batch_stride_dq << std::endl;
+        std::cout << "batch_stride_dk: " << batch_stride_dk << std::endl;
+        std::cout << "batch_stride_dv: " << batch_stride_dv << std::endl;
+
+        // Print other parameters
+        std::cout << "\n=== Other Parameters ===" << std::endl;
+        std::cout << "split_stride_dq_acc: " << split_stride_dq_acc << std::endl;
+        std::cout << "mask.left: " << mask.left << std::endl;
+        std::cout << "mask.right: " << mask.right << std::endl;
+        std::cout << "mask.type: " << static_cast<int>(mask.type) << std::endl;
+        std::cout << "p_dropout: " << p_dropout << std::endl;
+        std::cout << "p_undrop: " << p_undrop << std::endl;
+        std::cout << "drop_seed: " << drop_seed << std::endl;
+        std::cout << "drop_offset: " << drop_offset << std::endl;
+        std::cout << "softmax_scale: " << softmax_scale << std::endl;
+        std::cout << "===========================" << std::endl;
     }
 
     return fmha_bwd_args{q.data_ptr(),
