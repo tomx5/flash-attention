@@ -242,7 +242,7 @@ def bwd(
             dropout_p,
             philox_seed,
             philox_offset,
-            False,
+            True,
         )
         delta = delta_triton
 
@@ -460,7 +460,7 @@ def varlen_bwd(
             dropout_p,
             philox_seed,
             philox_offset,
-            False,
+            True,
         )
         dq.copy_(dq_ref)
         dk.copy_(dk_ref)
