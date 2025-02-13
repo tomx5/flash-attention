@@ -32,6 +32,7 @@ fmha_bwd_traits get_ck_fmha_bwd_traits(const mask_info &mask,
                                        bool enable_alibi,
                                        bool deterministic)
 {
+    const char* use_bwd_v3 = std::getenv("USE_BWD_V3");
     return fmha_bwd_traits{head_size,
                            head_size,
                            dtype,
@@ -42,7 +43,7 @@ fmha_bwd_traits get_ck_fmha_bwd_traits(const mask_info &mask,
                            has_dropout,
                            false, // s_randval
                            deterministic,
-                           true, // uses_ext_asm
+                           use_bwd_v3 != nullptr && std::string(use_bwd_v3) == "1",
                            true, // is_v3_atomic_fp32
                            1}; // how_v3_bf16_cvt 0:RTNE; 1:RTNA; 2:RTZ
 }
