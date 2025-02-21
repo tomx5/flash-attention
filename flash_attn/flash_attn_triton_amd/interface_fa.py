@@ -46,10 +46,6 @@ def fwd(q,
         print("softcap:", softcap)
         print("return_softmax:", return_softmax)
 
-    # ensure q, k, and v require gradients
-    q.requires_grad_(True)
-    k.requires_grad_(True)
-    v.requires_grad_(True)
 
     if o is None:
         o = torch.empty_like(q)
@@ -186,11 +182,6 @@ def bwd(
         print("gen_:", gen_)
         print("rng_state:", rng_state)
 
-    # ensure q, k, and v require gradients
-    q.requires_grad_(True)
-    k.requires_grad_(True)
-    v.requires_grad_(True)
-
     if dropout_p > 0.0:
         philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
     else:
@@ -310,11 +301,6 @@ def varlen_fwd(
         print("window_size_left:", window_size_left)
         print("window_size_right:", window_size_right)
         print("gen_:", gen_)
-
-    # ensure q, k, and v require gradients
-    q.requires_grad_(True)
-    k.requires_grad_(True)
-    v.requires_grad_(True)
 
     if o is None:
         o = torch.empty_like(q)
@@ -455,11 +441,6 @@ def varlen_bwd(
         print("gen_:", gen_)
         print("rng_state:", rng_state)
 
-    # ensure q, k, and v require gradients
-    q.requires_grad_(True)
-    k.requires_grad_(True)
-    v.requires_grad_(True)
-
     if dropout_p > 0.0:
         philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
     else:
@@ -558,11 +539,6 @@ def fwd_kvcache(
         softcap,
         rotary_interleaved,
         num_splits):
-
-    # ensure q, k, and v require gradients
-    q.requires_grad_(True)
-    k.requires_grad_(True)
-    v.requires_grad_(True)
 
     if out is None:
         out = torch.empty_like(q)
