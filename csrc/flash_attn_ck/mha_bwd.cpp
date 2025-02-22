@@ -7,22 +7,65 @@
 #include "fmha_bwd.hpp"
 #include "mask.hpp"
 
-#include <iostream>
+#include <cstdlib> // For std::getenv
+#include <iostream>  // For std::cerr
+#include <stdexcept> // For std::invalid_argument, std::out_of_range
+#include <string>
 
-bool should_print_debug() {
-    const char* debug_env = std::getenv("FMHA_DEBUG");
-    return debug_env != nullptr && std::string(debug_env) == "1";
+template <typename T> T get_env_var(const char *var_name, T default_value) {
+  const char *var_value_str = std::getenv(var_name);
+  if (var_value_str == nullptr) {
+    return default_value;
+  }
+  try {
+    if constexpr (std::is_same_v<T, bool>) {
+      std::string value_str = var_value_str;
+      std::transform(value_str.begin(), value_str.end(), value_str.begin(),
+                     ::tolower);
+      if (value_str == "true" || value_str == "1") {
+        return true;
+      } else if (value_str == "false" || value_str == "0") {
+        return false;
+      } else {
+        throw std::invalid_argument("Invalid boolean value");
+      }
+    } else {
+      if constexpr (std::is_same_v<T, std::string>) {
+        return std::string(var_value_str);
+      } else {
+        if constexpr (std::is_same_v<T, int>) {
+          return static_cast<T>(std::stoi(var_value_str));
+        } else {
+          return static_cast<T>(std::stod(var_value_str));
+        }
+      }
+    }
+  } catch (const std::invalid_argument &e) {
+    std::cerr << "Invalid value for environment variable " << var_name
+              << ". Using default value " << default_value << "." << std::endl;
+  } catch (const std::out_of_range &e) {
+    std::cerr << "Environment variable " << var_name
+              << " value is out of range. Using default value " << default_value
+              << "." << std::endl;
+  } catch (...) {
+    std::cerr << "Error reading environment variable " << var_name
+              << ". Using default value " << default_value << "." << std::endl;
+  }
+  return default_value;
 }
 
-void print_tensor_info(const char* name, const at::Tensor& tensor) {
-    if (!should_print_debug()) return;
-    if (tensor.defined()) {
-        std::cout << name << " ptr: " << tensor.data_ptr()
-                 << " size: " << tensor.sizes()
-                 << " stride: " << tensor.strides() << std::endl;
-    } else {
-        std::cout << name << ": undefined" << std::endl;
-    }
+bool should_print_debug() { return get_env_var("FMHA_DEBUG", false); }
+
+void print_tensor_info(const char *name, const at::Tensor &tensor) {
+  if (!should_print_debug())
+    return;
+  if (tensor.defined()) {
+    std::cout << name << " ptr: " << tensor.data_ptr()
+              << " size: " << tensor.sizes() << " stride: " << tensor.strides()
+              << std::endl;
+  } else {
+    std::cout << name << ": undefined" << std::endl;
+  }
 }
 
 fmha_bwd_traits get_ck_fmha_bwd_traits(const mask_info &mask,
@@ -32,7 +75,6 @@ fmha_bwd_traits get_ck_fmha_bwd_traits(const mask_info &mask,
                                        bool enable_alibi,
                                        bool deterministic)
 {
-    const char* use_bwd_v3 = std::getenv("USE_BWD_V3");
     return fmha_bwd_traits{head_size,
                            head_size,
                            dtype,
@@ -43,9 +85,9 @@ fmha_bwd_traits get_ck_fmha_bwd_traits(const mask_info &mask,
                            has_dropout,
                            false, // s_randval
                            deterministic,
-                           use_bwd_v3 != nullptr && std::string(use_bwd_v3) == "1",
+                           get_env_var("FMHA_USE_BWD_V3", true),
                            true, // is_v3_atomic_fp32
-                           1}; // how_v3_bf16_cvt 0:RTNE; 1:RTNA; 2:RTZ
+                           get_env_var("FMHA_V3_BF16_CVT", 1)}; // how_v3_bf16_cvt 0:RTNE; 1:RTNA; 2:RTZ
 }
 
 fmha_bwd_args get_ck_fmha_bwd_args(const mask_info &mask,
