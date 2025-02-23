@@ -1,5 +1,6 @@
 import csv
 import math
+from typing import Optional
 import torch
 import os
 import random
@@ -373,6 +374,31 @@ def cast_to_fp8(
         if cu_seqlens is None:
             raise ValueError("cu_seqlens must be provided for varlen (thd) layout")
         return cast_varlen_to_fp8(x, fp8_dtype, cu_seqlens, clamp_val)
+    else:
+        raise ValueError(f"Unknown layout: {layout}")
+
+def decast_fp8(x_fp8: torch.Tensor,
+                descale_factor: torch.Tensor,
+                original_dtype: torch.dtype,
+                layout: str,
+                cu_seqlens: Optional[torch.Tensor] = None) -> torch.Tensor:
+    # convert fp8 tensor back to the desired original dtype
+    x_orig = x_fp8.to(original_dtype)
+    
+    if layout in ("bshd", "bhsd"):
+        return x_orig * descale_factor
+    elif layout == "thd":
+        if cu_seqlens is None:
+            raise ValueError("cu_seqlens must be provided for varlen layout ('thd')")
+        x_out = x_orig.clone()
+        batch = cu_seqlens.shape[0] - 1
+        for i in range(batch):
+            start = int(cu_seqlens[i].item())
+            end = int(cu_seqlens[i + 1].item())
+            factor = descale_factor[i].unsqueeze(0).unsqueeze(-1)
+            x_out[start:end] = x_out[start:end] * factor
+        return x_out
+
     else:
         raise ValueError(f"Unknown layout: {layout}")
 

@@ -145,7 +145,7 @@ if IS_ROCM:
         subprocess.run(["git", "submodule", "update", "--init", "csrc/composable_kernel"])
 else:
     if IS_ROCM:
-        if not USE_TRITON_ROCM:
+        if not SKIP_CK_BUILD:
             assert (
                 os.path.exists("csrc/composable_kernel/example/ck_tile/01_fmha/generate.py")
             ), "csrc/composable_kernel is missing, please use source distribution or git clone"
