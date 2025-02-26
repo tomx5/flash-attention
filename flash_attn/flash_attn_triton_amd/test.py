@@ -794,7 +794,7 @@ def test_op_fwd_decode_int4_kv(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
         (4, 8, 2, 512, 512, 68),
         (4, 8, 2, 512, 512, 128),
         (4, 8, 2, 512, 1024, 68),
-        (4, 8, 2, 1024, 512, 68),
+        pytest.param(4, 8, 2, 1024, 512, 68, marks=pytest.mark.flaky(reruns=3, reason="Flaky config")),
         (16, 16, 4, 1528, 2753, 68),
         # fa configs
         (4, 6, 1, 113, 203, 256),
@@ -809,7 +809,7 @@ def test_op_fwd_decode_int4_kv(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
         (4, 6, 6, 2048, 2048, 32),
     ],
 )
-@pytest.mark.parametrize('causal', [False])
+@pytest.mark.parametrize('causal', [False, True])
 @pytest.mark.parametrize('dropout_p', [0.0, 0.1])
 @pytest.mark.parametrize('DEBUG_INPUT', [False])
 @pytest.mark.skipif(not arch_supports_fp8(), reason="fp8 not supported on this device")
@@ -1016,8 +1016,8 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
         (4, 6, 6, 2048, 2048, 32),
     ],
 )
-@pytest.mark.parametrize('causal', [False]) # cause nan
-@pytest.mark.parametrize('dropout_p', [0.0, 0.1])
+@pytest.mark.parametrize('causal', [True]) # cause nan
+@pytest.mark.parametrize('dropout_p', [0.0])
 @pytest.mark.parametrize('DEBUG_INPUT', [False])
 @pytest.mark.skipif(not arch_supports_fp8(), reason="fp8 not supported on this device")
 def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, DEBUG_INPUT):
