@@ -417,6 +417,11 @@ def varlen_bwd(
     descale_v: Optional[torch.Tensor] = None,
     descale_do: Optional[torch.Tensor] = None
 ):
+    # NOTE: this is important especially for fp8 where we are sensitive to small fluctuations
+    dq.zero_()
+    dk.zero_()
+    dv.zero_()
+
     if DEBUG:
         print()
         print("varlen_bwd")
