@@ -716,7 +716,7 @@ def attention_prefill_backward_triton_impl(
     assert softmax_lse.is_contiguous()
 
     # init delta
-    delta = torch.empty_like(softmax_lse)
+    delta = torch.zeros_like(softmax_lse)
     if is_varlen:
         stride_deltam, stride_deltah = delta.stride()
         stride_deltaz = 0

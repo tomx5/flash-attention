@@ -251,7 +251,7 @@ def generate_varlen_tensor(
 
     # create varlen tensor
     if DEBUG_INPUT:
-        x = torch.empty(total_seqlen, num_heads, head_size, dtype=dtype, device=device)
+        x = torch.zeros(total_seqlen, num_heads, head_size, dtype=dtype, device=device)
         for i in range(batch_size):
             start = cu_seqlens[i].item()
             end   = cu_seqlens[i+1].item()
@@ -339,8 +339,8 @@ def cast_varlen_to_fp8(
     fp8_max = torch.finfo(fp8_dtype).max
    
     # compute scale and descale factors per sequence
-    x_fp8 = torch.empty_like(x, dtype=fp8_dtype)
-    descale_factors = torch.empty((batch, num_heads), device=x.device, dtype=torch.float32)
+    x_fp8 = torch.zeros_like(x, dtype=fp8_dtype)
+    descale_factors = torch.zeros((batch, num_heads), device=x.device, dtype=torch.float32)
     for i in range(batch):
         start = cu_seqlens[i]
         end   = cu_seqlens[i + 1]

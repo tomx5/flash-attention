@@ -989,7 +989,7 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
         (1, 4, 2, 32, 32, 32),
         (1, 8, 2, 32, 32, 32),
         (1, 16, 2, 32, 32, 32),
-        (1, 32, 2, 32, 32, 32),
+        (1, 32, 4, 32, 32, 32),
         (1, 2, 2, 32, 32, 32),
         (1, 2, 1, 32, 32, 32),
         (1, 2, 1, 64, 64, 32),
@@ -1000,24 +1000,24 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
         (4, 8, 2, 512, 512, 128),
         (4, 8, 2, 512, 512, 68),
         (4, 8, 2, 512, 512, 128),
-        # (4, 8, 2, 512, 1024, 68),  # fails
-        # (4, 8, 2, 1024, 512, 68),  # fails
-        # (16, 16, 4, 1528, 2753, 68), # fails
+        (4, 8, 2, 512, 1024, 68),
+        (4, 8, 2, 1024, 512, 68),
+        (16, 16, 4, 1528, 2753, 64),
         # fa configs
         (4, 6, 1, 113, 203, 256),
-        # (4, 6, 1, 128, 217, 256), # fails
+        (4, 6, 1, 128, 217, 256),
         (4, 6, 2, 113, 211, 128),
         (4, 6, 2, 108, 256, 128),
         (4, 6, 1, 256, 512, 64),
-        (4, 6, 1, 512, 256, 64),
+        (4, 6, 2, 512, 256, 64),
         (4, 6, 2, 1024, 1024, 32),
-        # (4, 6, 2, 1023, 1024, 32),# fails
+        (4, 6, 2, 1023, 1024, 32),
         (4, 6, 6, 1024, 1023, 32),
         (4, 6, 6, 2048, 2048, 32),
     ],
 )
-@pytest.mark.parametrize('causal', [True]) # cause nan
-@pytest.mark.parametrize('dropout_p', [0.0])
+@pytest.mark.parametrize('causal', [True])
+@pytest.mark.parametrize('dropout_p', [0.1])
 @pytest.mark.parametrize('DEBUG_INPUT', [False])
 @pytest.mark.skipif(not arch_supports_fp8(), reason="fp8 not supported on this device")
 def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, DEBUG_INPUT):

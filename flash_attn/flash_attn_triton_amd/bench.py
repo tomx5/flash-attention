@@ -87,7 +87,7 @@ def gen_fn_inputs(fn_name, BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, devic
         if causal:
             input_metadata.need_causal()
 
-        o = torch.empty_like(q)
+        o = torch.zeros_like(q)
         input_data = (q, k, v, o, input_metadata)
     elif fn_name.startswith("decode"):
         q = torch.randn(

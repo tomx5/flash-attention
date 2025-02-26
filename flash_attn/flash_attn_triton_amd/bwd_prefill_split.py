@@ -1074,7 +1074,7 @@ def attention_prefill_backward_triton_split_impl(
     BLK_SLICE_FACTOR = 2
 
     # init delta
-    delta = torch.empty_like(softmax_lse)
+    delta = torch.zeros_like(softmax_lse)
     if IS_VARLEN:
         stride_deltab = 0
         stride_deltam, stride_deltah = delta.stride()

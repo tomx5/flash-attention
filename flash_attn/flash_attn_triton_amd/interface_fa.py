@@ -48,7 +48,7 @@ def fwd(q,
 
 
     if o is None:
-        o = torch.empty_like(q)
+        o = torch.zeros_like(q)
 
     # Setup metadata
     metadata = MetaData(sm_scale=softmax_scale)
@@ -305,7 +305,7 @@ def varlen_fwd(
         print("gen_:", gen_)
 
     if o is None:
-        o = torch.empty_like(q)
+        o = torch.zeros_like(q)
 
     # Setup metadata
     metadata = MetaData(sm_scale=softmax_scale)
@@ -330,8 +330,6 @@ def varlen_fwd(
 
     # Check arguments
     metadata.check_args(q, k, v, o)
-    if o is None:
-        o = torch.empty_like(q, dtype=v.dtype)
 
     # call implementation
     if USE_REF:
@@ -550,7 +548,7 @@ def fwd_kvcache(
         num_splits):
 
     if out is None:
-        out = torch.empty_like(q)
+        out = torch.zeros_like(q)
 
     # fill metadata
     metadata = MetaData(sm_scale=softmax_scale)
