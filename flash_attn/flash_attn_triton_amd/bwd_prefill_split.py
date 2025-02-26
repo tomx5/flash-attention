@@ -1020,7 +1020,7 @@ def attention_prefill_backward_triton_split_impl(
         stride_descale_q_z = descale_q.stride(0)
         stride_descale_k_z = descale_k.stride(0)
         stride_descale_v_z = descale_v.stride(0)
-        stride_descale_do_z = descale_q.stride(0)
+        stride_descale_do_z = descale_do.stride(0)
     else:
         FP8_MAX = None
         stride_descale_q_z = stride_descale_k_z = stride_descale_v_z = stride_descale_do_z = None
