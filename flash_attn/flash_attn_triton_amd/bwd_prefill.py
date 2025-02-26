@@ -78,7 +78,7 @@ def _bwd_preprocess_use_o(
         descale_do = tl.load(DESCALE_do + off_z * stride_descale_q_z + off_h)
 
         # NOTE: do is scaled into the fp8 range and o is in fp8 but should be in the same scale as fp32
-        delta = tl.sum(o.to(tl.float32) * (do * descale_do).to(tl.float32), axis=1)
+        delta = tl.sum(o.to(tl.float32) * (do.to(tl.float32)  * descale_do), axis=1)
     else:
         delta = tl.sum(o.to(tl.float32) * do.to(tl.float32), axis=1)
 

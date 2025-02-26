@@ -538,7 +538,7 @@ def attn_fwd(Q, K, V, bias,
         o_ptrs_mask = o_ptrs_mask & (offs_m[:, None] < seqlen_q)
     if PADDED_HEAD:
         o_ptrs_mask = o_ptrs_mask & (offs_d[None, :] < ACTUAL_BLOCK_DMODEL)
-    tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
+    tl.store(o_ptrs, acc, mask=o_ptrs_mask)
 
 
 def attention_prefill_forward_triton_impl(
@@ -614,7 +614,9 @@ def attention_prefill_forward_triton_impl(
     else:
         descale_q = descale_k = descale_v = None
         descale_q_stride_z = descale_k_stride_z = descale_v_stride_z = None
-       
+
+    # accumlation done in fp32
+    o = o.to(torch.float32)
 
     if DEBUG:
         print("is_fp8:", is_fp8)
@@ -695,7 +697,7 @@ def attention_prefill_forward_triton_impl(
                     MAX_SEQLENS_K=max_seqlens_k, IS_CAUSAL=causal, VARLEN=is_varlen,
                     BLOCK_DMODEL=padded_d_model, USE_BIAS=False if bias is None else True,
                     USE_ALIBI=False if alibi_slopes is None else True, ENABLE_DROPOUT=dropout_p
-                    > 0.0, USE_EXP2=use_exp2, RETURN_SCORES=return_softmax, IS_FP8=is_fp8, FP8_MAX=torch.finfo(torch.float8_e4m3fnuz).max)
+                    > 0.0, USE_EXP2=use_exp2, RETURN_SCORES=return_softmax, IS_FP8=is_fp8, FP8_MAX=torch.finfo(q.dtype).max)
 
     if DEBUG:
         print()

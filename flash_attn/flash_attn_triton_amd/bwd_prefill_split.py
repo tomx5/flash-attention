@@ -69,7 +69,7 @@ def _bwd_preprocess(
         descale_do = tl.load(Descale_do + bid * stride_descale_do_z + hid)
 
         # NOTE: do is scaled into the fp8 range and o is in fp8 but should be in the same scale as fp32
-        delta = tl.sum(o.to(tl.float32) * (do * descale_do).to(tl.float32), axis=1)
+        delta = tl.sum(o.to(tl.float32) * (do.to(tl.float32) * descale_do), axis=1)
     else:
         delta = tl.sum(o.to(tl.float32) * do.to(tl.float32), axis=1)
     delta_offset = Delta + bid * stride_deltab + hid * stride_deltah + q_start * stride_deltam
@@ -1037,6 +1037,11 @@ def attention_prefill_backward_triton_split_impl(
         dk = torch.zeros_like(k)
     if dv is None:
         dv = torch.zeros_like(v)
+
+    # accumlation done in fp32
+    dq = dq.to(torch.float32)
+    dk = dk.to(torch.float32)
+    dv = dv.to(torch.float32)
 
     # get strides and shape
     batch, nheads_q, nheads_k, head_size, max_seqlen_q, max_seqlen_k = \
