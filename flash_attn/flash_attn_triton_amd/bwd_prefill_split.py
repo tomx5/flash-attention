@@ -540,7 +540,7 @@ def _bwd_dq_inner(
         # Increment pointers.
         curr_n += step_n
         kT_ptrs += step_n * stride_kn
-        vT_ptrs += step_n * stride_kn
+        vT_ptrs += step_n * stride_vn
     return dq
 
 
@@ -1187,8 +1187,8 @@ def attention_prefill_backward_triton_split_impl(
             num_warps=NUM_WARPS,
             num_stages=NUM_STAGES,
             waves_per_eu = WAVES_PER_EU,
-            DEBUG_TRITON=DEBUG_TRITON and False,
-            DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL and False,
+            DEBUG_TRITON=DEBUG_TRITON,
+            DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
     else:
         _bwd_kernel_dkdv_noncausal[grid_dkdv](
@@ -1247,8 +1247,8 @@ def attention_prefill_backward_triton_split_impl(
             num_warps=NUM_WARPS,
             num_stages=NUM_STAGES,
             waves_per_eu = WAVES_PER_EU,
-            DEBUG_TRITON=DEBUG_TRITON and False,
-            DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL and False,
+            DEBUG_TRITON=DEBUG_TRITON,
+            DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
 
     return dq, dk, dv, delta, None, None

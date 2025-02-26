@@ -6,7 +6,7 @@ from .bwd_prefill_split import attention_prefill_backward_triton_split_impl
 from .fwd_decode import attention_decode_forward_triton_impl
 from .fwd_ref import attention_forward_pytorch_ref_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
-from .utils import MetaData, get_shape_from_layout, DEBUG, USE_SINGLE_BWD_KERNEL
+from .utils import DEBUG_TRITON, DEBUG_TRITON_DETAIL, MetaData, get_shape_from_layout, DEBUG, USE_SINGLE_BWD_KERNEL
 from einops import rearrange, repeat
 from flash_attn.layers.rotary import apply_rotary_emb
 from typing import Optional
@@ -247,7 +247,9 @@ def bwd(
             descale_q = descale_q,
             descale_k = descale_k,
             descale_v = descale_v,
-            descale_do = descale_do
+            descale_do = descale_do,
+            DEBUG_TRITON=DEBUG_TRITON,
+            DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
         delta = delta_triton
 
@@ -505,7 +507,9 @@ def varlen_bwd(
             descale_q = descale_q,
             descale_k = descale_k,
             descale_v = descale_v,
-            descale_do = descale_do
+            descale_do = descale_do,
+            DEBUG_TRITON=DEBUG_TRITON,
+            DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
         delta = delta_triton
 
