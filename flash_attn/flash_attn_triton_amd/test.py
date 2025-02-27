@@ -1,10 +1,10 @@
 import torch
 import pytest
 import numpy as np
-from flash_attn import flash_attn_func, flash_attn_varlen_func
+from flash_attn import flash_attn_func, flash_attn_varlen_func, flash_attn_varlen_qkvpacked_func
 
 from .utils import DEBUG, DEBUG_TRITON, DEBUG_TRITON_DETAIL, MetaData, \
-    cast_to_fp8, decast_fp8, get_input_shapes, input_helper, varlen_input_helper, compute_alibi_tensor_ref, get_arch, arch_supports_fp8
+    cast_to_fp8, decast_fp8, get_input_shapes, input_helper, nonvarlen_input_helper, varlen_input_helper, compute_alibi_tensor_ref, get_arch, arch_supports_fp8
 from .interface_torch import attention_prefill, attention_decode
 from .fwd_ref import attention_forward_pytorch_ref_impl
 from .fwd_prefill import attention_prefill_forward_triton_impl
@@ -49,7 +49,7 @@ EQUAL_NAN = True
 @pytest.mark.parametrize('layout', ['bshd', 'bhsd'])
 def test_op_fwd_prefill(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_alibi, layout, dtype=torch.float16):
     torch.manual_seed(20)
-    q, k, v, input_metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout)
+    q, k, v, input_metadata = nonvarlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout)
     if causal:
         input_metadata.need_causal()
 
@@ -124,7 +124,7 @@ def test_op_fwd_prefill_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, d
     torch.manual_seed(20)
     sm_scale = D_HEAD**-0.5
     input_metadata = MetaData(sm_scale=sm_scale)
-    q, k, v, input_metadata = input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout='bhsd')
+    q, k, v, input_metadata = nonvarlen_input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout='bhsd')
     if causal:
         input_metadata.need_causal()
     if use_bias:
@@ -400,7 +400,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     if layout == "thd":
         q, k, v, metadata = varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device=device, DEBUG_INPUT=DEBUG_INPUT)
     else:
-        q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
+        q, k, v, metadata = nonvarlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
     if DEBUG_INPUT:
         output_triton = torch.zeros_like(q).contiguous()
     else:
@@ -546,7 +546,7 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     if layout == "thd":
         q, k, v, metadata = varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, DEBUG_INPUT=DEBUG_INPUT)
     else:
-        q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=DEBUG_INPUT)
+        q, k, v, metadata = nonvarlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=DEBUG_INPUT)
     if DEBUG_INPUT:
         do = torch.ones_like(q).contiguous()
     else:
@@ -825,7 +825,7 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
 
     torch.manual_seed(20)
 
-    q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, ref_dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
+    q, k, v, metadata = nonvarlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, ref_dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
     if DEBUG_INPUT:
         do = torch.ones_like(q)
     else:
@@ -1142,7 +1142,6 @@ def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, drop
                              atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
 
 
-
 @pytest.mark.parametrize(
     "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD", [
     (1, 1, 1, 1, 1, 1),
@@ -1235,7 +1234,7 @@ def test_op_prefill_bwd_split_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, 
     if layout == "thd":
         q, k, v, metadata = varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, DEBUG_INPUT=DEBUG_INPUT)
     else:
-        q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=DEBUG_INPUT)
+        q, k, v, metadata = nonvarlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=DEBUG_INPUT)
     if DEBUG_INPUT:
         do = torch.ones_like(q).contiguous()
     else:

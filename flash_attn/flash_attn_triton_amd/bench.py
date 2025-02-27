@@ -3,7 +3,7 @@ import torch
 import triton
 from flash_attn.flash_attn_triton_amd.utils import (
     MetaData,
-    input_helper,
+    nonvarlen_input_helper,
     varlen_input_helper,
 )
 from flash_attn.flash_attn_triton_amd.interface_torch import attention_prefill, attention_decode
@@ -79,7 +79,7 @@ def gen_fn_inputs(fn_name, BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, devic
                 seqlen_k = input_metadata.cu_seqlens_k[i + 1] - input_metadata.cu_seqlens_k[i]
                 flops_per_matmul += seqlen_q.item() * seqlen_k.item() * HQ * D_HEAD * 2
         else:
-            q, k, v, input_metadata = input_helper(
+            q, k, v, input_metadata = nonvarlen_input_helper(
                 BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device=device
             )
             flops_per_matmul = 2.0 * BATCH * HQ * N_CTX_Q * N_CTX_K * D_HEAD

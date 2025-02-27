@@ -173,7 +173,7 @@ class MetaData():
 # -------------------------------
 # Input Helper
 # -------------------------------
-def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device="cuda", DEBUG_INPUT=False):
+def nonvarlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device="cuda", DEBUG_INPUT=False):
     torch.manual_seed(20)
 
     # Initialize q, k, v
@@ -281,6 +281,14 @@ def varlen_input_helper(BATCH, HQ, HK, TOTAL_SEQLENS_Q, TOTAL_SEQLENS_K, D_HEAD,
     input_metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k)
 
     return q, k, v, input_metadata
+
+def input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device="cuda", DEBUG_INPUT=False):
+    if layout == "thd":
+        q, k, v, metadata = varlen_input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device=device, DEBUG_INPUT=DEBUG_INPUT)
+    else:
+        q, k, v, metadata = nonvarlen_input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
+
+    return q, k, v, metadata
 
 # -------------------------------
 # FP8
