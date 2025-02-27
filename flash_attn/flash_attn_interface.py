@@ -484,6 +484,10 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
         deterministic,
         return_softmax,
         is_grad_enabled,
+        descale_q,
+        descale_k,
+        descale_v,
+        descale_do
     ):
         is_grad = is_grad_enabled and qkv.requires_grad
         if softmax_scale is None:
@@ -506,9 +510,12 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             softcap=softcap,
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
+            descale_q=descale_q,
+            descale_k=descale_k,
+            descale_v=descale_v
         )
         if is_grad:
-            ctx.save_for_backward(q, k, v, out_padded, softmax_lse, rng_state)
+            ctx.save_for_backward(q, k, v, out_padded, softmax_lse, rng_state, descale_q, descale_k, descale_v, descale_do)
             ctx.dropout_p = dropout_p
             ctx.softmax_scale = softmax_scale
             ctx.causal = causal
@@ -521,7 +528,7 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        q, k, v, out, softmax_lse, rng_state = ctx.saved_tensors
+        q, k, v, out, softmax_lse, rng_state, descale_q, descale_k, descale_v, descale_do = ctx.saved_tensors
         qkv_shape = q.shape[:-2] + (3, *q.shape[-2:])
         dqkv = torch.empty(qkv_shape, dtype=q.dtype, device=q.device)
         head_size_og = dout.size(3)
@@ -547,9 +554,13 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             ctx.alibi_slopes,
             ctx.deterministic,
             rng_state=rng_state,
+            descale_q=descale_q,
+            descale_k=descale_k,
+            descale_v=descale_v,
+            descale_do=descale_do
         )
         dqkv = dqkv[..., : dout.shape[-1]]  # We could have padded the head dimension
-        return dqkv, None, None, None, None, None, None, None, None, None
+        return dqkv, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
@@ -568,6 +579,10 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
         deterministic,
         return_softmax,
         is_grad_enabled,
+        descale_q,
+        descale_k,
+        descale_v,
+        descale_do
     ):
         is_grad = is_grad_enabled and qkv.requires_grad
         if softmax_scale is None:
@@ -595,9 +610,12 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
             block_table=None,
+            descale_q=descale_q,
+            descale_k=descale_k,
+            descale_v=descale_v
         )
         if is_grad:
-            ctx.save_for_backward(q, k, v, out_padded, softmax_lse, cu_seqlens, rng_state)
+            ctx.save_for_backward(q, k, v, out_padded, softmax_lse, cu_seqlens, rng_state, descale_q, descale_k, descale_v, descale_do)
             ctx.dropout_p = dropout_p
             ctx.max_seqlen = max_seqlen
             ctx.softmax_scale = softmax_scale
@@ -611,7 +629,7 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        q, k, v, out, softmax_lse, cu_seqlens, rng_state = ctx.saved_tensors
+        q, k, v, out, softmax_lse, cu_seqlens, rng_state, descale_q, descale_k, descale_v, descale_do = ctx.saved_tensors
         qkv_shape = q.shape[:-2] + (3, *q.shape[-2:])
         dqkv = torch.empty(qkv_shape, dtype=q.dtype, device=q.device)
         head_size_og = dout.size(2)
@@ -641,9 +659,13 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
             ctx.alibi_slopes,
             ctx.deterministic,
             rng_state=rng_state,
+            descale_q=descale_q,
+            descale_k=descale_k,
+            descale_v=descale_v,
+            descale_do=descale_do
         )
         dqkv = dqkv[..., : dout.shape[-1]]  # We could have padded the head dimension
-        return dqkv, None, None, None, None, None, None, None, None, None, None, None
+        return dqkv, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 class FlashAttnKVPackedFunc(torch.autograd.Function):
@@ -661,6 +683,10 @@ class FlashAttnKVPackedFunc(torch.autograd.Function):
         deterministic,
         return_softmax,
         is_grad_enabled,
+        descale_q,
+        descale_k,
+        descale_v,
+        descale_do
     ):
         is_grad = is_grad_enabled and any(
             x.requires_grad for x in [q, kv]
@@ -685,9 +711,12 @@ class FlashAttnKVPackedFunc(torch.autograd.Function):
             softcap=softcap,
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
+            descale_q=descale_q,
+            descale_k=descale_k,
+            descale_v=descale_v
         )
         if is_grad:
-            ctx.save_for_backward(q, k, v, out_padded, softmax_lse, rng_state)
+            ctx.save_for_backward(q, k, v, out_padded, softmax_lse, rng_state, descale_q, descale_k, descale_v, descale_do)
             ctx.dropout_p = dropout_p
             ctx.softmax_scale = softmax_scale
             ctx.causal = causal
@@ -700,7 +729,7 @@ class FlashAttnKVPackedFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        q, k, v, out, softmax_lse, rng_state = ctx.saved_tensors
+        q, k, v, out, softmax_lse, rng_state, descale_q, descale_k, descale_v, descale_do = ctx.saved_tensors
         dq = torch.empty_like(q)
         kv_shape = k.shape[:-2] + (2, *k.shape[-2:])
         dkv = torch.empty(kv_shape, dtype=k.dtype, device=k.device)
@@ -727,10 +756,14 @@ class FlashAttnKVPackedFunc(torch.autograd.Function):
             ctx.alibi_slopes,
             ctx.deterministic,
             rng_state=rng_state,
+            descale_q=descale_q,
+            descale_k=descale_k,
+            descale_v=descale_v,
+            descale_do=descale_do
         )
         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
         dkv = dkv[..., : dout.shape[-1]]
-        return dq, dkv, None, None, None, None, None, None, None, None, None
+        return dq, dkv, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
@@ -752,6 +785,10 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
         deterministic,
         return_softmax,
         is_grad_enabled,
+        descale_q,
+        descale_k,
+        descale_v,
+        descale_do
     ):
         is_grad = is_grad_enabled and any(
             x.requires_grad for x in [q, kv]
@@ -781,10 +818,13 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
             block_table=None,
+            descale_q=descale_q,
+            descale_k=descale_k,
+            descale_v=descale_v
         )
         if is_grad:
             ctx.save_for_backward(
-                q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state
+                q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state, descale_q, descale_k, descale_v, descale_do
             )
             ctx.dropout_p = dropout_p
             ctx.max_seqlen_q = max_seqlen_q
@@ -800,7 +840,7 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state = ctx.saved_tensors
+        q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state, descale_q, descale_k, descale_v, descale_do = ctx.saved_tensors
         dq = torch.empty_like(q)
         kv_shape = k.shape[:-2] + (2, *k.shape[-2:])
         dkv = torch.empty(kv_shape, dtype=k.dtype, device=k.device)
@@ -831,10 +871,14 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             ctx.alibi_slopes,
             ctx.deterministic,
             rng_state=rng_state,
+            descale_q=descale_q,
+            descale_k=descale_k,
+            descale_v=descale_v,
+            descale_do=descale_do
         )
         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
         dkv = dkv[..., : dout.shape[-1]]
-        return dq, dkv, None, None, None, None, None, None, None, None, None, None, None, None, None
+        return dq, dkv, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 class FlashAttnFunc(torch.autograd.Function):
@@ -1059,6 +1103,10 @@ def flash_attn_qkvpacked_func(
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
+    descale_q=None, 
+    descale_k=None, 
+    descale_v=None,
+    descale_do=None
 ):
     """dropout_p should be set to 0.0 during evaluation
     If Q, K, V are already stacked into 1 tensor, this function will be faster than
@@ -1105,6 +1153,10 @@ def flash_attn_qkvpacked_func(
         deterministic,
         return_attn_probs,
         torch.is_grad_enabled(),
+        descale_q, 
+        descale_k, 
+        descale_v,
+        descale_do
     )
 
 
@@ -1119,6 +1171,10 @@ def flash_attn_kvpacked_func(
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
+    descale_q=None, 
+    descale_k=None, 
+    descale_v=None,
+    descale_do=None
 ):
     """dropout_p should be set to 0.0 during evaluation
     If K, V are already stacked into 1 tensor, this function will be faster than
@@ -1183,6 +1239,10 @@ def flash_attn_kvpacked_func(
         deterministic,
         return_attn_probs,
         torch.is_grad_enabled(),
+        descale_q, 
+        descale_k, 
+        descale_v,
+        descale_do
     )
 
 
@@ -1283,6 +1343,10 @@ def flash_attn_varlen_qkvpacked_func(
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
+    descale_q=None, 
+    descale_k=None, 
+    descale_v=None,
+    descale_do=None
 ):
     """dropout_p should be set to 0.0 during evaluation
     If Q, K, V are already stacked into 1 tensor, this function will be faster than
@@ -1334,6 +1398,10 @@ def flash_attn_varlen_qkvpacked_func(
         deterministic,
         return_attn_probs,
         torch.is_grad_enabled(),
+        descale_q, 
+        descale_k, 
+        descale_v,
+        descale_do
     )
 
 
@@ -1352,6 +1420,10 @@ def flash_attn_varlen_kvpacked_func(
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
+    descale_q=None, 
+    descale_k=None, 
+    descale_v=None,
+    descale_do=None
 ):
     """dropout_p should be set to 0.0 during evaluation
     If K, V are already stacked into 1 tensor, this function will be faster than
@@ -1426,6 +1498,10 @@ def flash_attn_varlen_kvpacked_func(
         deterministic,
         return_attn_probs,
         torch.is_grad_enabled(),
+        descale_q, 
+        descale_k, 
+        descale_v,
+        descale_do
     )
 
 
