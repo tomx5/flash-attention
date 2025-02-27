@@ -811,41 +811,59 @@ def test_op_fwd_decode_int4_kv(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
 )
 @pytest.mark.parametrize('causal', [False, True])
 @pytest.mark.parametrize('dropout_p', [0.0, 0.1])
+@pytest.mark.parametrize('layout', ['bshd', 'thd'])
 @pytest.mark.parametrize('DEBUG_INPUT', [False])
 @pytest.mark.skipif(not arch_supports_fp8(), reason="fp8 not supported on this device")
-def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, DEBUG_INPUT):
+def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, DEBUG_INPUT):
     device = "cuda"
     window_size =  (-1, -1)
     softcap = 0.0
     alibi_slopes = None
     deterministic = False
-    layout = "bshd"
     fp8_dtype = torch.float8_e4m3fnuz
     ref_dtype = torch.float16
 
     torch.manual_seed(20)
 
-    q, k, v, metadata = nonvarlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, ref_dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
+    # Choose input helper based on layout
+    if layout == "bshd":
+        q, k, v, metadata = nonvarlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, ref_dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
+        is_varlen = False
+    else:  # layout == "thd"
+        q, k, v, metadata = varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, ref_dtype, device=device, DEBUG_INPUT=DEBUG_INPUT)
+        is_varlen = True
+
     if DEBUG_INPUT:
         do = torch.ones_like(q)
     else:
         do = torch.randn_like(q)
 
-
     # ----------------------------------------------------------------
     # --- FP8 ---
     # ----------------------------------------------------------------
-    # cast to fp8
-    q_fp8, descale_q= cast_to_fp8(q, fp8_dtype, layout)
-    k_fp8, descale_k = cast_to_fp8(k, fp8_dtype, layout)
-    v_fp8, descale_v = cast_to_fp8(v, fp8_dtype, layout)
-    do_fp8, descale_do = cast_to_fp8(do, fp8_dtype, layout)
+    # Cast to fp8 based on layout
+    if not is_varlen:
+        q_fp8, descale_q = cast_to_fp8(q, fp8_dtype, layout)
+        k_fp8, descale_k = cast_to_fp8(k, fp8_dtype, layout)
+        v_fp8, descale_v = cast_to_fp8(v, fp8_dtype, layout)
+        do_fp8, descale_do = cast_to_fp8(do, fp8_dtype, layout)
+    else:
+        q_fp8, descale_q = cast_to_fp8(q, fp8_dtype, layout, cu_seqlens=metadata.cu_seqlens_q)
+        k_fp8, descale_k = cast_to_fp8(k, fp8_dtype, layout, cu_seqlens=metadata.cu_seqlens_k)
+        v_fp8, descale_v = cast_to_fp8(v, fp8_dtype, layout, cu_seqlens=metadata.cu_seqlens_k)
+        do_fp8, descale_do = cast_to_fp8(do, fp8_dtype, layout, cu_seqlens=metadata.cu_seqlens_q)
+
+    # Ensure tensors require gradients
+    q_fp8 = q_fp8.requires_grad_() if not q_fp8.requires_grad else q_fp8
+    k_fp8 = k_fp8.requires_grad_() if not k_fp8.requires_grad else k_fp8
+    v_fp8 = v_fp8.requires_grad_() if not v_fp8.requires_grad else v_fp8
 
     # fp8 forward pass
-    out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_func(
-            q_fp8.requires_grad_(),
-            k_fp8.requires_grad_(),
-            v_fp8.requires_grad_(),
+    if not is_varlen:
+        out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_func(
+            q_fp8,
+            k_fp8,
+            v_fp8,
             dropout_p,
             causal=causal,
             window_size=window_size,
@@ -858,199 +876,8 @@ def test_op_prefill_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, 
             descale_v=descale_v,
             descale_do=descale_do
         )
-    
-    # fp8 backward pass
-    dq_fp8, dk_fp8, dv_fp8 = torch.autograd.grad(out_fp8, (q_fp8, k_fp8, v_fp8), do_fp8)
-
-    # ----------------------------------------------------------------
-    # --- Reference ---
-    # ----------------------------------------------------------------
-    q_ref = decast_fp8(q_fp8, descale_q, ref_dtype, layout)
-    k_ref = decast_fp8(k_fp8, descale_k, ref_dtype, layout)
-    v_ref = decast_fp8(v_fp8, descale_v, ref_dtype, layout)
-    do_ref = decast_fp8(do_fp8, descale_do, ref_dtype, layout)
-    out_ref, lse_ref, S_dmask_ref = flash_attn_func(
-            q_ref,
-            k_ref,
-            v_ref,
-            dropout_p,
-            causal=causal,
-            window_size=window_size,
-            softcap=softcap,
-            alibi_slopes=alibi_slopes,
-            deterministic=deterministic,
-            return_attn_probs=True,
-        )
-
-    # ref backward pass
-    dq_ref, dk_ref, dv_ref = torch.autograd.grad(out_ref, (q_ref, k_ref, v_ref), do_ref)
-
-
-    # compare forward
-    if DEBUG:
-        print()
-        print("Compare fp8 against ref")
-
-    if DEBUG:
-        print("out_ref:", out_ref, out_ref.shape)
-        print("out_fp8:", out_fp8, out_fp8.shape)
-    torch.testing.assert_close(out_ref, out_fp8.to(ref_dtype), atol=ATOL_fp8, rtol=RTOL_fp8)
-  
-    if DEBUG:
-        print("lse_ref:", lse_ref, lse_ref.shape)
-        print("lse_fp8:", lse_fp8, lse_fp8.shape)
-    torch.testing.assert_close(lse_ref, lse_fp8.to(torch.float32), atol=ATOL_fp8, rtol=RTOL_fp8)
-
-    # if DEBUG:
-    #     print("S_dmask_ref:", S_dmask_ref, S_dmask_ref.shape if S_dmask_ref is not None else None )
-    #     print("S_dmask_fp8:", S_dmask_fp8, S_dmask_fp8.shape if S_dmask_ref is not None else None)
-    # torch.testing.assert_close(S_dmask_ref if S_dmask_ref is not None else None, S_dmask_fp8.to(ref_dtype) if S_dmask_fp8 is not None else None, atol=ATOL_fp8, rtol=RTOL_fp8)
-    # compare backward
-    if DEBUG:
-        print("dv_ref:", dv_ref, dv_ref.shape)
-        print("dv_fp8:", dv_fp8, dv_fp8.shape)
-    torch.testing.assert_close(dv_ref, dv_fp8.to(ref_dtype), 
-                             atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
-
-    if DEBUG:
-        print("dk_ref:", dk_ref, dk_ref.shape)
-        print("dk_fp8:", dk_fp8, dk_fp8.shape)
-    torch.testing.assert_close(dk_ref, dk_fp8.to(ref_dtype), 
-                             atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
-    
-    if DEBUG:
-        print("dq_ref:", dq_ref, dq_ref.shape)
-        print("dq_fp8:", dq_fp8, dq_fp8.shape)
-    torch.testing.assert_close(dq_ref, dq_fp8.to(ref_dtype), 
-                             atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
-
-
-@pytest.mark.parametrize(
-    "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD",
-    [
-        # head size
-        (1, 1, 1, 1, 1, 1),
-        (1, 1, 1, 1, 1, 3),
-        (1, 1, 1, 1, 1, 4),
-        (1, 1, 1, 1, 1, 9),
-        (1, 1, 1, 1, 1, 16),
-        (1, 1, 1, 1, 1, 37),
-        (1, 1, 1, 1, 1, 64),
-        (1, 1, 1, 1, 1, 129),
-        (1, 1, 1, 1, 1, 256),
-        # seqlen q == k
-        (1, 1, 1, 2, 2, 2),  # small enough to debug
-        (1, 1, 1, 4, 4, 16),
-        (1, 2, 2, 4, 4, 16),
-        (2, 1, 1, 4, 4, 16),
-        (2, 2, 2, 4, 4, 16),
-        (1, 1, 1, 128, 128, 32),  # only one block
-        (3, 3, 3, 128, 128, 64),
-        (1, 1, 1, 127, 127, 32),  # only one block but with masking
-        # (1, 1, 1, 129, 129, 1),  # two blocks with 2nd block small enough to debug # fails
-        (1, 1, 1, 129, 129, 32),  # two blocks with 2nd block small enough to debug
-        (1, 1, 1, 350, 350, 1),  # two blocks with 2nd block small enough to debug
-        (1, 1, 1, 350, 350, 68),  # generic masking on q, k and head
-        (4, 1, 1, 512, 512, 128), # batch > 1
-        (4, 2, 2, 512, 512, 128),
-        (4, 2, 2, 512, 512, 68),
-        (4, 2, 2, 500, 500, 68),
-        (2, 4, 4, 1024, 1024, 64),
-        (4, 8, 8, 2048, 2048, 128),
-        (4, 16, 16, 4096, 4096, 64),
-        (2, 4, 4, 8192, 8192, 32),
-        # seqlen q > k
-        (1, 1, 1, 4, 2, 16),
-        (1, 1, 1, 64, 32, 8),
-        (1, 1, 1, 128, 64, 16),
-        (1, 1, 1, 192, 128, 32),
-        (1, 2, 2, 1024, 512, 68),
-        (1, 4, 4, 729, 516, 68),
-        (2, 4, 4, 2753, 1528, 68),
-        # seqlen q < k
-        (1, 1, 1, 2, 4, 16),
-        (1, 2, 2, 2, 4, 16),
-        (1, 4, 1, 2, 4, 16),
-        (1, 4, 2, 2, 4, 16),
-        (2, 2, 2, 2, 128, 1),
-        (2, 3, 3, 2, 128, 16),
-        (1, 1, 1, 32, 64, 8),
-        (1, 1, 1, 128, 192, 32),
-        (4, 6, 6, 108, 256, 224),
-        (3, 2, 2, 256, 512, 16),
-        (2, 2, 2, 512, 1024, 68),
-        (1, 1, 1, 200, 413, 1),
-        (1, 1, 1, 782, 1546, 1),
-        # gqa/mqa
-        (1, 2, 1, 32, 32, 32),
-        (1, 4, 1, 32, 32, 32),
-        (1, 8, 1, 32, 32, 32),
-        (1, 16, 1, 32, 32, 32),
-        (1, 32, 1, 32, 32, 32),
-        (1, 2, 2, 32, 32, 32),
-        (1, 4, 2, 32, 32, 32),
-        (1, 8, 2, 32, 32, 32),
-        (1, 16, 2, 32, 32, 32),
-        (1, 32, 4, 32, 32, 32),
-        (1, 2, 2, 32, 32, 32),
-        (1, 2, 1, 32, 32, 32),
-        (1, 2, 1, 64, 64, 32),
-        (2, 2, 1, 128, 128, 32),
-        (2, 2, 1, 256, 256, 32),
-        (4, 2, 1, 512, 512, 32),
-        (4, 4, 2, 512, 512, 64),
-        (4, 8, 2, 512, 512, 128),
-        (4, 8, 2, 512, 512, 68),
-        (4, 8, 2, 512, 512, 128),
-        (4, 8, 2, 512, 1024, 68),
-        (4, 8, 2, 1024, 512, 68),
-        (16, 16, 4, 1528, 2753, 64),
-        # fa configs
-        (4, 6, 1, 113, 203, 256),
-        (4, 6, 1, 128, 217, 256),
-        (4, 6, 2, 113, 211, 128),
-        (4, 6, 2, 108, 256, 128),
-        (4, 6, 1, 256, 512, 64),
-        (4, 6, 2, 512, 256, 64),
-        (4, 6, 2, 1024, 1024, 32),
-        (4, 6, 2, 1023, 1024, 32),
-        (4, 6, 6, 1024, 1023, 32),
-        (4, 6, 6, 2048, 2048, 32),
-    ],
-)
-@pytest.mark.parametrize('causal', [False, True])
-@pytest.mark.parametrize('dropout_p', [0.0, 0.1])
-@pytest.mark.parametrize('DEBUG_INPUT', [False])
-@pytest.mark.skipif(not arch_supports_fp8(), reason="fp8 not supported on this device")
-def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, DEBUG_INPUT):
-    device = "cuda"
-    window_size =  (-1, -1)
-    softcap = 0.0
-    alibi_slopes = None
-    deterministic = False
-    layout = "thd"
-    fp8_dtype = torch.float8_e4m3fnuz
-    ref_dtype = torch.float16
-
-    torch.manual_seed(20)
-
-    q, k, v, metadata = varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, ref_dtype, device=device, DEBUG_INPUT=DEBUG_INPUT)
-    if DEBUG_INPUT:
-        do = torch.ones_like(q)
     else:
-        do = torch.randn_like(q)
-
-    # ----------------------------------------------------------------
-    # --- FP8 ---
-    # ----------------------------------------------------------------
-    # cast to fp8
-    q_fp8, descale_q = cast_to_fp8(q, fp8_dtype, layout, cu_seqlens=metadata.cu_seqlens_q)
-    k_fp8, descale_k = cast_to_fp8(k, fp8_dtype, layout, cu_seqlens=metadata.cu_seqlens_k)
-    v_fp8, descale_v = cast_to_fp8(v, fp8_dtype, layout, cu_seqlens=metadata.cu_seqlens_k)
-    do_fp8, descale_do = cast_to_fp8(do, fp8_dtype, layout, cu_seqlens=metadata.cu_seqlens_q)
-
-    # launch kernel in fp8
-    out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_varlen_func(
+        out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_varlen_func(
             q_fp8,
             k_fp8,
             v_fp8,
@@ -1077,11 +904,33 @@ def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, drop
     # ----------------------------------------------------------------
     # --- Reference ---
     # ----------------------------------------------------------------
-    q_ref = decast_fp8(q_fp8, descale_q, ref_dtype, layout, cu_seqlens=metadata.cu_seqlens_q)
-    k_ref = decast_fp8(k_fp8, descale_k, ref_dtype, layout, cu_seqlens=metadata.cu_seqlens_k)
-    v_ref = decast_fp8(v_fp8, descale_v, ref_dtype, layout, cu_seqlens=metadata.cu_seqlens_k)
-    do_ref = decast_fp8(do_fp8, descale_do, ref_dtype, layout, cu_seqlens=metadata.cu_seqlens_q)
-    out_ref, lse_ref, S_dmask_ref = flash_attn_varlen_func(
+    if not is_varlen:
+        q_ref = decast_fp8(q_fp8, descale_q, ref_dtype, layout)
+        k_ref = decast_fp8(k_fp8, descale_k, ref_dtype, layout)
+        v_ref = decast_fp8(v_fp8, descale_v, ref_dtype, layout)
+        do_ref = decast_fp8(do_fp8, descale_do, ref_dtype, layout)
+    else:
+        q_ref = decast_fp8(q_fp8, descale_q, ref_dtype, layout, cu_seqlens=metadata.cu_seqlens_q)
+        k_ref = decast_fp8(k_fp8, descale_k, ref_dtype, layout, cu_seqlens=metadata.cu_seqlens_k)
+        v_ref = decast_fp8(v_fp8, descale_v, ref_dtype, layout, cu_seqlens=metadata.cu_seqlens_k)
+        do_ref = decast_fp8(do_fp8, descale_do, ref_dtype, layout, cu_seqlens=metadata.cu_seqlens_q)
+
+    # ref forward pass
+    if not is_varlen:
+        out_ref, lse_ref, S_dmask_ref = flash_attn_func(
+            q_ref,
+            k_ref,
+            v_ref,
+            dropout_p,
+            causal=causal,
+            window_size=window_size,
+            softcap=softcap,
+            alibi_slopes=alibi_slopes,
+            deterministic=deterministic,
+            return_attn_probs=True,
+        )
+    else:
+        out_ref, lse_ref, S_dmask_ref = flash_attn_varlen_func(
             q_ref,
             k_ref,
             v_ref,
@@ -1116,16 +965,12 @@ def test_op_prefill_varlen_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, drop
         print("lse_fp8:", lse_fp8, lse_fp8.shape)
     torch.testing.assert_close(lse_ref, lse_fp8.to(torch.float32), atol=ATOL_fp8, rtol=RTOL_fp8)
 
-    # if DEBUG:
-    #     print("S_dmask_ref:", S_dmask_ref, S_dmask_ref.shape if S_dmask_ref is not None else None )
-    #     print("S_dmask_fp8:", S_dmask_fp8, S_dmask_fp8.shape if S_dmask_ref is not None else None)
-    # torch.testing.assert_close(S_dmask_ref if S_dmask_ref is not None else None, S_dmask_fp8.to(ref_dtype) if S_dmask_fp8 is not None else None, atol=ATOL_fp8, rtol=RTOL_fp8)
-    
     # compare backward
     if DEBUG:
         print("dv_ref:", dv_ref, dv_ref.shape)
         print("dv_fp8:", dv_fp8, dv_fp8.shape)
-        print("metadata.cu_seqlens_k:", metadata.cu_seqlens_k)
+        if is_varlen:
+            print("metadata.cu_seqlens_k:", metadata.cu_seqlens_k)
     torch.testing.assert_close(dv_ref, dv_fp8.to(ref_dtype), 
                              atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
 
