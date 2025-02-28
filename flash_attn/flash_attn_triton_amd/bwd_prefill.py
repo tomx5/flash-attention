@@ -1,3 +1,4 @@
+from typing import Literal, Optional
 import torch
 import triton
 import triton.language as tl
@@ -78,7 +79,7 @@ def _bwd_preprocess_use_o(
         descale_do = tl.load(DESCALE_do + off_z * stride_descale_q_z + off_h)
 
         # NOTE: do is scaled into the fp8 range and o is in fp8 but should be in the same scale as fp32
-        delta = tl.sum(o.to(tl.float32) * (do.to(tl.float32)  * descale_do), axis=1)
+        delta = tl.sum(o.to(tl.float32) * (do.to(tl.float32) * descale_do), axis=1)
     else:
         delta = tl.sum(o.to(tl.float32) * do.to(tl.float32), axis=1)
 
@@ -578,33 +579,36 @@ def _bwd_kernel(
 
 # NOTE: smaller blocks have lower accuracy. more accumlation error probably 128 * 128 seems good but leads to oom. 64 * 64 has accumlation errors but no oom.
 def attention_prefill_backward_triton_impl(
-    do,
-    q,
-    k,
-    v,
-    o,
-    softmax_lse,
-    dq,
-    dk,
-    dv,
+    do: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    o: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    dq: torch.Tensor,
+    dk: torch.Tensor,
+    dv: torch.Tensor,
     sm_scale: float,
-    alibi_slopes,
-    causal,
-    layout: str,
-    cu_seqlens_q,
-    cu_seqlens_k,
+    alibi_slopes: Optional[torch.Tensor],
+    causal: bool,
+    layout: Literal["bshd", "bhsd", "thd"],
+    cu_seqlens_q: Optional[torch.Tensor],
+    cu_seqlens_k: Optional[torch.Tensor],
     max_seqlen_q: int,
     max_seqlen_k: int,
-    dropout_p, 
-    philox_seed, 
-    philox_offset,
+    dropout_p: float, 
+    philox_seed: Optional[int], 
+    philox_offset: Optional[int],
     use_exp2: bool,
-    sequence_parallel = True,
+    sequence_parallel: bool = True,
     # fp8
-    descale_q=None,
-    descale_k=None,
-    descale_v=None,
-    descale_do=None
+    descale_q: Optional[torch.Tensor] = None,
+    descale_k: Optional[torch.Tensor] = None,
+    descale_v: Optional[torch.Tensor] = None,
+    descale_do: Optional[torch.Tensor] = None,
+    # debug
+    ZERO_TENSORS: bool = False,
+    ACCUMLATE_FP32: bool = False,
 ):
     if DEBUG:
         print()
@@ -636,13 +640,31 @@ def attention_prefill_backward_triton_impl(
         print("descale_v:", descale_v)
         print("descale_do:", descale_do)
 
-    is_fp8 = arch_supports_fp8() and q.dtype in {torch.float8_e4m3fnuz, torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e5m2fnuz}
-    if is_fp8:
-        pass
+    IS_FP8 = arch_supports_fp8() and q.dtype in {torch.float8_e4m3fnuz, torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e5m2fnuz}
+    if IS_FP8:
+        FP8_MAX=torch.finfo(q.dtype).max
+        # fp8 is sensitive
+        ZERO_TENSORS = True
+        ACCUMLATE_FP32 = True
+    else:
+        FP8_MAX=None
     
     if DEBUG:
         print()
-        print("is_fp8:", is_fp8)
+        print("IS_FP8:", IS_FP8)
+
+    # zero out
+    if ZERO_TENSORS:
+        dq.zero_()
+        dk.zero_()
+        dv.zero_()
+    
+    # accumlate to fp32
+    if ACCUMLATE_FP32:
+        og_dtype = dq.dtype
+        dq = dq.to(torch.float32)
+        dk = dk.to(torch.float32)
+        dv = dv.to(torch.float32)
     
     # make contigious
     q = q.contiguous()
@@ -689,23 +711,9 @@ def attention_prefill_backward_triton_impl(
     do = do.contiguous()
 
     # deal with dq
-    if dq is None:
-        if sequence_parallel:
-            dq = torch.zeros((num_blocks_n,) + q.shape, device=q.device, dtype=q.dtype)
-        else:
-            dq = torch.zeros(q.shape, device=q.device, dtype=q.dtype)
+    if sequence_parallel:
+        dq = dq.unsqueeze(0).repeat(num_blocks_n, *([1] * len(q.shape))) # we do repeat instead of expand because we need to write data so views are not enough
     stride_dq_all = dq.stride()[0]
-
-    # deal with dk, dv
-    if (dk is None) or (dv is None):
-        dk = torch.zeros_like(k)
-        dv = torch.zeros_like(v)
-
-
-    # zero out
-    dq.zero_()
-    dk.zero_()
-    dv.zero_()
 
     # assert contigious
     assert do.is_contiguous()
@@ -755,7 +763,7 @@ def attention_prefill_backward_triton_impl(
         Z=batch,
         H=nheads_q,
         IS_VARLEN=is_varlen,
-        IS_FP8=is_fp8
+        IS_FP8=IS_FP8
     )
 
     if DEBUG:
@@ -808,15 +816,20 @@ def attention_prefill_backward_triton_impl(
         waves_per_eu = waves_per_eu,
         IS_VARLEN=is_varlen,
         GROUP_SIZE=group_size,
-        IS_FP8=is_fp8,
-        FP8_MAX=torch.finfo(torch.float8_e4m3fnuz).max
+        IS_FP8=IS_FP8,
+        FP8_MAX=FP8_MAX
     )
 
     if sequence_parallel:
-        if is_fp8:
-            dq = dq.to(torch.float32).sum(dim=0).to(q.dtype)
+        if IS_FP8:
+            dq = dq.to(torch.float32).sum(dim=0)
         else:
             dq = dq.sum(dim=0)
+
+    if ACCUMLATE_FP32:
+        dq = dq.to(og_dtype)
+        dk = dk.to(og_dtype)
+        dv = dv.to(og_dtype)
 
     if DEBUG:
         print("attention_prefill_backward_triton_impl outputs")

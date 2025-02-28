@@ -1,7 +1,7 @@
 import torch
 import triton # type: ignore
 import triton.language as tl # type: ignore
-from typing import Optional
+from typing import Literal, Optional
 from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, compute_fp8_scaling_factors, get_shape_from_layout, \
     get_strides_from_layout, create_dropout_mask, create_dropout_mask_varlen, \
     arch_supports_fp8
@@ -991,58 +991,65 @@ def _bwd_kernel_dq_noncausal(
 
 
 def attention_prefill_backward_triton_split_impl(
-    do,
-    q,
-    k,
-    v,
-    o,
-    softmax_lse,
-    dq,
-    dk,
-    dv,
+    do: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    o: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    dq: torch.Tensor,
+    dk: torch.Tensor,
+    dv: torch.Tensor,
     sm_scale: float,
-    alibi_slopes,
-    causal,
-    layout: str,
-    cu_seqlens_q,
-    cu_seqlens_k,
+    alibi_slopes: Optional[torch.Tensor],
+    causal: bool,
+    layout: Literal["bshd", "bhsd", "thd"],
+    cu_seqlens_q: Optional[torch.Tensor],
+    cu_seqlens_k: Optional[torch.Tensor],
     max_seqlen_q: int,
     max_seqlen_k: int,
-    dropout_p,
-    philox_seed,
-    philox_offset,
+    dropout_p: float,
+    philox_seed: Optional[int],
+    philox_offset: Optional[int],
     use_exp2: bool,
     # fp8
     descale_q: Optional[torch.Tensor] = None,
     descale_k: Optional[torch.Tensor] = None,
     descale_v: Optional[torch.Tensor] = None,
     descale_do: Optional[torch.Tensor] = None,
+    # debug
+    ZERO_TENSORS: bool = False,
+    ACCUMLATE_FP32: bool = False,
     DEBUG_TRITON: bool = False,
     DEBUG_TRITON_DETAIL: bool = False,
 ):
     IS_FP8 = arch_supports_fp8() and q.dtype in {torch.float8_e4m3fnuz, torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e5m2fnuz}
     if IS_FP8:
-        FP8_MAX = torch.finfo(torch.float8_e4m3fnuz).max
+        FP8_MAX = torch.finfo(q.dtype).max
         stride_descale_q_z = descale_q.stride(0)
         stride_descale_k_z = descale_k.stride(0)
         stride_descale_v_z = descale_v.stride(0)
         stride_descale_do_z = descale_do.stride(0)
+
+        # fp8 is sensitive
+        ZERO_TENSORS = True
+        ACCUMLATE_FP32 = True
     else:
         FP8_MAX = None
         stride_descale_q_z = stride_descale_k_z = stride_descale_v_z = stride_descale_do_z = None
 
-    if dq is None:
-        dq = torch.zeros_like(q)
-    if dk is None:
-        dk = torch.zeros_like(k)
-    if dv is None:
-        dv = torch.zeros_like(v)
+    # zero out
+    if ZERO_TENSORS:
+        dq.zero_()
+        dk.zero_()
+        dv.zero_()
 
     # accumlation done in fp32
-    og_dtype = dq.dtype
-    dq = dq.to(torch.float32)
-    dk = dk.to(torch.float32)
-    dv = dv.to(torch.float32)
+    if ACCUMLATE_FP32:
+        og_dtype = dq.dtype
+        dq = dq.to(torch.float32)
+        dk = dk.to(torch.float32)
+        dv = dv.to(torch.float32)
 
     # get strides and shape
     batch, nheads_q, nheads_k, head_size, max_seqlen_q, max_seqlen_k = \
@@ -1257,7 +1264,8 @@ def attention_prefill_backward_triton_split_impl(
             DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
 
-    dq = dq.to(og_dtype)
-    dk = dk.to(og_dtype)
-    dv = dv.to(og_dtype)
+    if ACCUMLATE_FP32:
+        dq = dq.to(og_dtype)
+        dk = dk.to(og_dtype)
+        dv = dv.to(og_dtype)
     return dq, dk, dv, delta

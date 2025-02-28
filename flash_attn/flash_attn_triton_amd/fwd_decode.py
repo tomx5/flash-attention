@@ -1,6 +1,7 @@
 import torch
 import triton
 import triton.language as tl
+from typing import Literal, Optional, Union
 from .utils import _strides, get_padded_headsize
 
 @triton.jit
@@ -519,7 +520,7 @@ def dequantize_kv_fp16(quant_k: torch.Tensor, num_groups: int = 1) -> torch.Tens
     k1_f16 = k1_i4.to(torch.float16) * scale.expand(k_shape) + shift.expand(k_shape)
     k2_f16 = k2_i4.to(torch.float16) * scale.expand(k_shape) + shift.expand(k_shape)
 
-    out = torch.zeros((*k1_f16.shape[:-1], k1_f16.shape[-1] * 2), dtype=torch.float16, device=quant_k.device)
+    out = torch.empty((*k1_f16.shape[:-1], k1_f16.shape[-1] * 2), dtype=torch.float16, device=quant_k.device)
     out[..., ::2] = k1_f16
     out[..., 1::2] = k2_f16
     out = out.reshape(*k_shape[:-2], -1)
@@ -540,7 +541,23 @@ def get_split_k(B: int, G: int, H: int, Mk: int) -> int:
     split_k = max(split_k, 1)
     return split_k
 
-def attention_decode_forward_triton_impl(q, k, v, sm_scale, causal, alibi_slopes, layout, cache_seqlens, cache_batch_idx, new_kv, k_new, v_new):
+def attention_decode_forward_triton_impl(
+        q: torch.Tensor, 
+        k_cache: torch.Tensor, 
+        v_cache: torch.Tensor, 
+        sm_scale: float, 
+        causal: bool, 
+        alibi_slopes: Optional[torch.Tensor], 
+        layout: Literal["bshd", "bhsd", "thd"], 
+        cache_seqlens: Optional[Union[(int, torch.Tensor)]], 
+        cache_batch_idx: Optional[torch.Tensor], 
+        new_kv: bool, 
+        k_new: Optional[torch.Tensor], 
+        v_new: Optional[torch.Tensor],
+        # debug
+        ZERO_TENSORS: bool = False,
+        ACCUMLATE_FP32: bool = False,
+        ):
     # kernel config
     BLOCK_M = 16
     BLOCK_N = 64
@@ -551,16 +568,16 @@ def attention_decode_forward_triton_impl(q, k, v, sm_scale, causal, alibi_slopes
     original_layout = layout
     if layout == "bshd":
         q=q.unsqueeze(2)
-        k=k.unsqueeze(2)
-        v=v.unsqueeze(2)
+        k_cache=k_cache.unsqueeze(2)
+        v_cache=v_cache.unsqueeze(2)
         if new_kv:
             k_new = k_new.unsqueeze(2)
             v_new = v_new.unsqueeze(2)
         layout = "bsghd"
     elif layout == "bhsd":
         q=q.permute(0, 2, 1, 3).unsqueeze(2)
-        k=k.permute(0, 2, 1, 3).unsqueeze(2)
-        v=v.permute(0, 2, 1, 3).unsqueeze(2)
+        k_cache=k_cache.permute(0, 2, 1, 3).unsqueeze(2)
+        v_cache=v_cache.permute(0, 2, 1, 3).unsqueeze(2)
         if new_kv:
             k_new = k_new.permute(0, 2, 1, 3).unsqueeze(2)
             v_new = v_new.permute(0, 2, 1, 3).unsqueeze(2)
@@ -573,10 +590,23 @@ def attention_decode_forward_triton_impl(q, k, v, sm_scale, causal, alibi_slopes
 
     # get dims
     batch_size, seqlen_q, n_group_q, heads_per_group_q, dim_q = q.shape
-    _, seqlen_k, n_group_k, heads_per_group_k, dim_k = k.shape
-    _, seqlen_v, n_group_v, heads_per_group_v, dim_v = v.shape
+    _, seqlen_k, n_group_k, heads_per_group_k, dim_k = k_cache.shape
+    _, seqlen_v, n_group_v, heads_per_group_v, dim_v = v_cache.shape
 
     assert dim_q == dim_k == dim_v, f"Dimensions must match: {dim_q}, {dim_k}, {dim_v}"
+
+
+    # save
+    out = torch.empty((batch_size, seqlen_q, n_group_q, heads_per_group_q, dim_padded), device=q.device, dtype=q.dtype)
+
+    # zero out
+    if ZERO_TENSORS:
+        out.zero_()
+
+    # accumlation done in fp32
+    if ACCUMLATE_FP32:
+        og_dtype = out.dtype
+        out = out.to(torch.float32)
 
     # get padded size
     dim_padded  = get_padded_headsize(dim_k)
@@ -598,9 +628,9 @@ def attention_decode_forward_triton_impl(q, k, v, sm_scale, causal, alibi_slopes
         split_k = get_split_k(batch_size, n_group_q, heads_per_group_q, seqlen_k) # NOTE: should the split think about seqlens?
 
     seqlen_q_ceil = (seqlen_q + BLOCK_M - 1) // BLOCK_M * BLOCK_M
-    out_splitk = torch.zeros([batch_size * n_group_q * heads_per_group_q, split_k, seqlen_q_ceil, dim_padded], dtype=torch.float32, device=q.device)
-    metadata = torch.zeros([batch_size * n_group_q * heads_per_group_q, 2, split_k, seqlen_q_ceil], dtype=torch.float32, device=q.device)
-    lse = torch.zeros((batch_size * n_group_q * heads_per_group_q, seqlen_q), device=q.device, dtype=torch.float32)
+    out_splitk = torch.empty([batch_size * n_group_q * heads_per_group_q, split_k, seqlen_q_ceil, dim_padded], dtype=torch.float32, device=q.device)
+    metadata = torch.empty([batch_size * n_group_q * heads_per_group_q, 2, split_k, seqlen_q_ceil], dtype=torch.float32, device=q.device)
+    lse = torch.empty((batch_size * n_group_q * heads_per_group_q, seqlen_q), device=q.device, dtype=torch.float32)
     grid = (triton.cdiv(seqlen_q, BLOCK_M), batch_size * n_group_q * heads_per_group_q, split_k)
 
     num_warps = 1
@@ -610,8 +640,8 @@ def attention_decode_forward_triton_impl(q, k, v, sm_scale, causal, alibi_slopes
     # TODO: enable quantization
     _fwd_kernel_splitK[grid](
         Q=q,
-        K=k,
-        V=v,
+        K=k_cache,
+        V=v_cache,
         sm_scale=sm_scale,
         Out_splitK=out_splitk,
         Metadata=metadata,
@@ -621,8 +651,8 @@ def attention_decode_forward_triton_impl(q, k, v, sm_scale, causal, alibi_slopes
         Cache_batch_idx=cache_batch_idx,
         Alibi_slopes=alibi_slopes,
         **_strides(q, "qz", "qm", "qg", "qh", "qd"),
-        **_strides(k, "kz", "kn", "kg", "kh", "kd"),
-        **_strides(v, "vz", "vn", "vg", "vh", "vd"),
+        **_strides(k_cache, "kz", "kn", "kg", "kh", "kd"),
+        **_strides(v_cache, "vz", "vn", "vg", "vh", "vd"),
         **_strides(out_splitk, "osk_zhg", "osk_s", "osk_m", "osk_d"),
         **_strides(metadata, "mzhg", "m2", "ms", "mm"),
         **_strides(k_new, "kn_z", "kn_n", "kn_g", "kn_h", "kn_d"),
@@ -650,8 +680,6 @@ def attention_decode_forward_triton_impl(q, k, v, sm_scale, causal, alibi_slopes
         num_warps=num_warps,
         num_stages=1,
     )
-
-    out = torch.zeros((batch_size, seqlen_q, n_group_q, heads_per_group_q, dim_padded), device=q.device, dtype=q.dtype)
 
     # Merge together
     splitK_pow2 = triton.next_power_of_2(split_k)
@@ -699,5 +727,8 @@ def attention_decode_forward_triton_impl(q, k, v, sm_scale, causal, alibi_slopes
         # out=out.transpose(1, 2).contiguous() # this screws up heads and data.
         # the data is laid out properly. Just need to reshape dims
         out = out.reshape(batch_size, seqlen_q, -1, dim_padded)
+
+    if ACCUMLATE_FP32:
+        out = out.to(og_dtype)
 
     return out.narrow(-1, 0, dim_k), lse

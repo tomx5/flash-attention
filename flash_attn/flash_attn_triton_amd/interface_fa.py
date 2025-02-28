@@ -28,7 +28,8 @@ def fwd(q: torch.Tensor,
         gen_: Optional[torch.Tensor] = None,
         descale_q: Optional[torch.Tensor] = None,
         descale_k: Optional[torch.Tensor] = None,
-        descale_v: Optional[torch.Tensor] = None):
+        descale_v: Optional[torch.Tensor] = None,
+    ):
 
     if DEBUG:
         print()
@@ -48,7 +49,7 @@ def fwd(q: torch.Tensor,
 
 
     if o is None:
-        o = torch.zeros_like(q)
+        o = torch.empty_like(q)
 
     # Setup metadata
     metadata = MetaData(sm_scale=softmax_scale)
@@ -125,6 +126,7 @@ def fwd(q: torch.Tensor,
         o.copy_(output_triton)
         softmax_lse=softmax_lse_triton
         sd_mask=sd_mask_triton
+        # return output_triton, softmax_lse_triton, sd_mask_triton, rng_state
 
     if DEBUG:
         print("fwd outputs")
@@ -147,7 +149,7 @@ def bwd(
     alibi_slopes: Optional[torch.Tensor],
     dropout_p: float,
     softmax_scale: float,
-    causal: float,
+    causal: bool,
     window_size_left: int,
     window_size_right: int,
     softcap: float,
@@ -159,11 +161,6 @@ def bwd(
     descale_v: Optional[torch.Tensor] = None,
     descale_do: Optional[torch.Tensor] = None
 ):
-    # NOTE: this might have perf costs
-    dq.zero_()
-    dk.zero_()
-    dv.zero_()
-
     if DEBUG:
         print()
         print("flash_attn_triton_amd.py::bwd")
@@ -186,6 +183,13 @@ def bwd(
         print("deterministic:", deterministic)
         print("gen_:", gen_)
         print("rng_state:", rng_state)
+
+    if dq is None:
+        dq = torch.empty_like(q)
+    if dk is None:
+        dk = torch.empty_like(k)
+    if dv is None:
+        dv = torch.empty_like(v)
 
     if dropout_p > 0.0:
         philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
@@ -260,6 +264,7 @@ def bwd(
         dk.copy_(dk_triton)
         dv.copy_(dv_triton)
         delta = delta_triton
+        # return dq_triton, dk_triton, dv_triton, delta_triton
 
     if DEBUG:
         print("bwd outputs")
@@ -313,7 +318,7 @@ def varlen_fwd(
         print("gen_:", gen_)
 
     if o is None:
-        o = torch.zeros_like(q)
+        o = torch.empty_like(q)
 
     # Setup metadata
     metadata = MetaData(sm_scale=softmax_scale)
@@ -389,6 +394,7 @@ def varlen_fwd(
         o.copy_(output_triton)
         softmax_lse=softmax_lse_triton
         sd_mask=sd_mask_triton
+        # return output_triton, softmax_lse_triton, sd_mask_triton, rng_state
     if DEBUG:
         print("varlen_fwd outputs")
         print("o:", o, o.shape)
@@ -428,11 +434,6 @@ def varlen_bwd(
     descale_v: Optional[torch.Tensor] = None,
     descale_do: Optional[torch.Tensor] = None
 ):
-    # NOTE: this is important especially for fp8 where we are sensitive to small fluctuations
-    dq.zero_()
-    dk.zero_()
-    dv.zero_()
-
     if DEBUG:
         print()
         print("varlen_bwd")
@@ -458,6 +459,13 @@ def varlen_bwd(
         print("deterministic:", deterministic)
         print("gen_:", gen_)
         print("rng_state:", rng_state)
+
+    if dq is None:
+        dq = torch.empty_like(q)
+    if dk is None:
+        dk = torch.empty_like(k)
+    if dv is None:
+        dv = torch.empty_like(v)
 
     if dropout_p > 0.0:
         philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
@@ -531,6 +539,7 @@ def varlen_bwd(
         dk.copy_(dk_triton)
         dv.copy_(dv_triton)
         delta = delta_triton
+        # return dq_triton, dk_triton, dv_triton, delta_triton
 
     if DEBUG:
         print("varlen_bwd outputs")
@@ -565,7 +574,7 @@ def fwd_kvcache(
     ):
 
     if out is None:
-        out = torch.zeros_like(q)
+        out = torch.empty_like(q)
 
     # fill metadata
     metadata = MetaData(sm_scale=softmax_scale)

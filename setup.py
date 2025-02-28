@@ -317,10 +317,8 @@ elif not SKIP_CUDA_BUILD and IS_ROCM:
     TORCH_MAJOR = int(torch.__version__.split(".")[0])
     TORCH_MINOR = int(torch.__version__.split(".")[1])
 
-    if SKIP_CK_BUILD:
-        # Skip C++ extension compilation if using Triton Backend
-        pass
-    else:
+    # Skips CK C++ extension compilation if using Triton Backend
+    if not SKIP_CK_BUILD:
         ck_dir = "csrc/composable_kernel"
 
         #use codegen get code dispatch

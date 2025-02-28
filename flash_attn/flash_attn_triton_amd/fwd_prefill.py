@@ -1,7 +1,7 @@
 import torch
 import triton
 import triton.language as tl
-from typing import Optional
+from typing import Literal, Optional
 from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, AUTOTUNE, arch_supports_fp8, compute_fp8_scaling_factors, get_shape_from_layout, get_strides_from_layout, is_cdna, is_rdna, write_dropout_mask, create_dropout_mask
 
 # NOTE: triton fails to import tl.constexprs so create them here for the file
@@ -542,31 +542,34 @@ def attn_fwd(Q, K, V, bias,
 
 
 def attention_prefill_forward_triton_impl(
-                                        q,
-                                        k,
-                                        v,
-                                        o,
-                                        sm_scale,
-                                        alibi_slopes,
-                                        causal,
-                                        bias,
-                                        layout,
+                                        q: torch.Tensor,
+                                        k: torch.Tensor,
+                                        v: torch.Tensor,
+                                        o: torch.Tensor,
+                                        sm_scale: float,
+                                        alibi_slopes: Optional[torch.Tensor],
+                                        causal: bool,
+                                        bias: Optional[torch.Tensor],
+                                        layout: Literal["bshd", "bhsd", "thd"],
                                         # varlen
-                                        cu_seqlens_q, 
-                                        cu_seqlens_k,
-                                        max_seqlens_q, 
-                                        max_seqlens_k, 
+                                        cu_seqlens_q: Optional[torch.Tensor], 
+                                        cu_seqlens_k: Optional[torch.Tensor],
+                                        max_seqlens_q: int, 
+                                        max_seqlens_k: int, 
                                         # dropout
-                                        dropout_p,
-                                        philox_seed,
-                                        philox_offset,
+                                        dropout_p: float,
+                                        philox_seed: Optional[int],
+                                        philox_offset: Optional[int],
                                         # misc
-                                        return_softmax,
-                                        use_exp2,
+                                        return_softmax: bool,
+                                        use_exp2: bool,
                                         # fp8
                                         descale_q: Optional[torch.Tensor] = None,
                                         descale_k: Optional[torch.Tensor] = None,
-                                        descale_v: Optional[torch.Tensor] = None
+                                        descale_v: Optional[torch.Tensor] = None,
+                                        # debug
+                                        ZERO_TENSORS: bool = False,
+                                        ACCUMLATE_FP32: bool = False,
 ):
 
     if DEBUG:
@@ -591,9 +594,9 @@ def attention_prefill_forward_triton_impl(
         print("return_scores:", return_softmax)
         print("use_exp2:", use_exp2)
 
-    is_fp8 = arch_supports_fp8() and q.dtype in {torch.float8_e4m3fnuz, torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e5m2fnuz}
-    if is_fp8:
-        type_max = torch.finfo(q.dtype).max
+    IS_FP8 = arch_supports_fp8() and q.dtype in {torch.float8_e4m3fnuz, torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e5m2fnuz}
+    if IS_FP8:
+        FP8_MAX=torch.finfo(q.dtype).max
         if layout == "bshd":
             batch, _ , nheads_q, dim = q.shape
             _, _ , nheads_k, _ = k.shape
@@ -611,24 +614,34 @@ def attention_prefill_forward_triton_impl(
         descale_q_stride_z = descale_q.stride(0)
         descale_k_stride_z = descale_k.stride(0)
         descale_v_stride_z = descale_v.stride(0)
+
+        # fp8 is sensitive
+        ZERO_TENSORS = True
+        ACCUMLATE_FP32 = True
     else:
         descale_q = descale_k = descale_v = None
         descale_q_stride_z = descale_k_stride_z = descale_v_stride_z = None
+        FP8_MAX = None
+
+    # zero out
+    if ZERO_TENSORS:
+        o.zero_()
 
     # accumlation done in fp32
-    og_dtype = q.dtype
-    o = o.to(torch.float32)
+    if ACCUMLATE_FP32:
+        og_dtype = o.dtype
+        o = o.to(torch.float32)
 
     if DEBUG:
-        print("is_fp8:", is_fp8)
+        print("is_fp8:", IS_FP8)
         print("descale_q:", descale_q)
         print("descale_k:", descale_k)
         print("descale_v:", descale_v)
         print("descale_q_stride_z:", descale_q_stride_z)
         print("descale_k_stride_z:", descale_k_stride_z)
         print("descale_v_stride_z:", descale_v_stride_z)
-        if is_fp8:
-            print(f"type_max: {type_max}")
+        if IS_FP8:
+            print(f"FP8_MAX: {FP8_MAX}")
             
 
     # check if varlen
@@ -698,7 +711,7 @@ def attention_prefill_forward_triton_impl(
                     MAX_SEQLENS_K=max_seqlens_k, IS_CAUSAL=causal, VARLEN=is_varlen,
                     BLOCK_DMODEL=padded_d_model, USE_BIAS=False if bias is None else True,
                     USE_ALIBI=False if alibi_slopes is None else True, ENABLE_DROPOUT=dropout_p
-                    > 0.0, USE_EXP2=use_exp2, RETURN_SCORES=return_softmax, IS_FP8=is_fp8, FP8_MAX=torch.finfo(q.dtype).max)
+                    > 0.0, USE_EXP2=use_exp2, RETURN_SCORES=return_softmax, IS_FP8=IS_FP8, FP8_MAX=FP8_MAX)
 
     if DEBUG:
         print()
@@ -711,6 +724,7 @@ def attention_prefill_forward_triton_impl(
             print("dropout_fraction fwd:", 1.0 - (dropout_mask.sum()/ dropout_mask.numel()).item())
             write_dropout_mask(dropout_mask, "dropout_mask_fwd")
 
-    o = o.to(og_dtype)
+    if ACCUMLATE_FP32:
+        o = o.to(og_dtype)
 
     return o, softmax_lse, sd_mask if return_softmax else None 

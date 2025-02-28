@@ -24,28 +24,7 @@ if USE_TRITON_ROCM: # TODO remove this
 DROPOUT_USE_PYTORCH = False
 DROPOUT_DUMP = False
 
-# -------------------------------
-# Runtime info
-# -------------------------------
-@functools.cache
-def is_hip():
-    return triton.runtime.driver.active.get_current_target().backend == "hip"
 
-@functools.cache
-def get_arch():
-    return triton.runtime.driver.active.get_current_target().arch
-
-@functools.cache
-def is_cdna():
-    return is_hip() and get_arch() in ('gfx908', 'gfx90a', 'gfx940', 'gfx941', 'gfx942')
-
-@functools.cache
-def is_rdna():
-    return is_hip() and get_arch() in ("gfx1030", "gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201")
-
-@functools.cache
-def arch_supports_fp8():
-    return is_hip() and get_arch() in ('gfx942')
 
 # -------------------------------
 # Metadata
@@ -173,44 +152,6 @@ class MetaData():
 # -------------------------------
 # Input Helper
 # -------------------------------
-def nonvarlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device="cuda", DEBUG_INPUT=False):
-    torch.manual_seed(20)
-
-    # Initialize q, k, v
-    if layout == 'bhsd':
-        q_tensor_shape = (Z, HQ, N_CTX_Q, D_HEAD)
-        k_tensor_shape = (Z, HK, N_CTX_K, D_HEAD)
-    elif layout == 'bshd':
-        q_tensor_shape = (Z, N_CTX_Q, HQ, D_HEAD)
-        k_tensor_shape = (Z, N_CTX_K, HK, D_HEAD)
-    else:
-        assert False, f'Got unsupported tensor layout: {layout}'
-
-    if DEBUG_INPUT:
-        if layout == "bhsd":
-            q = torch.arange(N_CTX_Q, dtype=dtype, device=device).view(1, 1, N_CTX_Q, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
-            k = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
-            v = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
-        elif layout == "bshd":
-            q = torch.arange(N_CTX_Q, dtype=dtype, device=device).view(1, N_CTX_Q, 1, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
-            k = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
-            v = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
-    else:
-        q = torch.randn(q_tensor_shape, dtype=dtype, device=device, requires_grad=True)
-        k = torch.randn(k_tensor_shape, dtype=dtype, device=device, requires_grad=True)
-        v = torch.randn(k_tensor_shape, dtype=dtype, device=device, requires_grad=True)
-    
-    if DEBUG_INPUT:
-        sm_scale = 1
-    else:
-        sm_scale = D_HEAD**-0.5
-    input_metadata = MetaData(sm_scale=sm_scale)
-    input_metadata.max_seqlens_q = N_CTX_Q
-    input_metadata.max_seqlens_k = N_CTX_K
-    input_metadata.layout = layout
-    return q, k, v, input_metadata
-
-
 def random_seqlens_composition(N, Z):
     # generate a random composition of N into Z positive parts.
     idx = torch.randperm(N - 1)[: Z - 1] + 1
@@ -280,6 +221,43 @@ def varlen_input_helper(BATCH, HQ, HK, TOTAL_SEQLENS_Q, TOTAL_SEQLENS_K, D_HEAD,
     input_metadata = MetaData(sm_scale=sm_scale)
     input_metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k)
 
+    return q, k, v, input_metadata
+
+def nonvarlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device="cuda", DEBUG_INPUT=False):
+    torch.manual_seed(20)
+
+    # Initialize q, k, v
+    if layout == 'bhsd':
+        q_tensor_shape = (Z, HQ, N_CTX_Q, D_HEAD)
+        k_tensor_shape = (Z, HK, N_CTX_K, D_HEAD)
+    elif layout == 'bshd':
+        q_tensor_shape = (Z, N_CTX_Q, HQ, D_HEAD)
+        k_tensor_shape = (Z, N_CTX_K, HK, D_HEAD)
+    else:
+        assert False, f'Got unsupported tensor layout: {layout}'
+
+    if DEBUG_INPUT:
+        if layout == "bhsd":
+            q = torch.arange(N_CTX_Q, dtype=dtype, device=device).view(1, 1, N_CTX_Q, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
+            k = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+            v = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+        elif layout == "bshd":
+            q = torch.arange(N_CTX_Q, dtype=dtype, device=device).view(1, N_CTX_Q, 1, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
+            k = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+            v = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+    else:
+        q = torch.randn(q_tensor_shape, dtype=dtype, device=device, requires_grad=True)
+        k = torch.randn(k_tensor_shape, dtype=dtype, device=device, requires_grad=True)
+        v = torch.randn(k_tensor_shape, dtype=dtype, device=device, requires_grad=True)
+    
+    if DEBUG_INPUT:
+        sm_scale = 1
+    else:
+        sm_scale = D_HEAD**-0.5
+    input_metadata = MetaData(sm_scale=sm_scale)
+    input_metadata.max_seqlens_q = N_CTX_Q
+    input_metadata.max_seqlens_k = N_CTX_K
+    input_metadata.layout = layout
     return q, k, v, input_metadata
 
 def input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device="cuda", DEBUG_INPUT=False):
@@ -630,3 +608,26 @@ def write_dropout_mask(x, tensor_name = "tensor"):
                                 writer.writerow(row_data)
                 else:
                     writer.writerows(dropout_mask)
+
+# -------------------------------
+# Runtime info
+# -------------------------------
+@functools.cache
+def is_hip():
+    return triton.runtime.driver.active.get_current_target().backend == "hip"
+
+@functools.cache
+def get_arch():
+    return triton.runtime.driver.active.get_current_target().arch
+
+@functools.cache
+def is_cdna():
+    return is_hip() and get_arch() in ('gfx908', 'gfx90a', 'gfx940', 'gfx941', 'gfx942')
+
+@functools.cache
+def is_rdna():
+    return is_hip() and get_arch() in ("gfx1030", "gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201")
+
+@functools.cache
+def arch_supports_fp8():
+    return is_hip() and get_arch() in ('gfx942')
