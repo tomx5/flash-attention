@@ -828,4 +828,4 @@ def attention_prefill_backward_triton_impl(
             print("dropout_fraction bwd:", 1.0 - (dropout_mask.sum()/ dropout_mask.numel()).item())
             write_dropout_mask(dropout_mask, "dropout_mask_bwd")
 
-    return dq, dk, dv, delta, None, None
+    return dq, dk, dv, delta

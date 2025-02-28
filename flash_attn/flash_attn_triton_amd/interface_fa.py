@@ -9,23 +9,23 @@ from .bwd_ref import attention_backward_pytorch_ref_impl
 from .utils import DEBUG_TRITON, DEBUG_TRITON_DETAIL, MetaData, get_shape_from_layout, DEBUG, USE_SINGLE_BWD_KERNEL
 from einops import rearrange, repeat
 from flash_attn.layers.rotary import apply_rotary_emb
-from typing import Optional
+from typing import Optional, Union
 
 USE_REF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_REF', '0').lower() in ('1', 'true', 'yes')
 
-def fwd(q,
-        k,
-        v,
-        o,
-        alibi_slopes,
-        dropout_p,
-        softmax_scale,
-        causal,
-        window_size_left,
-        window_size_right,
-        softcap,
-        return_softmax,
-        gen_,
+def fwd(q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        o: Optional[torch.Tensor],
+        alibi_slopes: Optional[torch.Tensor],
+        dropout_p: float,
+        softmax_scale: float,
+        causal: bool,
+        window_size_left: int,
+        window_size_right: int,
+        softcap: float,
+        return_softmax: bool,
+        gen_: Optional[torch.Tensor] = None,
         descale_q: Optional[torch.Tensor] = None,
         descale_k: Optional[torch.Tensor] = None,
         descale_v: Optional[torch.Tensor] = None):
@@ -79,7 +79,7 @@ def fwd(q,
     if USE_REF:
         if DEBUG:
             print("Using reference implementation")
-        output, softmax_lse, sd_mask = attention_forward_pytorch_ref_impl(
+        output_ref, softmax_lse_ref, sd_mask_ref = attention_forward_pytorch_ref_impl(
                                                 q,
                                                 k,
                                                 v,
@@ -94,11 +94,13 @@ def fwd(q,
                                                 metadata.philox_seed,
                                                 metadata.philox_offset,
                                                 metadata.use_exp2)
-        o.copy_(output)
+        o.copy_(output_ref)
+        softmax_lse=softmax_lse_ref
+        sd_mask=sd_mask_ref
     else:
         if DEBUG:
             print("Using Triton implementation")
-        output, softmax_lse, sd_mask = attention_prefill_forward_triton_impl(
+        output_triton, softmax_lse_triton, sd_mask_triton = attention_prefill_forward_triton_impl(
                                                 q,
                                                 k,
                                                 v,
@@ -120,6 +122,9 @@ def fwd(q,
                                                 descale_q,
                                                 descale_k,
                                                 descale_v)
+        o.copy_(output_triton)
+        softmax_lse=softmax_lse_triton
+        sd_mask=sd_mask_triton
 
     if DEBUG:
         print("fwd outputs")
@@ -130,25 +135,25 @@ def fwd(q,
     return o, softmax_lse, sd_mask, rng_state
 
 def bwd(
-    dout,
-    q,
-    k,
-    v,
-    out,
-    softmax_lse,
-    dq,
-    dk,
-    dv,
-    alibi_slopes,
-    dropout_p,
-    softmax_scale,
-    causal,
-    window_size_left,
-    window_size_right,
-    softcap,
-    deterministic,
-    gen_,
-    rng_state,
+    dout: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    dq: Optional[torch.Tensor],
+    dk: Optional[torch.Tensor],
+    dv: Optional[torch.Tensor],
+    alibi_slopes: Optional[torch.Tensor],
+    dropout_p: float,
+    softmax_scale: float,
+    causal: float,
+    window_size_left: int,
+    window_size_right: int,
+    softcap: float,
+    deterministic: bool,
+    gen_: Optional[torch.Tensor] = None,
+    rng_state:Optional[torch.Tensor] = None,
     descale_q: Optional[torch.Tensor] = None,
     descale_k: Optional[torch.Tensor] = None,
     descale_v: Optional[torch.Tensor] = None,
@@ -222,7 +227,7 @@ def bwd(
             bwd = attention_prefill_backward_triton_impl
         else:
             bwd = attention_prefill_backward_triton_split_impl
-        _, _, _, delta_triton, _, _ = bwd(
+        dq_triton, dk_triton, dv_triton, delta_triton = bwd(
             dout,
             q,
             k,
@@ -251,6 +256,9 @@ def bwd(
             DEBUG_TRITON=DEBUG_TRITON,
             DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
+        dq.copy_(dq_triton)
+        dk.copy_(dk_triton)
+        dv.copy_(dv_triton)
         delta = delta_triton
 
     if DEBUG:
@@ -261,27 +269,27 @@ def bwd(
     return dq, dk, dv, delta
 
 def varlen_fwd(
-        q,
-        k,
-        v,
-        o,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        seqused_k,
-        leftpad_k,
-        block_table_,
-        alibi_slopes,
-        max_seqlen_q,
-        max_seqlen_k,
-        dropout_p,
-        softmax_scale,
-        zero_tensors,
-        causal,
-        window_size_left,
-        window_size_right,
-        softcap,
-        return_softmax,
-        gen_,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        o: Optional[torch.Tensor],
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        seqused_k: Optional[torch.Tensor],
+        leftpad_k: Optional[torch.Tensor],
+        block_table_: Optional[torch.Tensor],
+        alibi_slopes: Optional[torch.Tensor],
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        dropout_p: float,
+        softmax_scale: float,
+        zero_tensors: bool ,
+        causal: bool ,
+        window_size_left: int,
+        window_size_right: int,
+        softcap: float,
+        return_softmax: bool,
+        gen_: Optional[torch.Tensor] = None,
         descale_q: Optional[torch.Tensor] = None,
         descale_k: Optional[torch.Tensor] = None,
         descale_v: Optional[torch.Tensor] = None):
@@ -335,7 +343,7 @@ def varlen_fwd(
     if USE_REF:
         if DEBUG:
             print("Using reference implementation")
-        output, softmax_lse, sd_mask = attention_forward_pytorch_ref_impl(
+        output_ref, softmax_lse_ref, sd_mask_ref = attention_forward_pytorch_ref_impl(
                                                 q,
                                                 k,
                                                 v,
@@ -350,11 +358,13 @@ def varlen_fwd(
                                                 metadata.philox_seed,
                                                 metadata.philox_offset,
                                                 metadata.use_exp2)
-        o.copy_(output)
+        o.copy_(output_ref)
+        softmax_lse=softmax_lse_ref
+        sd_mask=sd_mask_ref
     else:
         if DEBUG:
             print("Using Triton implementation")
-        output, softmax_lse, sd_mask = attention_prefill_forward_triton_impl(
+        output_triton, softmax_lse_triton, sd_mask_triton = attention_prefill_forward_triton_impl(
                                                             q,
                                                             k,
                                                             v,
@@ -376,6 +386,9 @@ def varlen_fwd(
                                                             descale_q,
                                                             descale_k,
                                                             descale_v)
+        o.copy_(output_triton)
+        softmax_lse=softmax_lse_triton
+        sd_mask=sd_mask_triton
     if DEBUG:
         print("varlen_fwd outputs")
         print("o:", o, o.shape)
@@ -386,30 +399,30 @@ def varlen_fwd(
     return o, softmax_lse, sd_mask, rng_state
 
 def varlen_bwd(
-    dout,
-    q,
-    k,
-    v,
-    out,
-    softmax_lse,
-    dq,
-    dk,
-    dv,
-    cu_seqlens_q,
-    cu_seqlens_k,
-    alibi_slopes,
-    max_seqlen_q,
-    max_seqlen_k,
-    dropout_p,
-    softmax_scale,
-    zero_tensors,
-    causal,
-    window_size_left,
-    window_size_right,
-    softcap,
-    deterministic,
-    gen_,
-    rng_state,
+    dout: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    dq: Optional[torch.Tensor],
+    dk: Optional[torch.Tensor],
+    dv: Optional[torch.Tensor],
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    alibi_slopes: Optional[torch.Tensor],
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    dropout_p: float,
+    softmax_scale: float,
+    zero_tensors: bool,
+    causal: bool,
+    window_size_left: int,
+    window_size_right: int,
+    softcap: float,
+    deterministic: bool,
+    gen_ : Optional[torch.Tensor] = None,
+    rng_state: Optional[torch.Tensor] = None,
     descale_q: Optional[torch.Tensor] = None,
     descale_k: Optional[torch.Tensor] = None,
     descale_v: Optional[torch.Tensor] = None,
@@ -485,7 +498,7 @@ def varlen_bwd(
             bwd = attention_prefill_backward_triton_impl
         else:
             bwd = attention_prefill_backward_triton_split_impl
-        dq_triton, dk_triton, dv_triton, delta_triton, _, _ = bwd(
+        dq_triton, dk_triton, dv_triton, delta_triton = bwd(
             dout,
             q,
             k,
@@ -514,6 +527,9 @@ def varlen_bwd(
             DEBUG_TRITON=DEBUG_TRITON,
             DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
+        dq.copy_(dq_triton)
+        dk.copy_(dk_triton)
+        dv.copy_(dv_triton)
         delta = delta_triton
 
     if DEBUG:
@@ -526,26 +542,27 @@ def varlen_bwd(
     return dq, dk, dv, delta
 
 def fwd_kvcache(
-        q,
-        k_cache,
-        v_cache,
-        k,
-        v,
-        cache_seqlens,
-        rotary_cos,
-        rotary_sin,
-        cache_batch_idx,
-        cache_leftpad,
-        block_table,
-        alibi_slopes,
-        out,
-        softmax_scale,
-        causal,
-        window_size_left,
-        window_size_right,
-        softcap,
-        rotary_interleaved,
-        num_splits):
+        q: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        k: Optional[torch.Tensor],
+        v: Optional[torch.Tensor],
+        cache_seqlens: Optional[Union[(int, torch.Tensor)]],
+        rotary_cos: Optional[torch.Tensor],
+        rotary_sin: Optional[torch.Tensor],
+        cache_batch_idx: Optional[torch.Tensor],
+        cache_leftpad: Optional[torch.Tensor],
+        block_table: Optional[torch.Tensor],
+        alibi_slopes: Optional[torch.Tensor],
+        out: Optional[torch.Tensor],
+        softmax_scale: float,
+        causal: bool,
+        window_size_left: int,
+        window_size_right: int,
+        softcap: float,
+        rotary_interleaved: bool,
+        num_splits: int
+    ):
 
     if out is None:
         out = torch.zeros_like(q)
@@ -610,7 +627,7 @@ def fwd_kvcache(
 
     # launch kernel
     # TODO: pass output as an arg. Maybe we are copying output which is causing slow down
-    output, softmax_lse = attention_decode_forward_triton_impl(
+    output_triton, softmax_lse_triton = attention_decode_forward_triton_impl(
         q,
         k_cache,
         v_cache,
@@ -624,4 +641,8 @@ def fwd_kvcache(
         metadata.k_new,
         metadata.v_new,
     )
-    return output, softmax_lse
+    out.copy_(output_triton)
+    softmax_lse = softmax_lse_triton
+
+
+    return out, softmax_lse

@@ -616,6 +616,7 @@ def attention_prefill_forward_triton_impl(
         descale_q_stride_z = descale_k_stride_z = descale_v_stride_z = None
 
     # accumlation done in fp32
+    og_dtype = q.dtype
     o = o.to(torch.float32)
 
     if DEBUG:
@@ -710,4 +711,6 @@ def attention_prefill_forward_triton_impl(
             print("dropout_fraction fwd:", 1.0 - (dropout_mask.sum()/ dropout_mask.numel()).item())
             write_dropout_mask(dropout_mask, "dropout_mask_fwd")
 
-    return o, softmax_lse, sd_mask.to(o.dtype) if return_softmax else None 
+    o = o.to(og_dtype)
+
+    return o, softmax_lse, sd_mask if return_softmax else None 

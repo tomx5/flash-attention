@@ -1039,6 +1039,7 @@ def attention_prefill_backward_triton_split_impl(
         dv = torch.zeros_like(v)
 
     # accumlation done in fp32
+    og_dtype = dq.dtype
     dq = dq.to(torch.float32)
     dk = dk.to(torch.float32)
     dv = dv.to(torch.float32)
@@ -1256,4 +1257,7 @@ def attention_prefill_backward_triton_split_impl(
             DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
 
-    return dq, dk, dv, delta, None, None
+    dq = dq.to(og_dtype)
+    dk = dk.to(og_dtype)
+    dv = dv.to(og_dtype)
+    return dq, dk, dv, delta
