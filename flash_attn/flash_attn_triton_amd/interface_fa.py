@@ -13,9 +13,10 @@ from typing import Optional, Union
 
 USE_REF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_REF', '0').lower() in ('1', 'true', 'yes')
 
-def out_tensor_like(x, zero_tensors = True):
+def create_output_tensor_like(x, zero_tensors = True):
     if is_fp8(x):
-        out_type = torch.float32
+        # out_type = torch.float32
+        out_type = x.dtype
     else:
         out_type = x.dtype
 
@@ -26,10 +27,15 @@ def out_tensor_like(x, zero_tensors = True):
         return torch.empty_like(x, dtype=out_type)
 
 
+def prep_output_tensor(x):
+    x.zero_()
+    return x
+
+
 def fwd(q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        o: Optional[torch.Tensor],
+        out: Optional[torch.Tensor],
         alibi_slopes: Optional[torch.Tensor],
         dropout_p: float,
         softmax_scale: float,
@@ -46,11 +52,11 @@ def fwd(q: torch.Tensor,
 
     if DEBUG:
         print()
-        print("flash_attn_triton_amd.py::fwd")
+        print("flash_attn_triton_amd.py::fwd inputs")
         print("q:", q, q.shape)
         print("k:", k, k.shape)
         print("v:", v, v.shape)
-        print("o:", o)
+        print("out:", out, out.shape if out else None)
         print("alibi_slopes:", alibi_slopes)
         print("dropout_p:", dropout_p)
         print("softmax_scale:", softmax_scale)
@@ -61,7 +67,7 @@ def fwd(q: torch.Tensor,
         print("return_softmax:", return_softmax)
 
 
-    o = out_tensor_like(q) if o is None else o.zero_() # if given a tensor we should maybe make it fp32 if given fp8
+    out = create_output_tensor_like(q) if out is None else prep_output_tensor(out) # if given a tensor we should maybe make it fp32 if given fp8
 
     # Setup metadata
     metadata = MetaData(sm_scale=softmax_scale)
@@ -86,7 +92,7 @@ def fwd(q: torch.Tensor,
         rng_state = None
 
     # check arguments
-    metadata.check_args(q, k, v, o)
+    metadata.check_args(q, k, v, out)
 
     # call implementation
     if USE_REF:
@@ -116,7 +122,7 @@ def fwd(q: torch.Tensor,
                                                 q,
                                                 k,
                                                 v,
-                                                o,
+                                                out,
                                                 metadata.sm_scale,
                                                 metadata.alibi_slopes,
                                                 metadata.causal,
@@ -138,12 +144,12 @@ def fwd(q: torch.Tensor,
         sd_mask=sd_mask_triton
 
     if DEBUG:
-        print("fwd outputs")
-        print("o:", o, o.shape)
+        print("flash_attn_triton_amd.py::fwd outputs")
+        print("o:", out, out.shape)
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
         print("exp_scores:", sd_mask, sd_mask.shape if sd_mask is not None else None )
 
-    return o, softmax_lse, sd_mask, rng_state
+    return out, softmax_lse, sd_mask, rng_state
 
 def bwd(
     dout: torch.Tensor,
@@ -172,7 +178,7 @@ def bwd(
 ):
     if DEBUG:
         print()
-        print("flash_attn_triton_amd.py::bwd")
+        print("flash_attn_triton_amd.py::bwd inputs")
         print("dout:", dout, dout.shape)
         print("q:", q, q.shape)
         print("k:", k, k.shape)
@@ -193,9 +199,9 @@ def bwd(
         print("gen_:", gen_)
         print("rng_state:", rng_state)
 
-    dq = out_tensor_like(q) if dq is None else dq.zero_()
-    dk =  out_tensor_like(k) if dk is None else dk.zero_()
-    dv =  out_tensor_like(v) if dv is None else dv.zero_()
+    dq = create_output_tensor_like(q) if dq is None else prep_output_tensor(dq)
+    dk =  create_output_tensor_like(k) if dk is None else prep_output_tensor(dk)
+    dv =  create_output_tensor_like(v) if dv is None else prep_output_tensor(dv)
 
     if dropout_p > 0.0:
         philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
@@ -266,7 +272,7 @@ def bwd(
         delta = delta_triton
 
     if DEBUG:
-        print("bwd outputs")
+        print("flash_attn_triton_amd.py::bwd outputs")
         print("dv:", dv, dv.shape)
         print("dk:", dk, dk.shape)
         print("dq:", dq, dq.shape)
@@ -316,7 +322,7 @@ def varlen_fwd(
         print("window_size_right:", window_size_right)
         print("gen_:", gen_)
 
-    o = out_tensor_like(q) if o is None else o.zero_()
+    o = create_output_tensor_like(q) if o is None else prep_output_tensor(o)
 
     # Setup metadata
     metadata = MetaData(sm_scale=softmax_scale)
@@ -437,6 +443,7 @@ def varlen_bwd(
         print("q:", q, q.shape)
         print("k:", k, k.shape)
         print("v:", v, v.shape)
+        print("out:", out)
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
         print("dq:", dq, dq.shape)
         print("dk:", dk, dk.shape)
@@ -447,7 +454,6 @@ def varlen_bwd(
         print("max_seqlen_q:", max_seqlen_q)
         print("max_seqlen_k:", max_seqlen_k)
         print("dropout_p:", dropout_p)
-        print("out:", out)
         print("softmax_scale:", softmax_scale)
         print("causal:", causal)
         print("window_size_left:", window_size_left)
@@ -456,9 +462,9 @@ def varlen_bwd(
         print("gen_:", gen_)
         print("rng_state:", rng_state)
 
-    dq = out_tensor_like(q) if dq is None else dq.zero_()
-    dk =  out_tensor_like(k) if dk is None else dk.zero_()
-    dv =  out_tensor_like(v) if dv is None else dv.zero_()
+    dq = create_output_tensor_like(q) if dq is None else prep_output_tensor(dq)
+    dk =  create_output_tensor_like(k) if dk is None else prep_output_tensor(dk)
+    dv =  create_output_tensor_like(v) if dv is None else prep_output_tensor(dv)
 
     if dropout_p > 0.0:
         philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
@@ -559,7 +565,7 @@ def fwd_kvcache(
         num_splits: int
     ):
 
-    o = out_tensor_like(q) if o is None else o.zero_()
+    out = create_output_tensor_like(q) if out is None else prep_output_tensor(out)
 
     # fill metadata
     metadata = MetaData(sm_scale=softmax_scale)

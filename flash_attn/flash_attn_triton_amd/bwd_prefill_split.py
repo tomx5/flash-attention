@@ -28,7 +28,8 @@ def _bwd_preprocess(
     HEAD_DIM: tl.constexpr,
     ACTUAL_HEAD_DIM: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    IS_FP8: tl.constexpr
+    IS_FP8: tl.constexpr,
+    FP8_MAX: tl.constexpr
 ):
     pid_m = tl.program_id(0)
     bid = tl.program_id(1)
@@ -67,8 +68,10 @@ def _bwd_preprocess(
     if IS_FP8:
         descale_do = tl.load(Descale_do + bid * stride_descale_do_z + hid)
 
-        # NOTE: do is scaled into the fp8 range and o is in fp8 but should be in the same scale as fp32
-        delta = tl.sum(o.to(tl.float32) * (do.to(tl.float32) * descale_do), axis=1)
+        scale_o, descale_o = compute_fp8_scaling_factors(o, FP8_MAX)
+
+        # NOTE: do & o is scaled into the fp8 range
+        delta = tl.sum((o.to(tl.float32) * descale_o) * (do.to(tl.float32) * descale_do), axis=1)
     else:
         delta = tl.sum(o.to(tl.float32) * do.to(tl.float32), axis=1)
     delta_offset = Delta + bid * stride_deltab + hid * stride_deltah + q_start * stride_deltam
@@ -421,9 +424,17 @@ def _bwd_kernel_dkdv_causal(
     # Write back dV and dK.
     adj_dkdv = bid * stride_dkb + hkid * stride_kh + k_start * stride_dkn
     offs_dkdv = offs_n[:, None] * stride_dkn + offs_k[None, :] * stride_dkk
-    tl.store(DV + adj_dkdv + offs_dkdv, dv, mask=mask_kv)
+    if IS_FP8:
+        scale_dv, _ = compute_fp8_scaling_factors(dv, FP8_MAX)
+        tl.store(DV + adj_dkdv + offs_dkdv, (dv * scale_dv).to(DV.dtype.element_ty), mask=mask_kv)
+    else:
+        tl.store(DV + adj_dkdv + offs_dkdv, dv, mask=mask_kv)
     dk *= sm_scale
-    tl.store(DK + adj_dkdv + offs_dkdv, dk, mask=mask_kv)
+    if IS_FP8:
+        scale_dk, _ = compute_fp8_scaling_factors(dk, FP8_MAX)
+        tl.store(DK + adj_dkdv + offs_dkdv, (dk * scale_dk).to(DK.dtype.element_ty), mask=mask_kv)
+    else:
+        tl.store(DK + adj_dkdv + offs_dkdv, dk, mask=mask_kv)
 
 
 # the main inner-loop logic for computing dQ
@@ -724,7 +735,11 @@ def _bwd_kernel_dq_causal(
         adj_dq = bid * stride_dqb + hqid * stride_dqh + q_start * stride_dqm
         offs_dq = offs_m[:, None] * stride_dqm + offs_k[None, :] * stride_dqk
         dq *= sm_scale
-        tl.store(DQ + adj_dq + offs_dq, dq, mask=mask_q)
+        if IS_FP8:
+            scale_dq, _ = compute_fp8_scaling_factors(dq, FP8_MAX)
+            tl.store(DQ + adj_dq + offs_dq, (dq * scale_dq).to(DQ.dtype.element_ty), mask=mask_q)
+        else:
+            tl.store(DQ + adj_dq + offs_dq, dq, mask=mask_q)
 
 
 @triton.jit
@@ -853,9 +868,17 @@ def _bwd_kernel_dkdv_noncausal(
     # Write back dV and dK.
     adj_dkdv = bid * stride_dkb + hkid * stride_kh + k_start * stride_dkn
     offs_dkdv = offs_n[:, None] * stride_dkn + offs_k[None, :] * stride_dkk
-    tl.store(DV + adj_dkdv + offs_dkdv, dv, mask=mask_kv)
+    if IS_FP8:
+        scale_dv, _ = compute_fp8_scaling_factors(dv, FP8_MAX)
+        tl.store(DV + adj_dkdv + offs_dkdv, (dv * scale_dv).to(DV.dtype.element_ty), mask=mask_kv)
+    else:
+        tl.store(DV + adj_dkdv + offs_dkdv, dv, mask=mask_kv)
     dk *= sm_scale
-    tl.store(DK + adj_dkdv + offs_dkdv, dk, mask=mask_kv)
+    if IS_FP8:
+        scale_dk, _ = compute_fp8_scaling_factors(dk, FP8_MAX)
+        tl.store(DK + adj_dkdv + offs_dkdv, (dk * scale_dk).to(DK.dtype.element_ty), mask=mask_kv)
+    else:
+        tl.store(DK + adj_dkdv + offs_dkdv, dk, mask=mask_kv)
 
 
 @triton.jit
@@ -986,7 +1009,11 @@ def _bwd_kernel_dq_noncausal(
         adj_dq = bid * stride_dqb + hqid * stride_dqh + q_start * stride_dqm
         offs_dq = offs_m[:, None] * stride_dqm + offs_k[None, :] * stride_dqk
         dq *= sm_scale
-        tl.store(DQ + adj_dq + offs_dq, dq, mask=mask_q)
+        if IS_FP8:
+            scale_dq, _ = compute_fp8_scaling_factors(dq, FP8_MAX)
+            tl.store(DQ + adj_dq + offs_dq, (dq * scale_dq).to(DQ.dtype.element_ty), mask=mask_q)
+        else:
+            tl.store(DQ + adj_dq + offs_dq, dq, mask=mask_q)
 
 
 def attention_prefill_backward_triton_split_impl(
@@ -1017,8 +1044,6 @@ def attention_prefill_backward_triton_split_impl(
     descale_v: Optional[torch.Tensor] = None,
     descale_do: Optional[torch.Tensor] = None,
     # debug
-    ZERO_TENSORS: bool = False,
-    ACCUMLATE_FP32: bool = False,
     DEBUG_TRITON: bool = False,
     DEBUG_TRITON_DETAIL: bool = False,
 ):
@@ -1027,7 +1052,15 @@ def attention_prefill_backward_triton_split_impl(
         FP8_MAX = torch.finfo(q.dtype).max
 
         # auto grad implict casting cause do to be fp32 for some reason
-        do = do.to(q.dtype)
+        # do = do.to(q.dtype)
+
+        # assert that fp8 types are the same
+        assert do.dtype == q.dtype == k.dtype == v.dtype == o.dtype, f"Data type mismatch: do.dtype={do.dtype}, q.dtype={q.dtype}, k.dtype={k.dtype}, v.dtype={v.dtype} & o.dtype={o.dtype}. All tensors must have the same dtype."
+
+        # check that the grads are in fp32 to accumlate values
+        # assert dv.dtype == torch.float32
+        # assert dk.dtype == torch.float32
+        # assert dv.dtype == torch.float32
 
         stride_descale_q_z = descale_q.stride(0)
         stride_descale_k_z = descale_k.stride(0)
@@ -1093,7 +1126,8 @@ def attention_prefill_backward_triton_split_impl(
         HEAD_DIM=HEAD_DIM,
         ACTUAL_HEAD_DIM=ACTUAL_HEAD_DIM,
         IS_VARLEN=IS_VARLEN,
-        IS_FP8=IS_FP8
+        IS_FP8=IS_FP8,
+        FP8_MAX=FP8_MAX
     )
     
     if DEBUG:

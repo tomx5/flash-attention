@@ -539,11 +539,11 @@ def attn_fwd(Q, K, V, bias,
     if PADDED_HEAD:
         o_ptrs_mask = o_ptrs_mask & (offs_d[None, :] < ACTUAL_BLOCK_DMODEL)
     
-    # if IS_FP8:
-    #     scale_acc, _ = compute_fp8_scaling_factors(acc, FP8_MAX)
-    #     tl.store(o_ptrs, (acc*scale_acc).to(Out.dtype.element_ty), mask=o_ptrs_mask)
-    # else:
-    tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
+    if IS_FP8:
+        scale_acc, _ = compute_fp8_scaling_factors(acc, FP8_MAX)
+        tl.store(o_ptrs, (acc*scale_acc).to(Out.dtype.element_ty), mask=o_ptrs_mask)
+    else:
+        tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
 
 
 def attention_prefill_forward_triton_impl(
@@ -579,6 +579,11 @@ def attention_prefill_forward_triton_impl(
     IS_FP8 = is_fp8(q)
     if IS_FP8:
         FP8_MAX=torch.finfo(q.dtype).max
+
+
+        assert q.dtype == k.dtype == v.dtype, f"Data type mismatch: q.dtype={q.dtype}, k.dtype={k.dtype}, v.dtype={v.dtype}. All tensors must have the same dtype."
+
+
         if layout == "bshd":
             batch, _ , nheads_q, dim = q.shape
             _, _ , nheads_k, _ = k.shape
@@ -596,10 +601,6 @@ def attention_prefill_forward_triton_impl(
         descale_q_stride_z = descale_q.stride(0)
         descale_k_stride_z = descale_k.stride(0)
         descale_v_stride_z = descale_v.stride(0)
-
-        # fp8 is sensitive
-        ZERO_TENSORS = False
-        ACCUMLATE_FP32 = False
     else:
         descale_q = descale_k = descale_v = None
         descale_q_stride_z = descale_k_stride_z = descale_v_stride_z = None
