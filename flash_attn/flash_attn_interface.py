@@ -93,7 +93,8 @@ def _flash_attn_forward(
     return_softmax: bool,
     descale_q: Optional[torch.Tensor] = None,
     descale_k: Optional[torch.Tensor] = None,
-    descale_v: Optional[torch.Tensor] = None
+    descale_v: Optional[torch.Tensor] = None,
+    descale_o: Optional[torch.Tensor] = None
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
     out, softmax_lse, S_dmask, rng_state = flash_attn_gpu.fwd(
@@ -112,7 +113,8 @@ def _flash_attn_forward(
         None,
         descale_q,
         descale_k,
-        descale_v
+        descale_v,
+        descale_o
     )
     return out, softmax_lse, S_dmask, rng_state
 
@@ -174,6 +176,7 @@ def _flash_attn_varlen_forward(
     descale_q: Optional[torch.Tensor] = None,
     descale_k: Optional[torch.Tensor] = None,
     descale_v: Optional[torch.Tensor] = None,
+    descale_o: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
     out, softmax_lse, S_dmask, rng_state = flash_attn_gpu.varlen_fwd(
@@ -200,7 +203,8 @@ def _flash_attn_varlen_forward(
         None,
         descale_q,
         descale_k,
-        descale_v
+        descale_v,
+        descale_o
     )
     # if out.isnan().any() or softmax_lse.isnan().any():
     #     breakpoint()
@@ -274,7 +278,8 @@ def _flash_attn_backward(
     descale_q: Optional[torch.Tensor] = None,
     descale_k: Optional[torch.Tensor] = None,
     descale_v: Optional[torch.Tensor] = None,
-    descale_do: Optional[torch.Tensor] = None
+    descale_do: Optional[torch.Tensor] = None,
+    descale_o: Optional[torch.Tensor] = None
 ) -> torch.Tensor:
     # dq, dk, dv are allocated by us so they should already be contiguous
     dout, q, k, v, out = [maybe_contiguous(x) for x in (dout, q, k, v, out)]
@@ -306,7 +311,8 @@ def _flash_attn_backward(
         descale_q,
         descale_k,
         descale_v,
-        descale_do
+        descale_do,
+        descale_o
     )
     return softmax_d
 
@@ -379,7 +385,8 @@ def _flash_attn_varlen_backward(
     descale_q: Optional[torch.Tensor] = None,
     descale_k: Optional[torch.Tensor] = None,
     descale_v: Optional[torch.Tensor] = None,
-    descale_do: Optional[torch.Tensor] = None
+    descale_do: Optional[torch.Tensor] = None,
+    descale_o: Optional[torch.Tensor] = None
 ) -> torch.Tensor:
     # dq, dk, dv are allocated by us so they should already be contiguous
     dout, q, k, v, out = [maybe_contiguous(x) for x in (dout, q, k, v, out)]
@@ -900,7 +907,8 @@ class FlashAttnFunc(torch.autograd.Function):
         descale_q,
         descale_k,
         descale_v,
-        descale_do
+        descale_do,
+        descale_o
     ):
         is_grad = is_grad_enabled and any(
             x.requires_grad for x in [q, k, v]
@@ -926,10 +934,11 @@ class FlashAttnFunc(torch.autograd.Function):
             return_softmax=return_softmax and dropout_p > 0,
             descale_q=descale_q,
             descale_k=descale_k,
-            descale_v=descale_v
+            descale_v=descale_v,
+            descale_o=descale_o
         )
         if is_grad:
-            ctx.save_for_backward(q, k, v, out_padded, softmax_lse, rng_state, descale_q, descale_k, descale_v, descale_do)
+            ctx.save_for_backward(q, k, v, out_padded, softmax_lse, rng_state, descale_q, descale_k, descale_v, descale_do, descale_o)
             ctx.dropout_p = dropout_p
             ctx.softmax_scale = softmax_scale
             ctx.causal = causal
@@ -942,7 +951,7 @@ class FlashAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        q, k, v, out, softmax_lse, rng_state, descale_q, descale_k, descale_v, descale_do = ctx.saved_tensors
+        q, k, v, out, softmax_lse, rng_state, descale_q, descale_k, descale_v, descale_do, descale_o = ctx.saved_tensors
         dq, dk, dv = torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
         head_size_og = dout.size(3)
         dout_padded = dout
@@ -970,12 +979,13 @@ class FlashAttnFunc(torch.autograd.Function):
             descale_q=descale_q,
             descale_k=descale_k,
             descale_v=descale_v,
-            descale_do=descale_do
+            descale_do=descale_do,
+            descale_o=descale_o
         )
         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
         dk = dk[..., : dout.shape[-1]]
         dv = dv[..., : dout.shape[-1]]
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 class FlashAttnVarlenFunc(torch.autograd.Function):
@@ -1261,7 +1271,8 @@ def flash_attn_func(
     descale_q=None, 
     descale_k=None, 
     descale_v=None,
-    descale_do=None
+    descale_do=None,
+    descale_o=None
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in KV with fewer heads
@@ -1327,7 +1338,8 @@ def flash_attn_func(
         descale_q, 
         descale_k, 
         descale_v,
-        descale_do
+        descale_do,
+        descale_o
     )
 
 

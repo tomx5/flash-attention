@@ -274,7 +274,7 @@ autotune_configs, autotune_keys = get_autotune_configs()
 )
 @triton.jit
 def attn_fwd(Q, K, V, bias,
-             DESCALE_Q, DESCALE_K, DESCALE_V, stride_descale_q_z, stride_descale_k_z, stride_descale_v_z,
+             DESCALE_Q, DESCALE_K, DESCALE_V, DESCALE_O, stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_o_z,
              SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_qh, stride_qm, stride_qk,
              stride_kz, stride_kh, stride_kn, stride_kk, stride_vz, stride_vh, stride_vk, stride_vn,
              stride_oz, stride_oh, stride_om, stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az, stride_ah,
@@ -284,7 +284,7 @@ def attn_fwd(Q, K, V, bias,
              MAX_SEQLENS_K: tl.constexpr, VARLEN: tl.constexpr, IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr,
              BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, USE_BIAS: tl.constexpr,
              ENABLE_DROPOUT: tl.constexpr, RETURN_SCORES: tl.constexpr, USE_ALIBI: tl.constexpr, USE_EXP2: tl.constexpr, 
-             IS_FP8: tl.constexpr, FP8_MAX: tl.constexpr):
+             IS_FP8: tl.constexpr, FP8_MAX: tl.constexpr, FP8_RETURN_DESCALE: tl.constexpr):
     start_m = tl.program_id(0)
     off_h_q = tl.program_id(1)
     off_z = tl.program_id(2)
@@ -540,7 +540,13 @@ def attn_fwd(Q, K, V, bias,
         o_ptrs_mask = o_ptrs_mask & (offs_d[None, :] < ACTUAL_BLOCK_DMODEL)
     
     if IS_FP8:
-        scale_acc, _ = compute_fp8_scaling_factors(acc, FP8_MAX)
+        scale_acc, descale_acc = compute_fp8_scaling_factors(acc, FP8_MAX)
+
+        # store the descale factor for later use
+        if FP8_RETURN_DESCALE:
+            o_descale_offset = DESCALE_O + off_z * stride_descale_o_z + off_h_q
+            tl.store(o_descale_offset, descale_acc)
+        
         tl.store(o_ptrs, (acc*scale_acc).to(Out.dtype.element_ty), mask=o_ptrs_mask)
     else:
         tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
@@ -572,13 +578,12 @@ def attention_prefill_forward_triton_impl(
                                         descale_q: Optional[torch.Tensor] = None,
                                         descale_k: Optional[torch.Tensor] = None,
                                         descale_v: Optional[torch.Tensor] = None,
-                                        # debug
-                                        ZERO_TENSORS: bool = False,
-                                        ACCUMLATE_FP32: bool = False,
+                                        descale_o: Optional[torch.Tensor] = None,
 ):
     IS_FP8 = is_fp8(q)
     if IS_FP8:
-        FP8_MAX=torch.finfo(q.dtype).max
+        FP8_MAX: tl.constexpr=torch.finfo(q.dtype).max
+        FP8_RETURN_DESCALE: tl.constexpr = False if descale_o is None else True
 
 
         assert q.dtype == k.dtype == v.dtype, f"Data type mismatch: q.dtype={q.dtype}, k.dtype={k.dtype}, v.dtype={v.dtype}. All tensors must have the same dtype."
@@ -601,19 +606,12 @@ def attention_prefill_forward_triton_impl(
         descale_q_stride_z = descale_q.stride(0)
         descale_k_stride_z = descale_k.stride(0)
         descale_v_stride_z = descale_v.stride(0)
+        descale_o_stride_z = descale_o.stride(0)
     else:
         descale_q = descale_k = descale_v = None
-        descale_q_stride_z = descale_k_stride_z = descale_v_stride_z = None
-        FP8_MAX = None
-
-    # zero out
-    if ZERO_TENSORS:
-        o.zero_()
-
-    # accumlation done in fp32
-    if ACCUMLATE_FP32:
-        og_dtype = o.dtype
-        o = o.to(torch.float32)
+        descale_q_stride_z = descale_k_stride_z = descale_v_stride_z = descale_o_stride_z = None
+        FP8_MAX: tl.constexpr = None
+        FP8_RETURN_DESCALE: tl.constexpr = False
 
     # check if varlen
     is_varlen = layout == "thd"
@@ -674,7 +672,7 @@ def attention_prefill_forward_triton_impl(
 
 
     attn_fwd[grid](q, k, v, bias,
-                    descale_q, descale_k, descale_v, descale_q_stride_z, descale_k_stride_z, descale_v_stride_z,
+                    descale_q, descale_k, descale_v, descale_o, descale_q_stride_z, descale_k_stride_z, descale_v_stride_z, descale_o_stride_z,
                     sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
                     *bias_strides, *alibi_strides, *scores_strides, stride_lse_z, stride_lse_h, stride_lse_m, cu_seqlens_q, cu_seqlens_k,
                     dropout_p=dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset, sd_mask=sd_mask, dropout_mask=dropout_mask, alibi_slopes=alibi_slopes, 
@@ -682,7 +680,7 @@ def attention_prefill_forward_triton_impl(
                     MAX_SEQLENS_K=max_seqlens_k, IS_CAUSAL=causal, VARLEN=is_varlen,
                     BLOCK_DMODEL=padded_d_model, USE_BIAS=False if bias is None else True,
                     USE_ALIBI=False if alibi_slopes is None else True, ENABLE_DROPOUT=dropout_p
-                    > 0.0, USE_EXP2=use_exp2, RETURN_SCORES=return_softmax, IS_FP8=IS_FP8, FP8_MAX=FP8_MAX)
+                    > 0.0, USE_EXP2=use_exp2, RETURN_SCORES=return_softmax, IS_FP8=IS_FP8, FP8_MAX=FP8_MAX, FP8_RETURN_DESCALE=FP8_RETURN_DESCALE)
 
 
     return softmax_lse, sd_mask if return_softmax else None 

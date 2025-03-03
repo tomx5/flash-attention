@@ -470,6 +470,8 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
             q_fp8, descale_q = cast_to_fp8(q, fp8_dtype, layout, cu_seqlens=metadata.cu_seqlens_q)
             k_fp8, descale_k = cast_to_fp8(k, fp8_dtype, layout, cu_seqlens=metadata.cu_seqlens_k)
             v_fp8, descale_v = cast_to_fp8(v, fp8_dtype, layout, cu_seqlens=metadata.cu_seqlens_k)
+        # return descale factor for o from forward pass if needed
+        descale_o = torch.zeros_like(descale_q)
     elif packing == 'kv':
         if not is_varlen:
             q_fp8, descale_q = cast_to_fp8(q, fp8_dtype, layout)
@@ -513,7 +515,8 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
                 descale_q=descale_q,
                 descale_k=descale_k,
                 descale_v=descale_v,
-                descale_do=descale_do
+                descale_do=descale_do,
+                descale_o= descale_o
             )
         else:
             out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_varlen_func(
@@ -534,7 +537,8 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
                 descale_q=descale_q,
                 descale_k=descale_k,
                 descale_v=descale_v,
-                descale_do=descale_do
+                descale_do=descale_do,
+                descale_o= descale_o
             )
     elif packing == 'kv':
         if not is_varlen:
@@ -742,6 +746,13 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
         dq_ref, dkv_ref = torch.autograd.grad(out_ref, (q_ref, kv_ref), do_ref)
     elif packing == 'qkv':
         dqkv_ref = torch.autograd.grad(out_ref, qkv_ref, do_ref)[0]
+
+
+    # conver the fp8 output to ref type
+    if not is_varlen:
+        out_fp8 = decast_fp8(out_fp8, descale_o, ref_dtype, layout)
+    else:
+        out_fp8 = decast_fp8(out_fp8, descale_o, ref_dtype, layout, cu_seqlens=metadata.cu_seqlens_q)
 
     # compare forward
     if DEBUG:

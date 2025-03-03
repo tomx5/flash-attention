@@ -48,6 +48,7 @@ def fwd(q: torch.Tensor,
         descale_q: Optional[torch.Tensor] = None,
         descale_k: Optional[torch.Tensor] = None,
         descale_v: Optional[torch.Tensor] = None,
+        descale_o: Optional[torch.Tensor] = None
     ):
 
     if DEBUG:
@@ -139,7 +140,8 @@ def fwd(q: torch.Tensor,
                                                 metadata.use_exp2,
                                                 descale_q,
                                                 descale_k,
-                                                descale_v)
+                                                descale_v,
+                                                descale_o)
         softmax_lse=softmax_lse_triton
         sd_mask=sd_mask_triton
 
@@ -174,7 +176,8 @@ def bwd(
     descale_q: Optional[torch.Tensor] = None,
     descale_k: Optional[torch.Tensor] = None,
     descale_v: Optional[torch.Tensor] = None,
-    descale_do: Optional[torch.Tensor] = None
+    descale_do: Optional[torch.Tensor] = None,
+    descale_o: Optional[torch.Tensor] = None
 ):
     if DEBUG:
         print()
@@ -302,7 +305,9 @@ def varlen_fwd(
         gen_: Optional[torch.Tensor] = None,
         descale_q: Optional[torch.Tensor] = None,
         descale_k: Optional[torch.Tensor] = None,
-        descale_v: Optional[torch.Tensor] = None):
+        descale_v: Optional[torch.Tensor] = None,
+        descale_o: Optional[torch.Tensor] = None
+    ):
 
     if DEBUG:
         print()
@@ -434,7 +439,8 @@ def varlen_bwd(
     descale_q: Optional[torch.Tensor] = None,
     descale_k: Optional[torch.Tensor] = None,
     descale_v: Optional[torch.Tensor] = None,
-    descale_do: Optional[torch.Tensor] = None
+    descale_do: Optional[torch.Tensor] = None,
+    descale_o: Optional[torch.Tensor] = None
 ):
     if DEBUG:
         print()
