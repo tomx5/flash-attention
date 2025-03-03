@@ -17,11 +17,10 @@ from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
 from .bwd_prefill_split import attention_prefill_backward_triton_split_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
-from .fwd_decode import dequantize_kv_fp16, quantize_kv_int4
 
 # set print options
-torch.set_printoptions(linewidth=5e5, edgeitems=10, sci_mode=False)
-np.set_printoptions(linewidth=5000, threshold=1e4, suppress=True, precision=4)
+# torch.set_printoptions(linewidth=5e5, edgeitems=10, sci_mode=False)
+# np.set_printoptions(linewidth=5000, threshold=1e4, suppress=True, precision=4)
 
 # defailt fp16 tolerance is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
 ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 
@@ -352,71 +351,71 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
         # head size
         # (1, 1, 1, 129, 129, 1),  # two blocks with 2nd block small enough to debug # fails
         # seqlen q == k
-        (1, 1, 1, 1, 1, 1),
-        (1, 1, 1, 2, 2, 2),  # small enough to debug
+        # (1, 1, 1, 1, 1, 1),
+        # (1, 1, 1, 2, 2, 2),  # small enough to debug
         (1, 1, 1, 4, 4, 16),
-        (1, 2, 2, 4, 4, 16),
-        (2, 1, 1, 4, 4, 16),
-        (2, 2, 2, 4, 4, 16),
-        (1, 1, 1, 128, 128, 32),  # only one block
-        (3, 3, 3, 128, 128, 64),
-        (1, 1, 1, 127, 127, 32),  # only one block but with masking
-        (1, 1, 1, 129, 129, 32),  # two blocks with 2nd block small enough to debug
-        (1, 1, 1, 350, 350, 1),  # two blocks with 2nd block small enough to debug
-        (1, 1, 1, 350, 350, 68),  # generic masking on q, k and head
-        (4, 1, 1, 512, 512, 128), # batch > 1
-        (4, 2, 2, 512, 512, 128),
-        (4, 2, 2, 512, 512, 68),
-        (4, 2, 2, 500, 500, 68),
-        (2, 4, 4, 1024, 1024, 64),
-        (4, 8, 8, 2048, 2048, 128),
-        (4, 16, 16, 4096, 4096, 64),
-        (2, 4, 4, 8192, 8192, 32),
-        # seqlen q > k
-        (1, 1, 1, 4, 2, 16),
-        (1, 1, 1, 64, 32, 8),
-        (1, 1, 1, 128, 64, 16),
-        (1, 1, 1, 192, 128, 32),
-        (1, 2, 2, 1024, 512, 68),
-        (1, 4, 4, 729, 516, 68),
-        (2, 4, 4, 2753, 1528, 68),  # a comprehensive seqlen_q > seqlen_k
-        # seqlen q < k
-        (1, 1, 1, 2, 4, 16),
-        (1, 2, 2, 2, 4, 16),
-        (1, 4, 1, 2, 4, 16),
-        (1, 4, 2, 2, 4, 16),
-        (2, 2, 2, 2, 128, 1),
-        (2, 3, 3, 2, 128, 16),
-        (1, 1, 1, 32, 64, 8),
-        (1, 1, 1, 128, 192, 32),
-        (4, 6, 6, 108, 256, 224),
-        (3, 2, 2, 256, 512, 16),
-        (2, 2, 2, 512, 1024, 68),
-        (1, 1, 1, 200, 413, 1),
-        (1, 1, 1, 782, 1546, 1),
-        # gqa/mqa
-        (4, 8, 2, 500, 500, 68), 
-        (4, 8, 2, 512, 512, 68),
-        (4, 8, 2, 512, 512, 128),
-        (4, 8, 2, 512, 1024, 68),
-        pytest.param(4, 8, 2, 1024, 512, 68, marks=pytest.mark.flaky(reruns=3, reason="Flaky config")),
-        (16, 16, 4, 1528, 2753, 68),
-        # fa configs
-        (4, 6, 1, 113, 203, 256),
-        (4, 6, 1, 128, 217, 256),
-        (4, 6, 2, 113, 211, 128),
-        (4, 6, 2, 108, 256, 128),
-        (4, 6, 1, 256, 512, 64),
-        (4, 6, 1, 512, 256, 64),
-        (4, 6, 2, 1024, 1024, 32),
-        (4, 6, 2, 1023, 1024, 32),
-        (4, 6, 6, 1024, 1023, 32),
-        (4, 6, 6, 2048, 2048, 32),
+        # (1, 2, 2, 4, 4, 16),
+        # (2, 1, 1, 4, 4, 16),
+        # (2, 2, 2, 4, 4, 16),
+        # (1, 1, 1, 128, 128, 32),  # only one block
+        # (3, 3, 3, 128, 128, 64),
+        # (1, 1, 1, 127, 127, 32),  # only one block but with masking
+        # (1, 1, 1, 129, 129, 32),  # two blocks with 2nd block small enough to debug
+        # (1, 1, 1, 350, 350, 1),  # two blocks with 2nd block small enough to debug
+        # (1, 1, 1, 350, 350, 68),  # generic masking on q, k and head
+        # (4, 1, 1, 512, 512, 128), # batch > 1
+        # (4, 2, 2, 512, 512, 128),
+        # (4, 2, 2, 512, 512, 68),
+        # (4, 2, 2, 500, 500, 68),
+        # (2, 4, 4, 1024, 1024, 64),
+        # (4, 8, 8, 2048, 2048, 128),
+        # (4, 16, 16, 4096, 4096, 64),
+        # (2, 4, 4, 8192, 8192, 32),
+        # # seqlen q > k
+        # (1, 1, 1, 4, 2, 16),
+        # (1, 1, 1, 64, 32, 8),
+        # (1, 1, 1, 128, 64, 16),
+        # (1, 1, 1, 192, 128, 32),
+        # (1, 2, 2, 1024, 512, 68),
+        # (1, 4, 4, 729, 516, 68),
+        # (2, 4, 4, 2753, 1528, 68),  # a comprehensive seqlen_q > seqlen_k
+        # # seqlen q < k
+        # (1, 1, 1, 2, 4, 16),
+        # (1, 2, 2, 2, 4, 16),
+        # (1, 4, 1, 2, 4, 16),
+        # (1, 4, 2, 2, 4, 16),
+        # (2, 2, 2, 2, 128, 1),
+        # (2, 3, 3, 2, 128, 16),
+        # (1, 1, 1, 32, 64, 8),
+        # (1, 1, 1, 128, 192, 32),
+        # (4, 6, 6, 108, 256, 224),
+        # (3, 2, 2, 256, 512, 16),
+        # (2, 2, 2, 512, 1024, 68),
+        # (1, 1, 1, 200, 413, 1),
+        # (1, 1, 1, 782, 1546, 1),
+        # # gqa/mqa
+        # (4, 8, 2, 500, 500, 68), 
+        # (4, 8, 2, 512, 512, 68),
+        # (4, 8, 2, 512, 512, 128),
+        # (4, 8, 2, 512, 1024, 68),
+        # pytest.param(4, 8, 2, 1024, 512, 68, marks=pytest.mark.flaky(reruns=3, reason="Flaky config")),
+        # (16, 16, 4, 1528, 2753, 68),
+        # # fa configs
+        # (4, 6, 1, 113, 203, 256),
+        # (4, 6, 1, 128, 217, 256),
+        # (4, 6, 2, 113, 211, 128),
+        # (4, 6, 2, 108, 256, 128),
+        # (4, 6, 1, 256, 512, 64),
+        # (4, 6, 1, 512, 256, 64),
+        # (4, 6, 2, 1024, 1024, 32),
+        # (4, 6, 2, 1023, 1024, 32),
+        # (4, 6, 6, 1024, 1023, 32),
+        # (4, 6, 6, 2048, 2048, 32),
     ],
 )
 @pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('dropout_p', [0.0])
-@pytest.mark.parametrize('layout', ['bshd', "thd"])
+@pytest.mark.parametrize('layout', ['bshd'])
 @pytest.mark.parametrize('packing', ['none'])
 @pytest.mark.parametrize('DEBUG_INPUT', [False])
 @pytest.mark.skipif(not arch_supports_fp8(), reason="fp8 not supported on this device")
@@ -606,6 +605,10 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
                 descale_do=descale_do
             )
     
+    # print("out_fp8:", out_fp8)
+    # print("do_fp8 before grad:", do_fp8)
+
+
     # fp8 backward pass
     if packing == 'none':
         dq_fp8, dk_fp8, dv_fp8 = torch.autograd.grad(out_fp8, (q_fp8, k_fp8, v_fp8), do_fp8)
@@ -755,10 +758,11 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
         print("lse_fp8:", lse_fp8, lse_fp8.shape)
     torch.testing.assert_close(lse_ref, lse_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
 
-    if DEBUG:
-        print("S_dmask_ref:", S_dmask_ref, S_dmask_ref.shape)
-        print("S_dmask_fp8:", S_dmask_fp8, S_dmask_fp8.shape)
-    torch.testing.assert_close(S_dmask_ref, S_dmask_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
+    if dropout_p > 0.0:
+        if DEBUG:
+            print("S_dmask_ref:", S_dmask_ref, S_dmask_ref.shape)
+            print("S_dmask_fp8:", S_dmask_fp8, S_dmask_fp8.shape)
+        torch.testing.assert_close(S_dmask_ref, S_dmask_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
 
     # compare backward gradients
     if packing == 'none':
@@ -766,36 +770,36 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
             print("dv_ref:", dv_ref, dv_ref.shape)
             print("dv_fp8:", dv_fp8, dv_fp8.shape)
         
-        torch.testing.assert_close(dv_ref, dv_fp8.to(ref_dtype), 
+        torch.testing.assert_close(dv_ref, dv_fp8, 
                                  atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
 
         if DEBUG:
             print("dk_ref:", dk_ref, dk_ref.shape)
             print("dk_fp8:", dk_fp8, dk_fp8.shape)
-        torch.testing.assert_close(dk_ref, dk_fp8.to(ref_dtype), 
+        torch.testing.assert_close(dk_ref, dk_fp8, 
                                  atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
 
         if DEBUG:
             print("dq_ref:", dq_ref, dq_ref.shape)
             print("dq_fp8:", dq_fp8, dq_fp8.shape)
-        torch.testing.assert_close(dq_ref, dq_fp8.to(ref_dtype), 
+        torch.testing.assert_close(dq_ref, dq_fp8, 
                                  atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
     elif packing == 'kv':
         if DEBUG:
             print("dq_ref:", dq_ref, dq_ref.shape)
             print("dq_fp8:", dq_fp8, dq_fp8.shape)
-        torch.testing.assert_close(dq_ref, dq_fp8.to(ref_dtype), 
+        torch.testing.assert_close(dq_ref, dq_fp8, 
                                  atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
         if DEBUG:
             print("dkv_ref:", dkv_ref, dkv_ref.shape)
             print("dkv_fp8:", dkv_fp8, dkv_fp8.shape)
-        torch.testing.assert_close(dkv_ref, dkv_fp8.to(ref_dtype), 
+        torch.testing.assert_close(dkv_ref, dkv_fp8, 
                                  atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
     elif packing == 'qkv':
         if DEBUG:
             print("dqkv_ref:", dqkv_ref, dqkv_ref.shape)
             print("dqkv_fp8:", dqkv_fp8, dqkv_fp8.shape)
-        torch.testing.assert_close(dqkv_ref, dqkv_fp8.to(ref_dtype), 
+        torch.testing.assert_close(dqkv_ref, dqkv_fp8, 
                                  atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
 
 

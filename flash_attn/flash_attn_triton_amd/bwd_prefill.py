@@ -2,7 +2,7 @@ from typing import Literal, Optional
 import torch
 import triton
 import triton.language as tl
-from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, compute_fp8_scaling_factors, get_shape_from_layout, get_strides_from_layout, write_dropout_mask, create_dropout_mask, arch_supports_fp8
+from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, compute_fp8_scaling_factors, get_shape_from_layout, get_strides_from_layout, is_fp8, write_dropout_mask, create_dropout_mask
 
 # TODO: move this into utils.py so it's shared among kernels
 # NOTE: triton fails to import tl.constexprs so create them here for the file
@@ -640,7 +640,7 @@ def attention_prefill_backward_triton_impl(
         print("descale_v:", descale_v)
         print("descale_do:", descale_do)
 
-    IS_FP8 = arch_supports_fp8() and q.dtype in {torch.float8_e4m3fnuz, torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e5m2fnuz}
+    IS_FP8 = is_fp8(q)
     if IS_FP8:
         FP8_MAX=torch.finfo(q.dtype).max
         # fp8 is sensitive

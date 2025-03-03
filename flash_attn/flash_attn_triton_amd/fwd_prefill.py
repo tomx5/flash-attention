@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from typing import Literal, Optional
-from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, AUTOTUNE, arch_supports_fp8, compute_fp8_scaling_factors, get_shape_from_layout, get_strides_from_layout, is_cdna, is_rdna, write_dropout_mask, create_dropout_mask
+from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, AUTOTUNE, cast_to_fp8, compute_fp8_scaling_factors, get_shape_from_layout, get_strides_from_layout, is_cdna, is_fp8, is_rdna, write_dropout_mask, create_dropout_mask
 
 # NOTE: triton fails to import tl.constexprs so create them here for the file
 tl_DROPOUT_USE_PYTORCH: tl.constexpr = DROPOUT_USE_PYTORCH
@@ -538,7 +538,12 @@ def attn_fwd(Q, K, V, bias,
         o_ptrs_mask = o_ptrs_mask & (offs_m[:, None] < seqlen_q)
     if PADDED_HEAD:
         o_ptrs_mask = o_ptrs_mask & (offs_d[None, :] < ACTUAL_BLOCK_DMODEL)
-    tl.store(o_ptrs, acc, mask=o_ptrs_mask)
+    
+    # if IS_FP8:
+    #     scale_acc, _ = compute_fp8_scaling_factors(acc, FP8_MAX)
+    #     tl.store(o_ptrs, (acc*scale_acc).to(Out.dtype.element_ty), mask=o_ptrs_mask)
+    # else:
+    tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
 
 
 def attention_prefill_forward_triton_impl(
@@ -571,30 +576,7 @@ def attention_prefill_forward_triton_impl(
                                         ZERO_TENSORS: bool = False,
                                         ACCUMLATE_FP32: bool = False,
 ):
-
-    if DEBUG:
-        print()
-        print("attention_prefill_forward_triton_impl")
-        print("q:", q, q.shape)
-        print("k:", k, k.shape)
-        print("v:", v, v.shape)
-        print("o:", o, o.shape)
-        print("sm_scale:", sm_scale)
-        print("alibi_slopes:", alibi_slopes)
-        print("causal:", causal)
-        print("bias:", bias)
-        print("layout:", layout)
-        print("cu_seqlens_q:", cu_seqlens_q)
-        print("cu_seqlens_k:", cu_seqlens_k)
-        print("max_seqlens_q:", max_seqlens_q)
-        print("max_seqlens_k:", max_seqlens_k)
-        print("dropout_p:", dropout_p)
-        print("philox_seed:", philox_seed)
-        print("philox_offset:", philox_offset)
-        print("return_scores:", return_softmax)
-        print("use_exp2:", use_exp2)
-
-    IS_FP8 = arch_supports_fp8() and q.dtype in {torch.float8_e4m3fnuz, torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e5m2fnuz}
+    IS_FP8 = is_fp8(q)
     if IS_FP8:
         FP8_MAX=torch.finfo(q.dtype).max
         if layout == "bshd":
@@ -631,18 +613,6 @@ def attention_prefill_forward_triton_impl(
     if ACCUMLATE_FP32:
         og_dtype = o.dtype
         o = o.to(torch.float32)
-
-    if DEBUG:
-        print("IS_FP8:", IS_FP8)
-        print("descale_q:", descale_q)
-        print("descale_k:", descale_k)
-        print("descale_v:", descale_v)
-        print("descale_q_stride_z:", descale_q_stride_z)
-        print("descale_k_stride_z:", descale_k_stride_z)
-        print("descale_v_stride_z:", descale_v_stride_z)
-        if IS_FP8:
-            print(f"FP8_MAX: {FP8_MAX}")
-            
 
     # check if varlen
     is_varlen = layout == "thd"
@@ -713,18 +683,5 @@ def attention_prefill_forward_triton_impl(
                     USE_ALIBI=False if alibi_slopes is None else True, ENABLE_DROPOUT=dropout_p
                     > 0.0, USE_EXP2=use_exp2, RETURN_SCORES=return_softmax, IS_FP8=IS_FP8, FP8_MAX=FP8_MAX)
 
-    if DEBUG:
-        print()
-        print("attention_prefill_forward_triton_impl outputs")
-        print("o:", o, o.shape)
-        print("softmax_lse:", softmax_lse, softmax_lse.shape)
-        print("sd_mask:", sd_mask, sd_mask.shape if sd_mask is not None else None)
-        if use_dropout:
-            print("dropout_mask:", dropout_mask, dropout_mask.shape if dropout_mask is not None else None)
-            print("dropout_fraction fwd:", 1.0 - (dropout_mask.sum()/ dropout_mask.numel()).item())
-            write_dropout_mask(dropout_mask, "dropout_mask_fwd")
-
-    if ACCUMLATE_FP32:
-        o = o.to(og_dtype)
 
     return softmax_lse, sd_mask if return_softmax else None 

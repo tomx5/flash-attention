@@ -3,8 +3,7 @@ import triton # type: ignore
 import triton.language as tl # type: ignore
 from typing import Literal, Optional
 from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, compute_fp8_scaling_factors, get_shape_from_layout, \
-    get_strides_from_layout, create_dropout_mask, create_dropout_mask_varlen, \
-    arch_supports_fp8
+    get_strides_from_layout, create_dropout_mask, create_dropout_mask_varlen, is_fp8
 
 # NOTE: triton fails to import tl.constexprs so create them here for the file
 tl_DROPOUT_USE_PYTORCH: tl.constexpr = DROPOUT_USE_PYTORCH
@@ -1023,33 +1022,21 @@ def attention_prefill_backward_triton_split_impl(
     DEBUG_TRITON: bool = False,
     DEBUG_TRITON_DETAIL: bool = False,
 ):
-    IS_FP8 = arch_supports_fp8() and q.dtype in {torch.float8_e4m3fnuz, torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e5m2fnuz}
+    IS_FP8 = is_fp8(q)
     if IS_FP8:
         FP8_MAX = torch.finfo(q.dtype).max
+
+        # auto grad implict casting cause do to be fp32 for some reason
+        do = do.to(q.dtype)
+
         stride_descale_q_z = descale_q.stride(0)
         stride_descale_k_z = descale_k.stride(0)
         stride_descale_v_z = descale_v.stride(0)
         stride_descale_do_z = descale_do.stride(0)
-
-        # fp8 is sensitive
-        ZERO_TENSORS = False
-        ACCUMLATE_FP32 = False
     else:
         FP8_MAX = None
         stride_descale_q_z = stride_descale_k_z = stride_descale_v_z = stride_descale_do_z = None
 
-    # zero out
-    if ZERO_TENSORS:
-        dq.zero_()
-        dk.zero_()
-        dv.zero_()
-
-    # accumlation done in fp32
-    if ACCUMLATE_FP32:
-        og_dtype = dq.dtype
-        dq = dq.to(torch.float32)
-        dk = dk.to(torch.float32)
-        dv = dv.to(torch.float32)
 
     # get strides and shape
     batch, nheads_q, nheads_k, head_size, max_seqlen_q, max_seqlen_k = \
@@ -1263,9 +1250,4 @@ def attention_prefill_backward_triton_split_impl(
             DEBUG_TRITON=DEBUG_TRITON,
             DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
-
-    if ACCUMLATE_FP32:
-        dq = dq.to(og_dtype)
-        dk = dk.to(og_dtype)
-        dv = dv.to(og_dtype)
     return delta

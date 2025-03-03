@@ -6,14 +6,25 @@ from .bwd_prefill_split import attention_prefill_backward_triton_split_impl
 from .fwd_decode import attention_decode_forward_triton_impl
 from .fwd_ref import attention_forward_pytorch_ref_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
-from .utils import DEBUG_TRITON, DEBUG_TRITON_DETAIL, MetaData, get_shape_from_layout, DEBUG, USE_SINGLE_BWD_KERNEL
+from .utils import DEBUG_TRITON, DEBUG_TRITON_DETAIL, MetaData, get_shape_from_layout, DEBUG, USE_SINGLE_BWD_KERNEL, is_fp8
 from einops import rearrange, repeat
 from flash_attn.layers.rotary import apply_rotary_emb
 from typing import Optional, Union
 
 USE_REF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_REF', '0').lower() in ('1', 'true', 'yes')
 
-ZERO_INPUTS = True
+def out_tensor_like(x, zero_tensors = True):
+    if is_fp8(x):
+        out_type = torch.float32
+    else:
+        out_type = x.dtype
+
+
+    if zero_tensors:
+        return torch.zeros_like(x, dtype=out_type) 
+    else:
+        return torch.empty_like(x, dtype=out_type)
+
 
 def fwd(q: torch.Tensor,
         k: torch.Tensor,
@@ -50,8 +61,7 @@ def fwd(q: torch.Tensor,
         print("return_softmax:", return_softmax)
 
 
-    if o is None:
-        o = torch.zeros_like(q) if ZERO_INPUTS else torch.empty_like(q)
+    o = out_tensor_like(q) if o is None else o.zero_() # if given a tensor we should maybe make it fp32 if given fp8
 
     # Setup metadata
     metadata = MetaData(sm_scale=softmax_scale)
@@ -183,12 +193,9 @@ def bwd(
         print("gen_:", gen_)
         print("rng_state:", rng_state)
 
-    if dq is None:
-        dq = torch.zeros_like(q) if ZERO_INPUTS else torch.empty_like(q)
-    if dk is None:
-        dk =  torch.zeros_like(k) if ZERO_INPUTS else torch.empty_like(k)
-    if dv is None:
-        dv =  torch.zeros_like(v) if ZERO_INPUTS else torch.empty_like(v)
+    dq = out_tensor_like(q) if dq is None else dq.zero_()
+    dk =  out_tensor_like(k) if dk is None else dk.zero_()
+    dv =  out_tensor_like(v) if dv is None else dv.zero_()
 
     if dropout_p > 0.0:
         philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
@@ -309,8 +316,7 @@ def varlen_fwd(
         print("window_size_right:", window_size_right)
         print("gen_:", gen_)
 
-    if o is None:
-        o = torch.zeros_like(q) if ZERO_INPUTS else torch.empty_like(q)
+    o = out_tensor_like(q) if o is None else o.zero_()
 
     # Setup metadata
     metadata = MetaData(sm_scale=softmax_scale)
@@ -450,12 +456,9 @@ def varlen_bwd(
         print("gen_:", gen_)
         print("rng_state:", rng_state)
 
-    if dq is None:
-        dq = torch.zeros_like(q) if ZERO_INPUTS else torch.empty_like(q)
-    if dk is None:
-        dk =  torch.zeros_like(k) if ZERO_INPUTS else torch.empty_like(k)
-    if dv is None:
-        dv =  torch.zeros_like(v) if ZERO_INPUTS else torch.empty_like(v)
+    dq = out_tensor_like(q) if dq is None else dq.zero_()
+    dk =  out_tensor_like(k) if dk is None else dk.zero_()
+    dv =  out_tensor_like(v) if dv is None else dv.zero_()
 
     if dropout_p > 0.0:
         philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
@@ -556,8 +559,7 @@ def fwd_kvcache(
         num_splits: int
     ):
 
-    if out is None:
-        out = torch.zeros_like(q) if ZERO_INPUTS else torch.empty_like(q)
+    o = out_tensor_like(q) if o is None else o.zero_()
 
     # fill metadata
     metadata = MetaData(sm_scale=softmax_scale)

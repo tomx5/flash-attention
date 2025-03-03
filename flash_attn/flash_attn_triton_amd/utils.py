@@ -279,6 +279,15 @@ def compute_fp8_scaling_factors(x, fp8_max: tl.constexpr):
     descale_x = x_amax / fp8_max
     return scale_x, descale_x
 
+def is_fp8(x):
+    if x.dtype in {torch.float8_e4m3fnuz, torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e5m2fnuz}:
+        if arch_supports_fp8():
+            return True
+        else:
+            raise RuntimeError("This device doesnot support fp8")
+    else:
+        return False
+
 def cast_nonvarlen_to_fp8(
     x: torch.Tensor,
     fp8_dtype,
