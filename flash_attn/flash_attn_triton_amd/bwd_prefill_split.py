@@ -21,15 +21,16 @@ def _bwd_preprocess(
     Delta,
     stride_ob, stride_oh, stride_om, stride_ok,
     stride_deltab, stride_deltah, stride_deltam,
+    stride_descale_o_z,
     stride_descale_do_z,
     cu_seqlens_q, max_seqlen_q,
+    Descale_o,
     Descale_do,
     BLOCK_M: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     ACTUAL_HEAD_DIM: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    IS_FP8: tl.constexpr,
-    FP8_MAX: tl.constexpr
+    IS_FP8: tl.constexpr
 ):
     pid_m = tl.program_id(0)
     bid = tl.program_id(1)
@@ -66,11 +67,10 @@ def _bwd_preprocess(
     do = tl.load(do_ptrs, mask=mask_md, other=0.0)
     # compute and write-back to delta
     if IS_FP8:
+        descale_o = tl.load(Descale_o + bid * stride_descale_o_z + hid)
         descale_do = tl.load(Descale_do + bid * stride_descale_do_z + hid)
 
-        scale_o, descale_o = compute_fp8_scaling_factors(o, FP8_MAX)
-
-        # NOTE: do & o is scaled into the fp8 range
+        # NOTE: do & o is in the fp8 range
         delta = tl.sum((o.to(tl.float32) * descale_o) * (do.to(tl.float32) * descale_do), axis=1)
     else:
         delta = tl.sum(o.to(tl.float32) * do.to(tl.float32), axis=1)
@@ -237,13 +237,13 @@ def _bwd_kernel_dkdv_causal(
     stride_dob, stride_doh, stride_dom, stride_dok,
     stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
     stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_do_z,
-    stride_descale_o_z, stride_descale_dq_z, stride_descale_dk_z, stride_descale_dv_z,
+    stride_descale_dk_z, stride_descale_dv_z,
     HQ, HK,
     cu_seqlens_q, cu_seqlens_k,
     max_seqlen_q, max_seqlen_k,
     dropout_mask, dropout_p, philox_seed, philox_offset_base,
     Descale_q, Descale_k, Descale_v, Descale_do,
-    Descale_o, Descale_dq, Descale_dk, Descale_dv,
+    Descale_dk, Descale_dv,
     BLOCK_M: tl.constexpr,  # 32
     BLOCK_N: tl.constexpr,  # 128
     BLK_SLICE_FACTOR: tl.constexpr,
@@ -428,13 +428,21 @@ def _bwd_kernel_dkdv_causal(
     adj_dkdv = bid * stride_dkb + hkid * stride_kh + k_start * stride_dkn
     offs_dkdv = offs_n[:, None] * stride_dkn + offs_k[None, :] * stride_dkk
     if IS_FP8:
-        scale_dv, _ = compute_fp8_scaling_factors(dv, FP8_MAX)
+        scale_dv, descale_dv = compute_fp8_scaling_factors(dv, FP8_MAX)
+        # store the descale factor for later use
+        if FP8_RETURN_DESCALE:
+            descale_dv_offset = Descale_dv + bid * stride_descale_dv_z + hkid
+            tl.store(descale_dv_offset, descale_dv)
         tl.store(DV + adj_dkdv + offs_dkdv, (dv * scale_dv).to(DV.dtype.element_ty), mask=mask_kv)
     else:
         tl.store(DV + adj_dkdv + offs_dkdv, dv, mask=mask_kv)
     dk *= sm_scale
     if IS_FP8:
-        scale_dk, _ = compute_fp8_scaling_factors(dk, FP8_MAX)
+        scale_dk, descale_dk = compute_fp8_scaling_factors(dk, FP8_MAX)
+        # store the descale factor for later use
+        if FP8_RETURN_DESCALE:
+            descale_dk_offset = Descale_dk + bid * stride_descale_dk_z + hkid
+            tl.store(descale_dk_offset, descale_dk)
         tl.store(DK + adj_dkdv + offs_dkdv, (dk * scale_dk).to(DK.dtype.element_ty), mask=mask_kv)
     else:
         tl.store(DK + adj_dkdv + offs_dkdv, dk, mask=mask_kv)
@@ -570,13 +578,13 @@ def _bwd_kernel_dq_causal(
     stride_dob, stride_doh, stride_dom, stride_dok,
     stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
     stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_do_z,
-    stride_descale_o_z, stride_descale_dq_z, stride_descale_dk_z, stride_descale_dv_z,
+    stride_descale_dq_z,
     HQ, HK,
     cu_seqlens_q, cu_seqlens_k,
     max_seqlen_q, max_seqlen_k,
     dropout_mask, dropout_p, philox_seed, philox_offset_base,
     Descale_q, Descale_k, Descale_v, Descale_do,
-    Descale_o, Descale_dq, Descale_dk, Descale_dv,
+    Descale_dq,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLK_SLICE_FACTOR: tl.constexpr,
@@ -743,11 +751,10 @@ def _bwd_kernel_dq_causal(
         dq *= sm_scale
         if IS_FP8:
             scale_dq, descale_dq = compute_fp8_scaling_factors(dq, FP8_MAX)
-
             # store the descale factor for later use
             if FP8_RETURN_DESCALE:
-                o_descale_offset = DESCALE_O + off_z * stride_descale_o_z + off_h_q
-                tl.store(o_descale_offset, descale_acc)
+                descale_dq_offset = Descale_dq + bid * stride_descale_dq_z + hqid
+                tl.store(descale_dq_offset, descale_dq)
             tl.store(DQ + adj_dq + offs_dq, (dq * scale_dq).to(DQ.dtype.element_ty), mask=mask_q)
         else:
             tl.store(DQ + adj_dq + offs_dq, dq, mask=mask_q)
@@ -765,13 +772,13 @@ def _bwd_kernel_dkdv_noncausal(
     stride_dob, stride_doh, stride_dom, stride_dok,
     stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
     stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_do_z,
-    stride_descale_o_z, stride_descale_dq_z, stride_descale_dk_z, stride_descale_dv_z,
+    stride_descale_dk_z, stride_descale_dv_z,
     HQ, HK,
     cu_seqlens_q, cu_seqlens_k,
     max_seqlen_q, max_seqlen_k,
     dropout_mask, dropout_p, philox_seed, philox_offset_base,
     Descale_q, Descale_k, Descale_v, Descale_do,
-    Descale_o, Descale_dq, Descale_dk, Descale_dv, 
+    Descale_dk, Descale_dv, 
     BLOCK_M: tl.constexpr,  # 32
     BLOCK_N: tl.constexpr,  # 128
     BLK_SLICE_FACTOR: tl.constexpr,
@@ -883,13 +890,21 @@ def _bwd_kernel_dkdv_noncausal(
     adj_dkdv = bid * stride_dkb + hkid * stride_kh + k_start * stride_dkn
     offs_dkdv = offs_n[:, None] * stride_dkn + offs_k[None, :] * stride_dkk
     if IS_FP8:
-        scale_dv, _ = compute_fp8_scaling_factors(dv, FP8_MAX)
+        scale_dv, descale_dv = compute_fp8_scaling_factors(dv, FP8_MAX)
+        # store the descale factor for later use
+        if FP8_RETURN_DESCALE:
+            descale_dv_offset = Descale_dv + bid * stride_descale_dv_z + hkid
+            tl.store(descale_dv_offset, descale_dv)
         tl.store(DV + adj_dkdv + offs_dkdv, (dv * scale_dv).to(DV.dtype.element_ty), mask=mask_kv)
     else:
         tl.store(DV + adj_dkdv + offs_dkdv, dv, mask=mask_kv)
     dk *= sm_scale
     if IS_FP8:
-        scale_dk, _ = compute_fp8_scaling_factors(dk, FP8_MAX)
+        scale_dk, descale_dk = compute_fp8_scaling_factors(dk, FP8_MAX)
+         # store the descale factor for later use
+        if FP8_RETURN_DESCALE:
+            descale_dk_offset = Descale_dk + bid * stride_descale_dk_z + hkid
+            tl.store(descale_dk_offset, descale_dk)
         tl.store(DK + adj_dkdv + offs_dkdv, (dk * scale_dk).to(DK.dtype.element_ty), mask=mask_kv)
     else:
         tl.store(DK + adj_dkdv + offs_dkdv, dk, mask=mask_kv)
@@ -907,13 +922,13 @@ def _bwd_kernel_dq_noncausal(
     stride_dob, stride_doh, stride_dom, stride_dok,
     stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
     stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_do_z,
-    stride_descale_o_z, stride_descale_dq_z, stride_descale_dk_z, stride_descale_dv_z,
+    stride_descale_dq_z,
     HQ, HK,
     cu_seqlens_q, cu_seqlens_k,
     max_seqlen_q, max_seqlen_k,
     dropout_mask, dropout_p, philox_seed, philox_offset_base,
     Descale_q, Descale_k, Descale_v, Descale_do,
-    Descale_o, Descale_dq, Descale_dk, Descale_dv, 
+    Descale_dq,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLK_SLICE_FACTOR: tl.constexpr,
@@ -1027,7 +1042,11 @@ def _bwd_kernel_dq_noncausal(
         offs_dq = offs_m[:, None] * stride_dqm + offs_k[None, :] * stride_dqk
         dq *= sm_scale
         if IS_FP8:
-            scale_dq, _ = compute_fp8_scaling_factors(dq, FP8_MAX)
+            scale_dq, descale_dq = compute_fp8_scaling_factors(dq, FP8_MAX)
+            # store the descale factor for later use
+            if FP8_RETURN_DESCALE:
+                descale_dq_offset = Descale_dq + bid * stride_descale_dq_z + hqid
+                tl.store(descale_dq_offset, descale_dq)
             tl.store(DQ + adj_dq + offs_dq, (dq * scale_dq).to(DQ.dtype.element_ty), mask=mask_q)
         else:
             tl.store(DQ + adj_dq + offs_dq, dq, mask=mask_q)
@@ -1072,7 +1091,7 @@ def attention_prefill_backward_triton_split_impl(
     if IS_FP8:
         FP8_MAX = torch.finfo(q.dtype).max
         
-        assert descale_o is None or descale_dq is None or descale_dk is None or descale_dv is None, f"In fp8, you need to provide empty tensors to store descale factors for dq, dk, dv and o"
+        assert descale_o is not None and descale_dq is not None and descale_dk is not None and descale_dv is not None, f"In fp8, you need to provide empty tensors to store descale factors for dq, dk, dv and o"
            
         FP8_RETURN_DESCALE: tl.constexpr = True 
 
@@ -1097,6 +1116,7 @@ def attention_prefill_backward_triton_split_impl(
         stride_descale_dv_z = descale_dv.stride(0)
     else:
         FP8_MAX = None
+        FP8_RETURN_DESCALE: tl.constexpr = False
         stride_descale_q_z = stride_descale_k_z = stride_descale_v_z = stride_descale_do_z = stride_descale_o_z = stride_descale_dq_z = stride_descale_dk_z = stride_descale_dv_z = None
 
 
@@ -1148,15 +1168,16 @@ def attention_prefill_backward_triton_split_impl(
         delta,
         stride_ob, stride_oh, stride_om, stride_ok,
         stride_deltab, stride_deltah, stride_deltam,
+        stride_descale_o_z,
         stride_descale_do_z,
         cu_seqlens_q, max_seqlen_q,
+        descale_o,
         descale_do,
         BLOCK_M=PRE_BLOCK,
         HEAD_DIM=HEAD_DIM,
         ACTUAL_HEAD_DIM=ACTUAL_HEAD_DIM,
         IS_VARLEN=IS_VARLEN,
-        IS_FP8=IS_FP8,
-        FP8_MAX=FP8_MAX
+        IS_FP8=IS_FP8
     )
     
     if DEBUG:
@@ -1204,13 +1225,13 @@ def attention_prefill_backward_triton_split_impl(
             stride_dob, stride_doh, stride_dom, stride_dok,
             stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
             stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_do_z,
-            stride_descale_o_z, stride_descale_dq_z, stride_descale_dk_z, stride_descale_dv_z,
+            stride_descale_dk_z, stride_descale_dv_z,
             nheads_q, nheads_k,
             cu_seqlens_q, cu_seqlens_k,
             max_seqlen_q, max_seqlen_k,
             dropout_mask, dropout_p, philox_seed, philox_offset,
             descale_q, descale_k, descale_v, descale_do,
-            descale_o, descale_dq, descale_dk, descale_dv,
+            descale_dk, descale_dv,
             BLOCK_M1, BLOCK_N1, BLK_SLICE_FACTOR,
             HEAD_DIM, ACTUAL_HEAD_DIM,
             ENABLE_DROPOUT=use_dropout,
@@ -1238,13 +1259,13 @@ def attention_prefill_backward_triton_split_impl(
             stride_dob, stride_doh, stride_dom, stride_dok,
             stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
             stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_do_z,
-            stride_descale_o_z, stride_descale_dq_z, stride_descale_dk_z, stride_descale_dv_z,
+            stride_descale_dq_z,
             nheads_q, nheads_k,
             cu_seqlens_q, cu_seqlens_k,
             max_seqlen_q, max_seqlen_k,
             dropout_mask, dropout_p, philox_seed, philox_offset,
             descale_q, descale_k, descale_v, descale_do,
-            descale_o, descale_dq, descale_dk, descale_dv,
+            descale_dq,
             BLOCK_M2, BLOCK_N2, BLK_SLICE_FACTOR,
             HEAD_DIM, ACTUAL_HEAD_DIM,
             ENABLE_DROPOUT=use_dropout,
@@ -1271,13 +1292,13 @@ def attention_prefill_backward_triton_split_impl(
             stride_dob, stride_doh, stride_dom, stride_dok,
             stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
             stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_do_z,
-            stride_descale_o_z, stride_descale_dq_z, stride_descale_dk_z, stride_descale_dv_z,
+            stride_descale_dk_z, stride_descale_dv_z,
             nheads_q, nheads_k,
             cu_seqlens_q, cu_seqlens_k,
             max_seqlen_q, max_seqlen_k,
             dropout_mask, dropout_p, philox_seed, philox_offset,
             descale_q, descale_k, descale_v, descale_do,
-            descale_o, descale_dq, descale_dk, descale_dv,
+            descale_dk, descale_dv,
             BLOCK_M1, BLOCK_N1, BLK_SLICE_FACTOR,
             HEAD_DIM, ACTUAL_HEAD_DIM,
             ENABLE_DROPOUT=use_dropout,
@@ -1304,13 +1325,13 @@ def attention_prefill_backward_triton_split_impl(
             stride_dob, stride_doh, stride_dom, stride_dok,
             stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
             stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_do_z,
-            stride_descale_o_z, stride_descale_dq_z, stride_descale_dk_z, stride_descale_dv_z,
+            stride_descale_dq_z,
             nheads_q, nheads_k,
             cu_seqlens_q, cu_seqlens_k,
             max_seqlen_q, max_seqlen_k,
             dropout_mask, dropout_p, philox_seed, philox_offset,
             descale_q, descale_k, descale_v, descale_do,
-            descale_o, descale_dq, descale_dk, descale_dv,
+            descale_dq,
             BLOCK_M2, BLOCK_N2, BLK_SLICE_FACTOR,
             HEAD_DIM, ACTUAL_HEAD_DIM,
             ENABLE_DROPOUT=use_dropout,

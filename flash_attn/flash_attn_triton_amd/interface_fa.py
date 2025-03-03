@@ -66,6 +66,10 @@ def fwd(q: torch.Tensor,
         print("window_size_right:", window_size_right)
         print("softcap:", softcap)
         print("return_softmax:", return_softmax)
+        print("descale_q:", descale_q)
+        print("descale_k:", descale_k)
+        print("descale_v:", descale_v)
+        print("descale_o:", descale_o)
 
 
     out = create_output_tensor_like(q) if out is None else prep_output_tensor(out) # if given a tensor we should maybe make it fp32 if given fp8
@@ -204,6 +208,14 @@ def bwd(
         print("deterministic:", deterministic)
         print("gen_:", gen_)
         print("rng_state:", rng_state)
+        print("descale_q:", descale_q)
+        print("descale_k:", descale_k)
+        print("descale_v:", descale_v)
+        print("descale_do:", descale_do)
+        print("descale_o:", descale_o)
+        print("descale_dq:", descale_dq)
+        print("descale_dk:", descale_dk)
+        print("descale_dv:", descale_dv)
 
     dq = create_output_tensor_like(q) if dq is None else prep_output_tensor(dq)
     dk =  create_output_tensor_like(k) if dk is None else prep_output_tensor(dk)
@@ -333,6 +345,10 @@ def varlen_fwd(
         print("window_size_left:", window_size_left)
         print("window_size_right:", window_size_right)
         print("gen_:", gen_)
+        print("descale_q:", descale_q)
+        print("descale_k:", descale_k)
+        print("descale_v:", descale_v)
+        print("descale_o:", descale_o)
 
     o = create_output_tensor_like(q) if o is None else prep_output_tensor(o)
 
@@ -447,7 +463,10 @@ def varlen_bwd(
     descale_k: Optional[torch.Tensor] = None,
     descale_v: Optional[torch.Tensor] = None,
     descale_do: Optional[torch.Tensor] = None,
-    descale_o: Optional[torch.Tensor] = None
+    descale_o: Optional[torch.Tensor] = None,
+    descale_dq: Optional[torch.Tensor] = None,
+    descale_dk: Optional[torch.Tensor] = None,
+    descale_dv: Optional[torch.Tensor] = None,
 ):
     if DEBUG:
         print()
@@ -474,6 +493,14 @@ def varlen_bwd(
         print("deterministic:", deterministic)
         print("gen_:", gen_)
         print("rng_state:", rng_state)
+        print("descale_q:", descale_q)
+        print("descale_k:", descale_k)
+        print("descale_v:", descale_v)
+        print("descale_do:", descale_do)
+        print("descale_o:", descale_o)
+        print("descale_dq:", descale_dq)
+        print("descale_dk:", descale_dk)
+        print("descale_dv:", descale_dv)
 
     dq = create_output_tensor_like(q) if dq is None else prep_output_tensor(dq)
     dk =  create_output_tensor_like(k) if dk is None else prep_output_tensor(dk)
