@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from typing import Literal, Optional
-from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, AUTOTUNE, cast_to_fp8, compute_fp8_scaling_factors, get_shape_from_layout, get_strides_from_layout, is_cdna, is_fp8, is_rdna, write_dropout_mask, create_dropout_mask
+from .utils import DROPOUT_USE_PYTORCH, DROPOUT_DUMP, AUTOTUNE, compute_fp8_scaling_factors, get_shape_from_layout, get_strides_from_layout, is_cdna, is_fp8, is_rdna, write_dropout_mask, create_dropout_mask
 
 # NOTE: triton fails to import tl.constexprs so create them here for the file
 tl_DROPOUT_USE_PYTORCH: tl.constexpr = DROPOUT_USE_PYTORCH
@@ -585,22 +585,7 @@ def attention_prefill_forward_triton_impl(
         FP8_MAX: tl.constexpr=torch.finfo(q.dtype).max
         FP8_RETURN_DESCALE: tl.constexpr = False if descale_o is None else True
 
-
         assert q.dtype == k.dtype == v.dtype, f"Data type mismatch: q.dtype={q.dtype}, k.dtype={k.dtype}, v.dtype={v.dtype}. All tensors must have the same dtype."
-
-
-        if layout == "bshd":
-            batch, _ , nheads_q, dim = q.shape
-            _, _ , nheads_k, _ = k.shape
-        elif layout == "bhsd":
-            batch, nheads_q,_, dim = q.shape
-            _,  nheads_k, _, _ = k.shape
-        elif layout == "thd":
-            batch = len(cu_seqlens_q) - 1
-            nheads_q = q.size(1)
-            nheads_k = k.size(1)
-        else:
-            raise ValueError("Unsupported layout")
 
         # Get strides for the kernel
         descale_q_stride_z = descale_q.stride(0)

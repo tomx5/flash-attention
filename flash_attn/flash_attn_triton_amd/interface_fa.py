@@ -13,25 +13,6 @@ from typing import Optional, Union
 
 USE_REF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_REF', '0').lower() in ('1', 'true', 'yes')
 
-def create_output_tensor_like(x, zero_tensors = True):
-    if is_fp8(x):
-        # out_type = torch.float32
-        out_type = x.dtype
-    else:
-        out_type = x.dtype
-
-
-    if zero_tensors:
-        return torch.zeros_like(x, dtype=out_type) 
-    else:
-        return torch.empty_like(x, dtype=out_type)
-
-
-def prep_output_tensor(x):
-    x.zero_()
-    return x
-
-
 def fwd(q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
@@ -72,7 +53,7 @@ def fwd(q: torch.Tensor,
         print("descale_o:", descale_o)
 
 
-    out = create_output_tensor_like(q) if out is None else prep_output_tensor(out) # if given a tensor we should maybe make it fp32 if given fp8
+    out = torch.zeros_like(q) if out is None else out.zero_()
 
     # Setup metadata
     metadata = MetaData(sm_scale=softmax_scale)
@@ -217,9 +198,9 @@ def bwd(
         print("descale_dk:", descale_dk)
         print("descale_dv:", descale_dv)
 
-    dq = create_output_tensor_like(q) if dq is None else prep_output_tensor(dq)
-    dk =  create_output_tensor_like(k) if dk is None else prep_output_tensor(dk)
-    dv =  create_output_tensor_like(v) if dv is None else prep_output_tensor(dv)
+    dq = torch.zeros_like(q) if dq is None else dq.zero_()
+    dk = torch.zeros_like(k) if dk is None else dk.zero_()
+    dv = torch.zeros_like(v) if dv is None else dv.zero_()
 
     if dropout_p > 0.0:
         philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
