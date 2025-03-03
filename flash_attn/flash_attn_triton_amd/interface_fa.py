@@ -13,6 +13,8 @@ from typing import Optional, Union
 
 USE_REF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_REF', '0').lower() in ('1', 'true', 'yes')
 
+ZERO_INPUTS = True
+
 def fwd(q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
@@ -49,7 +51,7 @@ def fwd(q: torch.Tensor,
 
 
     if o is None:
-        o = torch.empty_like(q)
+        o = torch.zeros_like(q) if ZERO_INPUTS else torch.empty_like(q)
 
     # Setup metadata
     metadata = MetaData(sm_scale=softmax_scale)
@@ -80,7 +82,7 @@ def fwd(q: torch.Tensor,
     if USE_REF:
         if DEBUG:
             print("Using reference implementation")
-        output_ref, softmax_lse_ref, sd_mask_ref = attention_forward_pytorch_ref_impl(
+        softmax_lse_ref, sd_mask_ref = attention_forward_pytorch_ref_impl(
                                                 q,
                                                 k,
                                                 v,
@@ -95,13 +97,12 @@ def fwd(q: torch.Tensor,
                                                 metadata.philox_seed,
                                                 metadata.philox_offset,
                                                 metadata.use_exp2)
-        o.copy_(output_ref)
         softmax_lse=softmax_lse_ref
         sd_mask=sd_mask_ref
     else:
         if DEBUG:
             print("Using Triton implementation")
-        output_triton, softmax_lse_triton, sd_mask_triton = attention_prefill_forward_triton_impl(
+        softmax_lse_triton, sd_mask_triton = attention_prefill_forward_triton_impl(
                                                 q,
                                                 k,
                                                 v,
@@ -123,10 +124,8 @@ def fwd(q: torch.Tensor,
                                                 descale_q,
                                                 descale_k,
                                                 descale_v)
-        o.copy_(output_triton)
         softmax_lse=softmax_lse_triton
         sd_mask=sd_mask_triton
-        # return output_triton, softmax_lse_triton, sd_mask_triton, rng_state
 
     if DEBUG:
         print("fwd outputs")
@@ -185,11 +184,11 @@ def bwd(
         print("rng_state:", rng_state)
 
     if dq is None:
-        dq = torch.empty_like(q)
+        dq = torch.zeros_like(q) if ZERO_INPUTS else torch.empty_like(q)
     if dk is None:
-        dk = torch.empty_like(k)
+        dk =  torch.zeros_like(k) if ZERO_INPUTS else torch.empty_like(k)
     if dv is None:
-        dv = torch.empty_like(v)
+        dv =  torch.zeros_like(v) if ZERO_INPUTS else torch.empty_like(v)
 
     if dropout_p > 0.0:
         philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
@@ -201,7 +200,7 @@ def bwd(
         if DEBUG:
             print("Using reference implementation")
 
-        dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
+        delta_ref = attention_backward_pytorch_ref_impl(
             dout,
             q,
             k,
@@ -220,9 +219,6 @@ def bwd(
             philox_offset,
             False,
         )
-        dq.copy_(dq_ref)
-        dk.copy_(dk_ref)
-        dv.copy_(dv_ref)
         delta = delta_ref
     else:
         if DEBUG:
@@ -231,7 +227,7 @@ def bwd(
             bwd = attention_prefill_backward_triton_impl
         else:
             bwd = attention_prefill_backward_triton_split_impl
-        dq_triton, dk_triton, dv_triton, delta_triton = bwd(
+        delta_triton = bwd(
             dout,
             q,
             k,
@@ -260,11 +256,7 @@ def bwd(
             DEBUG_TRITON=DEBUG_TRITON,
             DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
-        dq.copy_(dq_triton)
-        dk.copy_(dk_triton)
-        dv.copy_(dv_triton)
         delta = delta_triton
-        # return dq_triton, dk_triton, dv_triton, delta_triton
 
     if DEBUG:
         print("bwd outputs")
@@ -318,7 +310,7 @@ def varlen_fwd(
         print("gen_:", gen_)
 
     if o is None:
-        o = torch.empty_like(q)
+        o = torch.zeros_like(q) if ZERO_INPUTS else torch.empty_like(q)
 
     # Setup metadata
     metadata = MetaData(sm_scale=softmax_scale)
@@ -348,7 +340,7 @@ def varlen_fwd(
     if USE_REF:
         if DEBUG:
             print("Using reference implementation")
-        output_ref, softmax_lse_ref, sd_mask_ref = attention_forward_pytorch_ref_impl(
+        softmax_lse_ref, sd_mask_ref = attention_forward_pytorch_ref_impl(
                                                 q,
                                                 k,
                                                 v,
@@ -363,13 +355,12 @@ def varlen_fwd(
                                                 metadata.philox_seed,
                                                 metadata.philox_offset,
                                                 metadata.use_exp2)
-        o.copy_(output_ref)
         softmax_lse=softmax_lse_ref
         sd_mask=sd_mask_ref
     else:
         if DEBUG:
             print("Using Triton implementation")
-        output_triton, softmax_lse_triton, sd_mask_triton = attention_prefill_forward_triton_impl(
+        softmax_lse_triton, sd_mask_triton = attention_prefill_forward_triton_impl(
                                                             q,
                                                             k,
                                                             v,
@@ -391,10 +382,9 @@ def varlen_fwd(
                                                             descale_q,
                                                             descale_k,
                                                             descale_v)
-        o.copy_(output_triton)
         softmax_lse=softmax_lse_triton
         sd_mask=sd_mask_triton
-        # return output_triton, softmax_lse_triton, sd_mask_triton, rng_state
+
     if DEBUG:
         print("varlen_fwd outputs")
         print("o:", o, o.shape)
@@ -461,11 +451,11 @@ def varlen_bwd(
         print("rng_state:", rng_state)
 
     if dq is None:
-        dq = torch.empty_like(q)
+        dq = torch.zeros_like(q) if ZERO_INPUTS else torch.empty_like(q)
     if dk is None:
-        dk = torch.empty_like(k)
+        dk =  torch.zeros_like(k) if ZERO_INPUTS else torch.empty_like(k)
     if dv is None:
-        dv = torch.empty_like(v)
+        dv =  torch.zeros_like(v) if ZERO_INPUTS else torch.empty_like(v)
 
     if dropout_p > 0.0:
         philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
@@ -476,7 +466,7 @@ def varlen_bwd(
     if USE_REF:
         if DEBUG:
             print("Using reference implementation")
-        dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
+        delta_ref = attention_backward_pytorch_ref_impl(
             dout,
             q,
             k,
@@ -495,9 +485,6 @@ def varlen_bwd(
             philox_offset,
             False,
         )
-        dq.copy_(dq_ref)
-        dk.copy_(dk_ref)
-        dv.copy_(dv_ref)
         delta = delta_ref
     else:
         if DEBUG:
@@ -506,7 +493,7 @@ def varlen_bwd(
             bwd = attention_prefill_backward_triton_impl
         else:
             bwd = attention_prefill_backward_triton_split_impl
-        dq_triton, dk_triton, dv_triton, delta_triton = bwd(
+        delta_triton = bwd(
             dout,
             q,
             k,
@@ -535,11 +522,7 @@ def varlen_bwd(
             DEBUG_TRITON=DEBUG_TRITON,
             DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
-        dq.copy_(dq_triton)
-        dk.copy_(dk_triton)
-        dv.copy_(dv_triton)
         delta = delta_triton
-        # return dq_triton, dk_triton, dv_triton, delta_triton
 
     if DEBUG:
         print("varlen_bwd outputs")
@@ -574,7 +557,7 @@ def fwd_kvcache(
     ):
 
     if out is None:
-        out = torch.empty_like(q)
+        out = torch.zeros_like(q) if ZERO_INPUTS else torch.empty_like(q)
 
     # fill metadata
     metadata = MetaData(sm_scale=softmax_scale)
@@ -584,11 +567,8 @@ def fwd_kvcache(
     metadata.cache_seqlens = cache_seqlens
     metadata.cache_batch_idx = cache_batch_idx
 
-    if k is not None and v is not None:
-        metadata.new_kv = True
-        metadata.seqlen_new = k.shape[1]
-        metadata.k_new = k
-        metadata.v_new = v
+    k_new = k
+    v_new = v
 
     if causal:
         metadata.need_causal()
@@ -625,32 +605,31 @@ def fwd_kvcache(
                 s=metadata.max_seqlens_q,
             )
         k_ro = apply_rotary_emb(
-            metadata.k_new,
+            k_new,
             metadata.rotary_cos,
             metadata.rotary_sin,
             seqlen_offsets=metadata.cache_seqlens,
             interleaved=metadata.rotary_interleaved,
         )
 
-        q, metadata.k_new = q_ro.to(q.dtype), k_ro.to(q.dtype)
+        q, k_new = q_ro.to(q.dtype), k_ro.to(q.dtype)
 
     # launch kernel
     # TODO: pass output as an arg. Maybe we are copying output which is causing slow down
-    output_triton, softmax_lse_triton = attention_decode_forward_triton_impl(
+    softmax_lse_triton = attention_decode_forward_triton_impl(
         q,
         k_cache,
         v_cache,
+        k_new,
+        v_new,
+        out,
         metadata.sm_scale,
         metadata.causal,
         metadata.alibi_slopes,
         metadata.layout,
         metadata.cache_seqlens,
         metadata.cache_batch_idx,
-        metadata.new_kv,
-        metadata.k_new,
-        metadata.v_new,
     )
-    out.copy_(output_triton)
     softmax_lse = softmax_lse_triton
 
 

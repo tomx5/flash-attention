@@ -1032,8 +1032,8 @@ def attention_prefill_backward_triton_split_impl(
         stride_descale_do_z = descale_do.stride(0)
 
         # fp8 is sensitive
-        ZERO_TENSORS = True
-        ACCUMLATE_FP32 = True
+        ZERO_TENSORS = False
+        ACCUMLATE_FP32 = False
     else:
         FP8_MAX = None
         stride_descale_q_z = stride_descale_k_z = stride_descale_v_z = stride_descale_do_z = None
@@ -1268,4 +1268,4 @@ def attention_prefill_backward_triton_split_impl(
         dq = dq.to(og_dtype)
         dk = dk.to(og_dtype)
         dv = dv.to(og_dtype)
-    return dq, dk, dv, delta
+    return delta

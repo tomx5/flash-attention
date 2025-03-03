@@ -616,8 +616,8 @@ def attention_prefill_forward_triton_impl(
         descale_v_stride_z = descale_v.stride(0)
 
         # fp8 is sensitive
-        ZERO_TENSORS = True
-        ACCUMLATE_FP32 = True
+        ZERO_TENSORS = False
+        ACCUMLATE_FP32 = False
     else:
         descale_q = descale_k = descale_v = None
         descale_q_stride_z = descale_k_stride_z = descale_v_stride_z = None
@@ -633,7 +633,7 @@ def attention_prefill_forward_triton_impl(
         o = o.to(torch.float32)
 
     if DEBUG:
-        print("is_fp8:", IS_FP8)
+        print("IS_FP8:", IS_FP8)
         print("descale_q:", descale_q)
         print("descale_k:", descale_k)
         print("descale_v:", descale_v)
@@ -727,4 +727,4 @@ def attention_prefill_forward_triton_impl(
     if ACCUMLATE_FP32:
         o = o.to(og_dtype)
 
-    return o, softmax_lse, sd_mask if return_softmax else None 
+    return softmax_lse, sd_mask if return_softmax else None 

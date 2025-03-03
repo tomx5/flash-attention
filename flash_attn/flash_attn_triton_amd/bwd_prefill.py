@@ -644,8 +644,8 @@ def attention_prefill_backward_triton_impl(
     if IS_FP8:
         FP8_MAX=torch.finfo(q.dtype).max
         # fp8 is sensitive
-        ZERO_TENSORS = True
-        ACCUMLATE_FP32 = True
+        ZERO_TENSORS = False
+        ACCUMLATE_FP32 = False
     else:
         FP8_MAX=None
     
@@ -821,10 +821,7 @@ def attention_prefill_backward_triton_impl(
     )
 
     if sequence_parallel:
-        if IS_FP8:
-            dq = dq.to(torch.float32).sum(dim=0)
-        else:
-            dq = dq.sum(dim=0)
+        dq = dq.sum(dim=0)
 
     if ACCUMLATE_FP32:
         dq = dq.to(og_dtype)
@@ -841,4 +838,4 @@ def attention_prefill_backward_triton_impl(
             print("dropout_fraction bwd:", 1.0 - (dropout_mask.sum()/ dropout_mask.numel()).item())
             write_dropout_mask(dropout_mask, "dropout_mask_bwd")
 
-    return dq, dk, dv, delta
+    return delta

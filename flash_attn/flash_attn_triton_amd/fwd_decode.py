@@ -544,16 +544,16 @@ def get_split_k(B: int, G: int, H: int, Mk: int) -> int:
 def attention_decode_forward_triton_impl(
         q: torch.Tensor, 
         k_cache: torch.Tensor, 
-        v_cache: torch.Tensor, 
+        v_cache: torch.Tensor,
+        k_new: Optional[torch.Tensor],
+        v_new: Optional[torch.Tensor],
+        out: torch.Tensor,
         sm_scale: float, 
         causal: bool, 
         alibi_slopes: Optional[torch.Tensor], 
         layout: Literal["bshd", "bhsd", "thd"], 
         cache_seqlens: Optional[Union[(int, torch.Tensor)]], 
-        cache_batch_idx: Optional[torch.Tensor], 
-        new_kv: bool, 
-        k_new: Optional[torch.Tensor], 
-        v_new: Optional[torch.Tensor],
+        cache_batch_idx: Optional[torch.Tensor],
         # debug
         ZERO_TENSORS: bool = False,
         ACCUMLATE_FP32: bool = False,
@@ -564,21 +564,25 @@ def attention_decode_forward_triton_impl(
     SPLIT_K = None
     NUM_QUANT_GROUPS = 1
 
+    is_new_kv = True if k_new is not None and v_new is not None else False
+
     # kernels expects "bsghd"
     original_layout = layout
     if layout == "bshd":
         q=q.unsqueeze(2)
+        out=out.unsqueeze(2)
         k_cache=k_cache.unsqueeze(2)
         v_cache=v_cache.unsqueeze(2)
-        if new_kv:
+        if is_new_kv:
             k_new = k_new.unsqueeze(2)
             v_new = v_new.unsqueeze(2)
         layout = "bsghd"
     elif layout == "bhsd":
         q=q.permute(0, 2, 1, 3).unsqueeze(2)
+        out=out.permute(0, 2, 1, 3).unsqueeze(2)
         k_cache=k_cache.permute(0, 2, 1, 3).unsqueeze(2)
         v_cache=v_cache.permute(0, 2, 1, 3).unsqueeze(2)
-        if new_kv:
+        if is_new_kv:
             k_new = k_new.permute(0, 2, 1, 3).unsqueeze(2)
             v_new = v_new.permute(0, 2, 1, 3).unsqueeze(2)
         layout = "bsghd"
@@ -594,10 +598,6 @@ def attention_decode_forward_triton_impl(
     _, seqlen_v, n_group_v, heads_per_group_v, dim_v = v_cache.shape
 
     assert dim_q == dim_k == dim_v, f"Dimensions must match: {dim_q}, {dim_k}, {dim_v}"
-
-
-    # save
-    out = torch.empty((batch_size, seqlen_q, n_group_q, heads_per_group_q, dim_padded), device=q.device, dtype=q.dtype)
 
     # zero out
     if ZERO_TENSORS:
@@ -664,7 +664,7 @@ def attention_decode_forward_triton_impl(
         G_q=n_group_q,
         N_CTX_Q=seqlen_q,
         N_CTX_K=seqlen_k,
-        N_CTX_NEW=k_new.shape[1] if new_kv else None,
+        N_CTX_NEW=k_new.shape[1] if is_new_kv else None,
         BLOCK_N_PER_SPLIT=split_size,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
@@ -673,7 +673,7 @@ def attention_decode_forward_triton_impl(
         BOUNDS_CHECKS_N=(split_size % BLOCK_N) > 0 or use_cache_seqlens,
         USE_CACHE_SEQLENs=use_cache_seqlens,
         USE_CACHE_BATCH_IDX=cache_batch_idx is not None,
-        NEW_KV=new_kv,
+        NEW_KV=is_new_kv,
         IS_GQA=is_gqa,
         IS_CAUSAL=causal,
         USE_ALIBI=False if alibi_slopes is None else True,
@@ -731,4 +731,9 @@ def attention_decode_forward_triton_impl(
     if ACCUMLATE_FP32:
         out = out.to(og_dtype)
 
-    return out.narrow(-1, 0, dim_k), lse
+
+    # narrow result
+    out = out.narrow(-1, 0, dim_k)
+    
+    
+    return lse
