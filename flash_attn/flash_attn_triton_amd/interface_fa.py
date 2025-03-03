@@ -177,7 +177,10 @@ def bwd(
     descale_k: Optional[torch.Tensor] = None,
     descale_v: Optional[torch.Tensor] = None,
     descale_do: Optional[torch.Tensor] = None,
-    descale_o: Optional[torch.Tensor] = None
+    descale_o: Optional[torch.Tensor] = None,
+    descale_dq: Optional[torch.Tensor] = None,
+    descale_dk: Optional[torch.Tensor] = None,
+    descale_dv: Optional[torch.Tensor] = None,
 ):
     if DEBUG:
         print()
@@ -269,6 +272,10 @@ def bwd(
             descale_k = descale_k,
             descale_v = descale_v,
             descale_do = descale_do,
+            descale_o = descale_o,
+            descale_dq = descale_dq,
+            descale_dk = descale_dk,
+            descale_dv = descale_dv,
             DEBUG_TRITON=DEBUG_TRITON,
             DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )

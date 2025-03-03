@@ -470,8 +470,11 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
             q_fp8, descale_q = cast_to_fp8(q, fp8_dtype, layout, cu_seqlens=metadata.cu_seqlens_q)
             k_fp8, descale_k = cast_to_fp8(k, fp8_dtype, layout, cu_seqlens=metadata.cu_seqlens_k)
             v_fp8, descale_v = cast_to_fp8(v, fp8_dtype, layout, cu_seqlens=metadata.cu_seqlens_k)
-        # return descale factor for o from forward pass if needed
+        # descale factors that are returned with kernel outputs
         descale_o = torch.zeros_like(descale_q)
+        descale_dq = torch.zeros_like(descale_q)
+        descale_dk = torch.zeros_like(descale_k)
+        descale_dv = torch.zeros_like(descale_v)
     elif packing == 'kv':
         if not is_varlen:
             q_fp8, descale_q = cast_to_fp8(q, fp8_dtype, layout)
@@ -516,7 +519,10 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
                 descale_k=descale_k,
                 descale_v=descale_v,
                 descale_do=descale_do,
-                descale_o= descale_o
+                descale_o=descale_o,
+                descale_dq=descale_dq,
+                descale_dk=descale_dk,
+                descale_dv=descale_dv,
             )
         else:
             out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_varlen_func(
@@ -538,7 +544,10 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
                 descale_k=descale_k,
                 descale_v=descale_v,
                 descale_do=descale_do,
-                descale_o= descale_o
+                descale_o=descale_o,
+                descale_dq=descale_dq,
+                descale_dk=descale_dk,
+                descale_dv=descale_dv,
             )
     elif packing == 'kv':
         if not is_varlen:
@@ -748,64 +757,77 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
         dqkv_ref = torch.autograd.grad(out_ref, qkv_ref, do_ref)[0]
 
 
-    # conver the fp8 output to ref type
-    if not is_varlen:
-        out_fp8 = decast_fp8(out_fp8, descale_o, ref_dtype, layout)
-    else:
-        out_fp8 = decast_fp8(out_fp8, descale_o, ref_dtype, layout, cu_seqlens=metadata.cu_seqlens_q)
-
+    # ----------------------------------------------------------------
+    # --- Compare ---
+    # ----------------------------------------------------------------
     # compare forward
     if DEBUG:
         print()
         print(f"Compare fp8 against ref with dtype {ref_dtype}")
 
+    # convert the fp8 output to ref type
+    if not is_varlen:
+        out_fp8_decast = decast_fp8(out_fp8, descale_o, ref_dtype, layout)
+    else:
+        out_fp8_decast = decast_fp8(out_fp8, descale_o, ref_dtype, layout, cu_seqlens=metadata.cu_seqlens_q)
+
     if DEBUG:
         print("out_ref:", out_ref, out_ref.shape)
         print("out_fp8:", out_fp8, out_fp8.shape)
-    torch.testing.assert_close(out_ref, out_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
+    torch.testing.assert_close(out_ref, out_fp8_decast, atol=ATOL_fp8, rtol=RTOL_fp8)
 
     if DEBUG:
         print("lse_ref:", lse_ref, lse_ref.shape)
         print("lse_fp8:", lse_fp8, lse_fp8.shape)
-    # torch.testing.assert_close(lse_ref, lse_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
+    torch.testing.assert_close(lse_ref, lse_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
 
     if dropout_p > 0.0:
         if DEBUG:
             print("S_dmask_ref:", S_dmask_ref, S_dmask_ref.shape)
             print("S_dmask_fp8:", S_dmask_fp8, S_dmask_fp8.shape)
-        # torch.testing.assert_close(S_dmask_ref, S_dmask_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
-
+        torch.testing.assert_close(S_dmask_ref, S_dmask_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
+ 
     # compare backward gradients
     if packing == 'none':
+        # convert the fp8 grads to ref type
+        if not is_varlen:
+            dv_fp8_decast = decast_fp8(dv_fp8, descale_dv, ref_dtype, layout)
+            dk_fp8_decast = decast_fp8(dk_fp8, descale_dk, ref_dtype, layout)
+            dq_fp8_decast = decast_fp8(dq_fp8, descale_dq, ref_dtype, layout)
+        else:
+            dv_fp8_decast = decast_fp8(dv_fp8, descale_dv, ref_dtype, layout, cu_seqlens=metadata.cu_seqlens_k)
+            dk_fp8_decast = decast_fp8(dk_fp8, descale_dk, ref_dtype, layout, cu_seqlens=metadata.cu_seqlens_k)
+            dq_fp8_decast = decast_fp8(dq_fp8, descale_dq, ref_dtype, layout, cu_seqlens=metadata.cu_seqlens_q)
+        
         if DEBUG:
             print("dv_ref:", dv_ref, dv_ref.shape)
-            print("dv_fp8:", dv_fp8, dv_fp8.shape)
+            print("dv_fp8_decast:", dv_fp8_decast, dv_fp8_decast.shape)
         
-        # torch.testing.assert_close(dv_ref, dv_fp8, atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
+        torch.testing.assert_close(dv_ref, dv_fp8_decast, atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
 
         if DEBUG:
             print("dk_ref:", dk_ref, dk_ref.shape)
-            print("dk_fp8:", dk_fp8, dk_fp8.shape)
-        # torch.testing.assert_close(dk_ref, dk_fp8, atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
+            print("dk_fp8_decast:", dk_fp8_decast, dk_fp8_decast.shape)
+        torch.testing.assert_close(dk_ref, dk_fp8_decast, atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
 
         if DEBUG:
             print("dq_ref:", dq_ref, dq_ref.shape)
-            print("dq_fp8:", dq_fp8, dq_fp8.shape)
-        # torch.testing.assert_close(dq_ref, dq_fp8, atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
-    elif packing == 'kv':
-        if DEBUG:
-            print("dq_ref:", dq_ref, dq_ref.shape)
-            print("dq_fp8:", dq_fp8, dq_fp8.shape)
-        # torch.testing.assert_close(dq_ref, dq_fp8, atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
-        if DEBUG:
-            print("dkv_ref:", dkv_ref, dkv_ref.shape)
-            print("dkv_fp8:", dkv_fp8, dkv_fp8.shape)
-        # torch.testing.assert_close(dkv_ref, dkv_fp8, atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
-    elif packing == 'qkv':
-        if DEBUG:
-            print("dqkv_ref:", dqkv_ref, dqkv_ref.shape)
-            print("dqkv_fp8:", dqkv_fp8, dqkv_fp8.shape)
-        # torch.testing.assert_close(dqkv_ref, dqkv_fp8, atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
+            print("dq_fp8_decast:", dq_fp8_decast, dq_fp8_decast.shape)
+        torch.testing.assert_close(dq_ref, dq_fp8_decast, atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
+    # elif packing == 'kv':
+    #     if DEBUG:
+    #         print("dq_ref:", dq_ref, dq_ref.shape)
+    #         print("dq_fp8_decast:", dq_fp8_decast, dq_fp8_decast.shape)
+    #     torch.testing.assert_close(dq_ref, dq_fp8_decast, atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
+    #     if DEBUG:
+    #         print("dkv_ref:", dkv_ref, dkv_ref.shape)
+    #         print("dkv_fp8_decast:", dkv_fp8_decast, dkv_fp8_decast.shape)
+    #     torch.testing.assert_close(dkv_ref, dkv_fp8_decast, atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
+    # elif packing == 'qkv':
+    #     if DEBUG:
+    #         print("dqkv_ref:", dqkv_ref, dqkv_ref.shape)
+    #         print("dqkv_fp8_decast:", dqkv_fp8_decast, dqkv_fp8_decast.shape)
+    #     torch.testing.assert_close(dqkv_ref, dqkv_fp8_decast, atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
 
 
 @pytest.mark.parametrize(
