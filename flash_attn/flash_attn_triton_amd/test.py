@@ -5,11 +5,13 @@ from flash_attn import (
     flash_attn_func,
     flash_attn_fp8_func,
     flash_attn_kvpacked_func, 
-    flash_attn_qkvpacked_func, 
+    flash_attn_qkvpacked_func,
+    flash_attn_qkvpacked_fp8_func,
     flash_attn_varlen_func,
     flash_attn_varlen_fp8_func,
     flash_attn_varlen_kvpacked_func,
-    flash_attn_varlen_qkvpacked_func
+    flash_attn_varlen_qkvpacked_func,
+    flash_attn_varlen_qkvpacked_fp8_func
 )
 
 from .utils import DEBUG, DEBUG_TRITON, DEBUG_TRITON_DETAIL,\
@@ -454,7 +456,7 @@ def fp8_assert_close(tensor_a, tensor_b, atol=ATOL_fp8, rtol=RTOL_fp8, max_diff_
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('dropout_p', [0.0, 0.1])
 @pytest.mark.parametrize('layout', ['bshd', "thd"])
-@pytest.mark.parametrize('packing', ['none'])
+@pytest.mark.parametrize('packing', ['none', "qkv"])
 @pytest.mark.parametrize('DEBUG_INPUT', [False])
 @pytest.mark.flaky(reruns=3, reason="Retry failures")
 @pytest.mark.skipif(not arch_supports_fp8(), reason="fp8 not supported on this device")
@@ -489,140 +491,248 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
         else:
             qkv = torch.stack([k, v], dim=2)
 
-    # ----------------------------------------------------------------
-    # --- FP8 ---
-    # ----------------------------------------------------------------
-    q_fp8 = q.clone()
-    k_fp8 = k.clone()
-    v_fp8 = v.clone()
-    do_fp8= do.clone()
+        # ----------------------------------------------------------------
+        # --- FP8 ---
+        # ----------------------------------------------------------------
+        qkv_fp8 = qkv.clone()
+        do_fp8= do.clone()
 
-    if not is_varlen:
-        out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_fp8_func(
-            q_fp8,
-            k_fp8,
-            v_fp8,
-            dropout_p,
-            causal=causal,
-            window_size=window_size,
-            softcap=softcap,
-            alibi_slopes=alibi_slopes,
-            deterministic=deterministic,
-            return_attn_probs=True,
-        )
-    else:
-        out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_varlen_fp8_func(
-            q_fp8,
-            k_fp8,
-            v_fp8,
-            metadata.cu_seqlens_q,
-            metadata.cu_seqlens_k,
-            metadata.max_seqlens_q,
-            metadata.max_seqlens_k,
-            dropout_p,
-            causal=causal,
-            window_size=window_size,
-            softcap=softcap,
-            alibi_slopes=alibi_slopes,
-            deterministic=deterministic,
-            return_attn_probs=True,
-        )
+        if not is_varlen:
+            out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_qkvpacked_fp8_func(
+                qkv_fp8,
+                dropout_p,
+                causal=causal,
+                window_size=window_size,
+                softcap=softcap,
+                alibi_slopes=alibi_slopes,
+                deterministic=deterministic,
+                return_attn_probs=True,
+            )
+        else:
+            out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_varlen_fp8_func(
+                qkv_fp8,
+                metadata.cu_seqlens_q,
+                metadata.cu_seqlens_k,
+                metadata.max_seqlens_q,
+                metadata.max_seqlens_k,
+                dropout_p,
+                causal=causal,
+                window_size=window_size,
+                softcap=softcap,
+                alibi_slopes=alibi_slopes,
+                deterministic=deterministic,
+                return_attn_probs=True,
+            )
 
-    # fp8 backward pass
-    dq_fp8, dk_fp8, dv_fp8 = torch.autograd.grad(out_fp8, (q_fp8, k_fp8, v_fp8), do_fp8)
-   
+        # fp8 backward pass
+        dqkv_fp8 = torch.autograd.grad(out_fp8, (qkv_fp8), do_fp8)
 
-    # ----------------------------------------------------------------
-    # --- Reference ---
-    # ----------------------------------------------------------------
-    # reference forward pass
-    q_ref = q.clone()
-    k_ref = k.clone()
-    v_ref = v.clone()
-    do_ref = do.clone()
+        # ----------------------------------------------------------------
+        # --- Reference ---
+        # ----------------------------------------------------------------
+        # reference forward pass
+        qkv_ref = qkv.clone()
+        do_ref= do.clone()
 
-    if not is_varlen:
-        out_ref, lse_ref, S_dmask_ref = flash_attn_func(
-            q_ref,
-            k_ref,
-            v_ref,
-            dropout_p,
-            causal=causal,
-            window_size=window_size,
-            softcap=softcap,
-            alibi_slopes=alibi_slopes,
-            deterministic=deterministic,
-            return_attn_probs=True,
-        )
-    else:
-        out_ref, lse_ref, S_dmask_ref = flash_attn_varlen_func(
-            q_ref,
-            k_ref,
-            v_ref,
-            metadata.cu_seqlens_q,
-            metadata.cu_seqlens_k,
-            metadata.max_seqlens_q,
-            metadata.max_seqlens_k,
-            dropout_p,
-            causal=causal,
-            window_size=window_size,
-            softcap=softcap,
-            alibi_slopes=alibi_slopes,
-            deterministic=deterministic,
-            return_attn_probs=True,
-        )
-    
-    # ref backward pass
-    dq_ref, dk_ref, dv_ref = torch.autograd.grad(out_ref, (q_ref, k_ref, v_ref), do_ref)
+        if not is_varlen:
+            out_ref, lse_ref, S_dmask_ref = flash_attn_func(
+                qkv_ref,
+                dropout_p,
+                causal=causal,
+                window_size=window_size,
+                softcap=softcap,
+                alibi_slopes=alibi_slopes,
+                deterministic=deterministic,
+                return_attn_probs=True,
+            )
+        else:
+            out_ref, lse_ref, S_dmask_ref = flash_attn_varlen_func(
+                q_ref,
+                k_ref,
+                v_ref,
+                metadata.cu_seqlens_q,
+                metadata.cu_seqlens_k,
+                metadata.max_seqlens_q,
+                metadata.max_seqlens_k,
+                dropout_p,
+                causal=causal,
+                window_size=window_size,
+                softcap=softcap,
+                alibi_slopes=alibi_slopes,
+                deterministic=deterministic,
+                return_attn_probs=True,
+            )
+        
+        # ref backward pass
+        dqkv_ref = torch.autograd.grad(out_ref, (q_ref, k_ref, v_ref), do_ref)
 
-
-    # ----------------------------------------------------------------
-    # --- Compare ---
-    # ----------------------------------------------------------------
-    # compare forward
-    if DEBUG:
-        print()
-        print(f"Compare fp8 against ref with dtype {ref_dtype}")
-
-    if DEBUG:
-        print("out_ref:", out_ref, out_ref.shape)
-        print("out_fp8:", out_fp8, out_fp8.shape)
-    # torch.testing.assert_close(out_ref, out_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
-    fp8_assert_close(out_ref, out_fp8, atol=ATOL_fp8, rtol=RTOL_fp8 )
-    
-
-    if DEBUG:
-        print("lse_ref:", lse_ref, lse_ref.shape)
-        print("lse_fp8:", lse_fp8, lse_fp8.shape)
-    # torch.testing.assert_close(lse_ref, lse_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
-    fp8_assert_close(lse_ref, lse_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
-
-
-    if dropout_p > 0.0:
+        # ----------------------------------------------------------------
+        # --- Compare ---
+        # ----------------------------------------------------------------
+        # compare forward
         if DEBUG:
-            print("S_dmask_ref:", S_dmask_ref, S_dmask_ref.shape)
-            print("S_dmask_fp8:", S_dmask_fp8, S_dmask_fp8.shape)
-        # torch.testing.assert_close(S_dmask_ref, S_dmask_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
-        fp8_assert_close(S_dmask_ref, S_dmask_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
+            print()
+            print(f"Compare fp8 against ref with dtype {ref_dtype}")
 
-    # compare backward gradients
-    if DEBUG:
-        print("dv_ref:", dv_ref, dv_ref.shape)
-        print("dv_fp8:", dv_fp8, dv_fp8.shape)
-    # torch.testing.assert_close(dv_ref, dv_fp8, atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
-    fp8_assert_close(dv_ref, dv_fp8, atol=ATOL_fp8, rtol=RTOL_fp8 )
+        if DEBUG:
+            print("out_ref:", out_ref, out_ref.shape)
+            print("out_fp8:", out_fp8, out_fp8.shape)
+        fp8_assert_close(out_ref, out_fp8, atol=ATOL_fp8, rtol=RTOL_fp8 )
+        
 
-    if DEBUG:
-        print("dk_ref:", dk_ref, dk_ref.shape)
-        print("dk_fp8_decast:", dk_fp8, dk_fp8.shape)
-    # torch.testing.assert_close(dk_ref, dk_fp8, atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
-    fp8_assert_close(dk_ref, dk_fp8, atol=ATOL_fp8, rtol=RTOL_fp8 )
+        if DEBUG:
+            print("lse_ref:", lse_ref, lse_ref.shape)
+            print("lse_fp8:", lse_fp8, lse_fp8.shape)
+        fp8_assert_close(lse_ref, lse_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
 
-    if DEBUG:
-        print("dq_ref:", dq_ref, dq_ref.shape)
-        print("dq_fp8:", dq_fp8, dq_fp8.shape)
-    # torch.testing.assert_close(dq_ref, dq_fp8, atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
-    fp8_assert_close(dq_ref, dq_fp8, atol=ATOL_fp8, rtol=RTOL_fp8 )
+
+        if dropout_p > 0.0:
+            if DEBUG:
+                print("S_dmask_ref:", S_dmask_ref, S_dmask_ref.shape)
+                print("S_dmask_fp8:", S_dmask_fp8, S_dmask_fp8.shape)
+            fp8_assert_close(S_dmask_ref, S_dmask_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
+
+        # compare backward gradients
+        if DEBUG:
+            print("dqkv_ref:", dqkv_ref, dqkv_ref.shape)
+            print("dqkv_fp8:", dqkv_fp8, dqkv_fp8.shape)
+        fp8_assert_close(dqkv_fp8, dqkv_fp8, atol=ATOL_fp8, rtol=RTOL_fp8 )
+
+    else:
+        # ----------------------------------------------------------------
+        # --- FP8 ---
+        # ----------------------------------------------------------------
+        q_fp8 = q.clone()
+        k_fp8 = k.clone()
+        v_fp8 = v.clone()
+        do_fp8= do.clone()
+
+        if not is_varlen:
+            out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_fp8_func(
+                q_fp8,
+                k_fp8,
+                v_fp8,
+                dropout_p,
+                causal=causal,
+                window_size=window_size,
+                softcap=softcap,
+                alibi_slopes=alibi_slopes,
+                deterministic=deterministic,
+                return_attn_probs=True,
+            )
+        else:
+            out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_varlen_fp8_func(
+                q_fp8,
+                k_fp8,
+                v_fp8,
+                metadata.cu_seqlens_q,
+                metadata.cu_seqlens_k,
+                metadata.max_seqlens_q,
+                metadata.max_seqlens_k,
+                dropout_p,
+                causal=causal,
+                window_size=window_size,
+                softcap=softcap,
+                alibi_slopes=alibi_slopes,
+                deterministic=deterministic,
+                return_attn_probs=True,
+            )
+
+        # fp8 backward pass
+        dq_fp8, dk_fp8, dv_fp8 = torch.autograd.grad(out_fp8, (q_fp8, k_fp8, v_fp8), do_fp8)
+    
+
+        # ----------------------------------------------------------------
+        # --- Reference ---
+        # ----------------------------------------------------------------
+        # reference forward pass
+        q_ref = q.clone()
+        k_ref = k.clone()
+        v_ref = v.clone()
+        do_ref = do.clone()
+
+        if not is_varlen:
+            out_ref, lse_ref, S_dmask_ref = flash_attn_func(
+                q_ref,
+                k_ref,
+                v_ref,
+                dropout_p,
+                causal=causal,
+                window_size=window_size,
+                softcap=softcap,
+                alibi_slopes=alibi_slopes,
+                deterministic=deterministic,
+                return_attn_probs=True,
+            )
+        else:
+            out_ref, lse_ref, S_dmask_ref = flash_attn_varlen_func(
+                q_ref,
+                k_ref,
+                v_ref,
+                metadata.cu_seqlens_q,
+                metadata.cu_seqlens_k,
+                metadata.max_seqlens_q,
+                metadata.max_seqlens_k,
+                dropout_p,
+                causal=causal,
+                window_size=window_size,
+                softcap=softcap,
+                alibi_slopes=alibi_slopes,
+                deterministic=deterministic,
+                return_attn_probs=True,
+            )
+        
+        # ref backward pass
+        dq_ref, dk_ref, dv_ref = torch.autograd.grad(out_ref, (q_ref, k_ref, v_ref), do_ref)
+
+
+        # ----------------------------------------------------------------
+        # --- Compare ---
+        # ----------------------------------------------------------------
+        # compare forward
+        if DEBUG:
+            print()
+            print(f"Compare fp8 against ref with dtype {ref_dtype}")
+
+        if DEBUG:
+            print("out_ref:", out_ref, out_ref.shape)
+            print("out_fp8:", out_fp8, out_fp8.shape)
+        # torch.testing.assert_close(out_ref, out_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
+        fp8_assert_close(out_ref, out_fp8, atol=ATOL_fp8, rtol=RTOL_fp8 )
+        
+
+        if DEBUG:
+            print("lse_ref:", lse_ref, lse_ref.shape)
+            print("lse_fp8:", lse_fp8, lse_fp8.shape)
+        # torch.testing.assert_close(lse_ref, lse_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
+        fp8_assert_close(lse_ref, lse_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
+
+
+        if dropout_p > 0.0:
+            if DEBUG:
+                print("S_dmask_ref:", S_dmask_ref, S_dmask_ref.shape)
+                print("S_dmask_fp8:", S_dmask_fp8, S_dmask_fp8.shape)
+            # torch.testing.assert_close(S_dmask_ref, S_dmask_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
+            fp8_assert_close(S_dmask_ref, S_dmask_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
+
+        # compare backward gradients
+        if DEBUG:
+            print("dv_ref:", dv_ref, dv_ref.shape)
+            print("dv_fp8:", dv_fp8, dv_fp8.shape)
+        # torch.testing.assert_close(dv_ref, dv_fp8, atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
+        fp8_assert_close(dv_ref, dv_fp8, atol=ATOL_fp8, rtol=RTOL_fp8 )
+
+        if DEBUG:
+            print("dk_ref:", dk_ref, dk_ref.shape)
+            print("dk_fp8_decast:", dk_fp8, dk_fp8.shape)
+        # torch.testing.assert_close(dk_ref, dk_fp8, atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
+        fp8_assert_close(dk_ref, dk_fp8, atol=ATOL_fp8, rtol=RTOL_fp8 )
+
+        if DEBUG:
+            print("dq_ref:", dq_ref, dq_ref.shape)
+            print("dq_fp8:", dq_fp8, dq_fp8.shape)
+        # torch.testing.assert_close(dq_ref, dq_fp8, atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
+        fp8_assert_close(dq_ref, dq_fp8, atol=ATOL_fp8, rtol=RTOL_fp8 )
 
 @pytest.mark.parametrize(
     "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD", [

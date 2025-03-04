@@ -145,8 +145,7 @@ These features are supported in Fwd for now. We will add them to backward soon.
 1) ALiBi
 
 These features are in development
-1) FP8
-2) Paged Attention 
+1) Paged Attention 
 2) Sliding Window
 3) Performance Improvements
 

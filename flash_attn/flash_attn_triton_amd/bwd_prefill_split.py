@@ -234,13 +234,11 @@ def _bwd_kernel_dkdv_causal(
     stride_dob, stride_doh, stride_dom, stride_dok,
     stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
     stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_do_z,
-    stride_descale_dk_z, stride_descale_dv_z,
     HQ, HK,
     cu_seqlens_q, cu_seqlens_k,
     max_seqlen_q, max_seqlen_k,
     dropout_mask, dropout_p, philox_seed, philox_offset_base,
     Descale_q, Descale_k, Descale_v, Descale_do,
-    Descale_dk, Descale_dv,
     BLOCK_M: tl.constexpr,  # 32
     BLOCK_N: tl.constexpr,  # 128
     BLK_SLICE_FACTOR: tl.constexpr,
@@ -559,13 +557,11 @@ def _bwd_kernel_dq_causal(
     stride_dob, stride_doh, stride_dom, stride_dok,
     stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
     stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_do_z,
-    stride_descale_dq_z,
     HQ, HK,
     cu_seqlens_q, cu_seqlens_k,
     max_seqlen_q, max_seqlen_k,
     dropout_mask, dropout_p, philox_seed, philox_offset_base,
     Descale_q, Descale_k, Descale_v, Descale_do,
-    Descale_dq,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLK_SLICE_FACTOR: tl.constexpr,
@@ -745,13 +741,11 @@ def _bwd_kernel_dkdv_noncausal(
     stride_dob, stride_doh, stride_dom, stride_dok,
     stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
     stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_do_z,
-    stride_descale_dk_z, stride_descale_dv_z,
     HQ, HK,
     cu_seqlens_q, cu_seqlens_k,
     max_seqlen_q, max_seqlen_k,
     dropout_mask, dropout_p, philox_seed, philox_offset_base,
     Descale_q, Descale_k, Descale_v, Descale_do,
-    Descale_dk, Descale_dv, 
     BLOCK_M: tl.constexpr,  # 32
     BLOCK_N: tl.constexpr,  # 128
     BLK_SLICE_FACTOR: tl.constexpr,
@@ -879,13 +873,11 @@ def _bwd_kernel_dq_noncausal(
     stride_dob, stride_doh, stride_dom, stride_dok,
     stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
     stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_do_z,
-    stride_descale_dq_z,
     HQ, HK,
     cu_seqlens_q, cu_seqlens_k,
     max_seqlen_q, max_seqlen_k,
     dropout_mask, dropout_p, philox_seed, philox_offset_base,
     Descale_q, Descale_k, Descale_v, Descale_do,
-    Descale_dq,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLK_SLICE_FACTOR: tl.constexpr,
@@ -1028,10 +1020,6 @@ def attention_prefill_backward_triton_split_impl(
     descale_k: Optional[torch.Tensor] = None,
     descale_v: Optional[torch.Tensor] = None,
     descale_do: Optional[torch.Tensor] = None,
-    descale_o: Optional[torch.Tensor] = None,
-    descale_dq: Optional[torch.Tensor] = None,
-    descale_dk: Optional[torch.Tensor] = None,
-    descale_dv: Optional[torch.Tensor] = None,  
     # debug
     DEBUG_TRITON: bool = False,
     DEBUG_TRITON_DETAIL: bool = False,
@@ -1059,14 +1047,10 @@ def attention_prefill_backward_triton_split_impl(
         stride_descale_k_z = descale_k.stride(0)
         stride_descale_v_z = descale_v.stride(0)
         stride_descale_do_z = descale_do.stride(0)
-        stride_descale_o_z = descale_o.stride(0) if descale_o else None
-        stride_descale_dq_z = descale_dq.stride(0) if descale_dq else None
-        stride_descale_dk_z = descale_dk.stride(0) if descale_dk else None
-        stride_descale_dv_z = descale_dv.stride(0) if descale_dv else None
     else:
         FP8_MAX = None
         FP8_RETURN_DESCALE: tl.constexpr = False
-        stride_descale_q_z = stride_descale_k_z = stride_descale_v_z = stride_descale_do_z = stride_descale_o_z = stride_descale_dq_z = stride_descale_dk_z = stride_descale_dv_z = None
+        stride_descale_q_z = stride_descale_k_z = stride_descale_v_z = stride_descale_do_z = None
 
 
     # get strides and shape
@@ -1172,13 +1156,11 @@ def attention_prefill_backward_triton_split_impl(
             stride_dob, stride_doh, stride_dom, stride_dok,
             stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
             stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_do_z,
-            stride_descale_dk_z, stride_descale_dv_z,
             nheads_q, nheads_k,
             cu_seqlens_q, cu_seqlens_k,
             max_seqlen_q, max_seqlen_k,
             dropout_mask, dropout_p, philox_seed, philox_offset,
             descale_q, descale_k, descale_v, descale_do,
-            descale_dk, descale_dv,
             BLOCK_M1, BLOCK_N1, BLK_SLICE_FACTOR,
             HEAD_DIM, ACTUAL_HEAD_DIM,
             ENABLE_DROPOUT=use_dropout,
@@ -1206,13 +1188,11 @@ def attention_prefill_backward_triton_split_impl(
             stride_dob, stride_doh, stride_dom, stride_dok,
             stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
             stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_do_z,
-            stride_descale_dq_z,
             nheads_q, nheads_k,
             cu_seqlens_q, cu_seqlens_k,
             max_seqlen_q, max_seqlen_k,
             dropout_mask, dropout_p, philox_seed, philox_offset,
             descale_q, descale_k, descale_v, descale_do,
-            descale_dq,
             BLOCK_M2, BLOCK_N2, BLK_SLICE_FACTOR,
             HEAD_DIM, ACTUAL_HEAD_DIM,
             ENABLE_DROPOUT=use_dropout,
@@ -1239,13 +1219,11 @@ def attention_prefill_backward_triton_split_impl(
             stride_dob, stride_doh, stride_dom, stride_dok,
             stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
             stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_do_z,
-            stride_descale_dk_z, stride_descale_dv_z,
             nheads_q, nheads_k,
             cu_seqlens_q, cu_seqlens_k,
             max_seqlen_q, max_seqlen_k,
             dropout_mask, dropout_p, philox_seed, philox_offset,
             descale_q, descale_k, descale_v, descale_do,
-            descale_dk, descale_dv,
             BLOCK_M1, BLOCK_N1, BLK_SLICE_FACTOR,
             HEAD_DIM, ACTUAL_HEAD_DIM,
             ENABLE_DROPOUT=use_dropout,
@@ -1272,13 +1250,11 @@ def attention_prefill_backward_triton_split_impl(
             stride_dob, stride_doh, stride_dom, stride_dok,
             stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
             stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_do_z,
-            stride_descale_dq_z,
             nheads_q, nheads_k,
             cu_seqlens_q, cu_seqlens_k,
             max_seqlen_q, max_seqlen_k,
             dropout_mask, dropout_p, philox_seed, philox_offset,
             descale_q, descale_k, descale_v, descale_do,
-            descale_dq,
             BLOCK_M2, BLOCK_N2, BLK_SLICE_FACTOR,
             HEAD_DIM, ACTUAL_HEAD_DIM,
             ENABLE_DROPOUT=use_dropout,

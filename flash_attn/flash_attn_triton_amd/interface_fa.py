@@ -28,8 +28,7 @@ def fwd(q: torch.Tensor,
         gen_: Optional[torch.Tensor] = None,
         descale_q: Optional[torch.Tensor] = None,
         descale_k: Optional[torch.Tensor] = None,
-        descale_v: Optional[torch.Tensor] = None,
-        descale_o: Optional[torch.Tensor] = None
+        descale_v: Optional[torch.Tensor] = None
     ):
 
     if DEBUG:
@@ -50,7 +49,6 @@ def fwd(q: torch.Tensor,
         print("descale_q:", descale_q)
         print("descale_k:", descale_k)
         print("descale_v:", descale_v)
-        print("descale_o:", descale_o)
 
     if is_fp8(q):
         if out is None:
@@ -130,8 +128,7 @@ def fwd(q: torch.Tensor,
                                                 metadata.use_exp2,
                                                 descale_q,
                                                 descale_k,
-                                                descale_v,
-                                                descale_o)
+                                                descale_v)
         softmax_lse=softmax_lse_triton
         sd_mask=sd_mask_triton
 
@@ -167,10 +164,6 @@ def bwd(
     descale_k: Optional[torch.Tensor] = None,
     descale_v: Optional[torch.Tensor] = None,
     descale_do: Optional[torch.Tensor] = None,
-    descale_o: Optional[torch.Tensor] = None,
-    descale_dq: Optional[torch.Tensor] = None,
-    descale_dk: Optional[torch.Tensor] = None,
-    descale_dv: Optional[torch.Tensor] = None,
 ):
     if DEBUG:
         print()
@@ -198,10 +191,6 @@ def bwd(
         print("descale_k:", descale_k)
         print("descale_v:", descale_v)
         print("descale_do:", descale_do)
-        print("descale_o:", descale_o)
-        print("descale_dq:", descale_dq)
-        print("descale_dk:", descale_dk)
-        print("descale_dv:", descale_dv)
 
     dq = torch.zeros_like(q) if dq is None else dq.zero_()
     dk = torch.zeros_like(k) if dk is None else dk.zero_()
@@ -270,10 +259,6 @@ def bwd(
             descale_k = descale_k,
             descale_v = descale_v,
             descale_do = descale_do,
-            descale_o = descale_o,
-            descale_dq = descale_dq,
-            descale_dk = descale_dk,
-            descale_dv = descale_dv,
             DEBUG_TRITON=DEBUG_TRITON,
             DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
@@ -310,8 +295,7 @@ def varlen_fwd(
         gen_: Optional[torch.Tensor] = None,
         descale_q: Optional[torch.Tensor] = None,
         descale_k: Optional[torch.Tensor] = None,
-        descale_v: Optional[torch.Tensor] = None,
-        descale_o: Optional[torch.Tensor] = None
+        descale_v: Optional[torch.Tensor] = None
     ):
 
     if DEBUG:
@@ -334,7 +318,6 @@ def varlen_fwd(
         print("descale_q:", descale_q)
         print("descale_k:", descale_k)
         print("descale_v:", descale_v)
-        print("descale_o:", descale_o)
 
     if is_fp8(q):
         if out is None:
@@ -455,10 +438,6 @@ def varlen_bwd(
     descale_k: Optional[torch.Tensor] = None,
     descale_v: Optional[torch.Tensor] = None,
     descale_do: Optional[torch.Tensor] = None,
-    descale_o: Optional[torch.Tensor] = None,
-    descale_dq: Optional[torch.Tensor] = None,
-    descale_dk: Optional[torch.Tensor] = None,
-    descale_dv: Optional[torch.Tensor] = None,
 ):
     if DEBUG:
         print()
@@ -489,10 +468,6 @@ def varlen_bwd(
         print("descale_k:", descale_k)
         print("descale_v:", descale_v)
         print("descale_do:", descale_do)
-        print("descale_o:", descale_o)
-        print("descale_dq:", descale_dq)
-        print("descale_dk:", descale_dk)
-        print("descale_dv:", descale_dv)
 
     dq = torch.zeros_like(q) if dq is None else dq.zero_()
     dk = torch.zeros_like(k) if dk is None else dk.zero_()
