@@ -470,10 +470,12 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
     ref_dtype = torch.float32
     is_varlen = True if layout == "thd" else False
 
-    # skip QKV packing tests for uneven sequence lengths
+    # skip QKV packing tests for uneven sequence lengths and head sizes
     if packing == 'qkv':
         if N_CTX_Q != N_CTX_K:
             pytest.skip("QKV packing requires N_CTX_Q == N_CTX_K")
+        if HQ != HK:
+            pytest.skip("QKV packing requires HQ == HK")
 
     # choose input helper based on layout
     q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, ref_dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
@@ -487,9 +489,9 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
     # pack input tensors
     if packing == 'qkv':
         if is_varlen:
-            qkv = torch.stack([k, v], dim=1)
+            qkv = torch.stack([q, k, v], dim=1)
         else:
-            qkv = torch.stack([k, v], dim=2)
+            qkv = torch.stack([q, k, v], dim=2)
 
         # ----------------------------------------------------------------
         # --- FP8 ---
@@ -509,12 +511,10 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
                 return_attn_probs=True,
             )
         else:
-            out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_varlen_fp8_func(
+            out_fp8, lse_fp8, S_dmask_fp8 = flash_attn_varlen_qkvpacked_fp8_func(
                 qkv_fp8,
                 metadata.cu_seqlens_q,
-                metadata.cu_seqlens_k,
                 metadata.max_seqlens_q,
-                metadata.max_seqlens_k,
                 dropout_p,
                 causal=causal,
                 window_size=window_size,
@@ -525,7 +525,7 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
             )
 
         # fp8 backward pass
-        dqkv_fp8 = torch.autograd.grad(out_fp8, (qkv_fp8), do_fp8)
+        dqkv_fp8, = torch.autograd.grad(out_fp8, (qkv_fp8), do_fp8)
 
         # ----------------------------------------------------------------
         # --- Reference ---
@@ -535,7 +535,7 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
         do_ref= do.clone()
 
         if not is_varlen:
-            out_ref, lse_ref, S_dmask_ref = flash_attn_func(
+            out_ref, lse_ref, S_dmask_ref = flash_attn_qkvpacked_func(
                 qkv_ref,
                 dropout_p,
                 causal=causal,
@@ -546,14 +546,10 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
                 return_attn_probs=True,
             )
         else:
-            out_ref, lse_ref, S_dmask_ref = flash_attn_varlen_func(
-                q_ref,
-                k_ref,
-                v_ref,
+            out_ref, lse_ref, S_dmask_ref = flash_attn_varlen_qkvpacked_func(
+                qkv_ref,
                 metadata.cu_seqlens_q,
-                metadata.cu_seqlens_k,
                 metadata.max_seqlens_q,
-                metadata.max_seqlens_k,
                 dropout_p,
                 causal=causal,
                 window_size=window_size,
@@ -564,7 +560,7 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
             )
         
         # ref backward pass
-        dqkv_ref = torch.autograd.grad(out_ref, (q_ref, k_ref, v_ref), do_ref)
+        dqkv_ref, = torch.autograd.grad(out_ref, (qkv_ref), do_ref)
 
         # ----------------------------------------------------------------
         # --- Compare ---
@@ -596,7 +592,7 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
         if DEBUG:
             print("dqkv_ref:", dqkv_ref, dqkv_ref.shape)
             print("dqkv_fp8:", dqkv_fp8, dqkv_fp8.shape)
-        fp8_assert_close(dqkv_fp8, dqkv_fp8, atol=ATOL_fp8, rtol=RTOL_fp8 )
+        fp8_assert_close(dqkv_ref, dqkv_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
 
     else:
         # ----------------------------------------------------------------
