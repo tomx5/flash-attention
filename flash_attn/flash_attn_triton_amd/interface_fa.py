@@ -597,8 +597,6 @@ def fwd_kvcache(
         num_splits: int
     ):
 
-    out = torch.zeros_like(q) if out is None else out.zero_()
-
     # fill metadata
     metadata = MetaData(sm_scale=softmax_scale)
     metadata.layout = "bshd"
@@ -656,13 +654,12 @@ def fwd_kvcache(
 
     # launch kernel
     # TODO: pass output as an arg. Maybe we are copying output which is causing slow down
-    softmax_lse_triton = attention_decode_forward_triton_impl(
+    output_triton, softmax_lse_triton = attention_decode_forward_triton_impl(
         q,
         k_cache,
         v_cache,
         k_new,
         v_new,
-        out,
         metadata.sm_scale,
         metadata.causal,
         metadata.alibi_slopes,
@@ -670,6 +667,7 @@ def fwd_kvcache(
         metadata.cache_seqlens,
         metadata.cache_batch_idx,
     )
+    out = output_triton
     softmax_lse = softmax_lse_triton
 
 

@@ -547,17 +547,13 @@ def attention_decode_forward_triton_impl(
         v_cache: torch.Tensor,
         k_new: Optional[torch.Tensor],
         v_new: Optional[torch.Tensor],
-        out: torch.Tensor,
         sm_scale: float, 
         causal: bool, 
         alibi_slopes: Optional[torch.Tensor], 
         layout: Literal["bshd", "bhsd", "thd"], 
         cache_seqlens: Optional[Union[(int, torch.Tensor)]], 
         cache_batch_idx: Optional[torch.Tensor],
-        # debug
-        ZERO_TENSORS: bool = False,
-        ACCUMLATE_FP32: bool = False,
-        ):
+    ):
     # kernel config
     BLOCK_M = 16
     BLOCK_N = 64
@@ -570,7 +566,6 @@ def attention_decode_forward_triton_impl(
     original_layout = layout
     if layout == "bshd":
         q=q.unsqueeze(2)
-        out=out.unsqueeze(2)
         k_cache=k_cache.unsqueeze(2)
         v_cache=v_cache.unsqueeze(2)
         if is_new_kv:
@@ -579,7 +574,6 @@ def attention_decode_forward_triton_impl(
         layout = "bsghd"
     elif layout == "bhsd":
         q=q.permute(0, 2, 1, 3).unsqueeze(2)
-        out=out.permute(0, 2, 1, 3).unsqueeze(2)
         k_cache=k_cache.permute(0, 2, 1, 3).unsqueeze(2)
         v_cache=v_cache.permute(0, 2, 1, 3).unsqueeze(2)
         if is_new_kv:
@@ -598,15 +592,6 @@ def attention_decode_forward_triton_impl(
     _, seqlen_v, n_group_v, heads_per_group_v, dim_v = v_cache.shape
 
     assert dim_q == dim_k == dim_v, f"Dimensions must match: {dim_q}, {dim_k}, {dim_v}"
-
-    # zero out
-    if ZERO_TENSORS:
-        out.zero_()
-
-    # accumlation done in fp32
-    if ACCUMLATE_FP32:
-        og_dtype = out.dtype
-        out = out.to(torch.float32)
 
     # get padded size
     dim_padded  = get_padded_headsize(dim_k)
@@ -681,6 +666,8 @@ def attention_decode_forward_triton_impl(
         num_stages=1,
     )
 
+    out = torch.empty((batch_size, seqlen_q, n_group_q, heads_per_group_q, dim_padded), device=q.device, dtype=q.dtype)
+
     # Merge together
     splitK_pow2 = triton.next_power_of_2(split_k)
     use_mask = splitK_pow2 > split_k
@@ -728,12 +715,4 @@ def attention_decode_forward_triton_impl(
         # the data is laid out properly. Just need to reshape dims
         out = out.reshape(batch_size, seqlen_q, -1, dim_padded)
 
-    if ACCUMLATE_FP32:
-        out = out.to(og_dtype)
-
-
-    # narrow result
-    out = out.narrow(-1, 0, dim_k)
-    
-    
-    return lse
+    return out.narrow(-1, 0, dim_k), lse
