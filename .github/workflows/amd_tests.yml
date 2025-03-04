@@ -71,6 +71,7 @@ jobs:
           pytest flash_attn/flash_attn_triton_amd/test.py::test_fp8
 
       - name: AMD Bench
+        if: False
         run: |
           export FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
           FLASH_ATTENTION_TRITON_AMD_AUTOTUNE=1 python flash_attn/flash_attn_triton_amd/bench.py
