@@ -7,6 +7,7 @@ from flash_attn import (
     flash_attn_kvpacked_func, 
     flash_attn_qkvpacked_func, 
     flash_attn_varlen_func,
+    flash_attn_varlen_fp8_func,
     flash_attn_varlen_kvpacked_func,
     flash_attn_varlen_qkvpacked_func
 )
@@ -950,9 +951,9 @@ def test_fp8_old(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout,
         (2, 6, 6, 2048, 2048, 32),
     ],
 )
-@pytest.mark.parametrize('causal', [False])
-@pytest.mark.parametrize('dropout_p', [0.0])
-@pytest.mark.parametrize('layout', ['bshd'])
+@pytest.mark.parametrize('causal', [False, True])
+@pytest.mark.parametrize('dropout_p', [0.0]) # might cause segfaults
+@pytest.mark.parametrize('layout', ['bshd', 'thd'])
 @pytest.mark.parametrize('packing', ['none'])
 @pytest.mark.parametrize('DEBUG_INPUT', [False])
 @pytest.mark.flaky(reruns=3, reason="Retry failures")
