@@ -292,42 +292,19 @@ def cast_nonvarlen_to_fp8(
     x: torch.Tensor,
     fp8_dtype,
     layout,
-    packing: str = 'none',
     clamp_val=1e-9,
 ):
-    # validate packing type
-    if packing not in ['none', 'kv', 'qkv']:
-        raise ValueError(f"Invalid packing type: {packing}. Must be 'none', 'kv', or 'qkv'")
-    
-    # determine dimensions based on layout and packing
-    if packing == 'none':
-        if layout == "bshd":
-            if len(x.shape) != 4:
-                raise ValueError(f"Unpacked 'bshd' tensor should have shape [batch, seqlen, heads, dim], got {x.shape}")
-            reduce_dims = (1, 3)  # seq_len and dim dimensions
-        elif layout == "bhsd":
-            if len(x.shape) != 4:
-                raise ValueError(f"Unpacked 'bhsd' tensor should have shape [batch, heads, seqlen, dim], got {x.shape}")
-            reduce_dims = (2, 3)  # seq_len and dim dimensions
-        else:
-            raise ValueError(f"Unknown layout: {layout}")
+    if layout == "bshd":
+        if len(x.shape) != 4:
+            raise ValueError(f"'bshd' tensor should have shape [batch, seqlen, heads, dim], got {x.shape}")
+        reduce_dims = (1, 3)  # seq_len and dim dimensions
+    elif layout == "bhsd":
+        if len(x.shape) != 4:
+            raise ValueError(f"'bhsd' tensor should have shape [batch, heads, seqlen, dim], got {x.shape}")
+        reduce_dims = (2, 3)  # seq_len and dim dimensions
     else:
-        expected_packed_dim = 2 if packing == 'kv' else 3
-        
-        if layout == "bshd":
-            if len(x.shape) != 5:
-                raise ValueError(f"{packing.upper()}-packed 'bshd' tensor should have shape [batch, seqlen, {expected_packed_dim}, heads, dim], got {x.shape}")
-            if x.shape[2] != expected_packed_dim:
-                raise ValueError(f"{packing.upper()}-packed tensor should have packed_dim={expected_packed_dim}, got {x.shape[2]}")
-            reduce_dims = (1, 2, 4)  # seq_len, packed_dim, and dim dimensions
-        elif layout == "bhsd":
-            if len(x.shape) != 5:
-                raise ValueError(f"{packing.upper()}-packed 'bhsd' tensor should have shape [batch, heads, seqlen, {expected_packed_dim}, dim], got {x.shape}")
-            if x.shape[3] != expected_packed_dim:
-                raise ValueError(f"{packing.upper()}-packed tensor should have packed_dim={expected_packed_dim}, got {x.shape[3]}")
-            reduce_dims = (2, 3, 4)  # seq_len, packed_dim, and dim dimensions
-        else:
-            raise ValueError(f"Unknown layout: {layout}")
+        raise ValueError(f"Unknown layout: {layout}")
+  
 
     # Compute the absolute max along reduce_dims, clamped to avoid 0-scale
     x_abs_max = x.abs().amax(dim=reduce_dims)
@@ -352,27 +329,12 @@ def cast_varlen_to_fp8(
     x: torch.Tensor,
     fp8_dtype: torch.dtype,
     cu_seqlens,
-    packing: str = 'none',
     clamp_val: float = 1e-9,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # validate packing type
-    if packing not in ['none', 'kv', 'qkv']:
-        raise ValueError(f"Invalid packing type: {packing}. Must be 'none', 'kv', or 'qkv'")
-    
-    # validate tensor shape based on packing type
-    if packing == 'none':
-        if len(x.shape) != 3:
-            raise ValueError(f"Unpacked tensor should have shape [total_seqlen, heads, dim], got {x.shape}")
-        num_heads = x.shape[1]
-    else:  # 'kv' or 'qkv'
-        if len(x.shape) != 4:
-            raise ValueError(f"{packing.upper()}-packed tensor should have shape [total_seqlen, packed_dim, heads, dim], got {x.shape}")
-        
-        expected_packed_dim = 2 if packing == 'kv' else 3
-        if x.shape[1] != expected_packed_dim:
-            raise ValueError(f"{packing.upper()}-packed tensor should have packed_dim={expected_packed_dim}, got {x.shape[1]}")
-        
-        num_heads = x.shape[2]
+    # validate tensor shape
+    if len(x.shape) != 3:
+        raise ValueError(f"tensor should have shape [total_seqlen, heads, dim], got {x.shape}")
+    num_heads = x.shape[1]
     
     # Get batch size from cu_seqlens
     batch = cu_seqlens.shape[0] - 1
@@ -387,13 +349,8 @@ def cast_varlen_to_fp8(
         end = cu_seqlens[i + 1]
         x_slice = x[start:end]  # Slice for current sequence
         
-        if packing != 'none':
-            # For packed tensors (KV or QKV)
-            # Take max across all dimensions except heads (0: seq_len, 1: packed_dim, 3: head_dim)
-            x_abs_max = x_slice.abs().amax(dim=(0, 1, 3))  # [heads]
-        else:
-            # Standard unpacked tensor (0: seq_len, 2: head_dim)
-            x_abs_max = x_slice.abs().amax(dim=(0, 2))  # [heads]
+        # Standard tensor (0: seq_len, 2: head_dim)
+        x_abs_max = x_slice.abs().amax(dim=(0, 2))  # [heads]
         
         # apply minimum clamping
         x_abs_max = torch.maximum(x_abs_max, x.new_tensor(clamp_val))
@@ -405,10 +362,7 @@ def cast_varlen_to_fp8(
         # store descale factors
         descale_factors[i, :] = descale_i
         
-        if packing != 'none':    
-            scale_reshape = scale_i.reshape(1, 1, num_heads, 1)
-        else:
-            scale_reshape = scale_i.reshape(1, num_heads, 1)
+        scale_reshape = scale_i.reshape(1, num_heads, 1)
         
         # scale and cast to FP8
         x_fp8[start:end] = (x_slice * scale_reshape).to(fp8_dtype)
@@ -420,13 +374,8 @@ def decast_fp8(
     descale_factor: torch.Tensor,
     original_dtype: torch.dtype,
     layout: str,
-    packing: str = 'none',
     cu_seqlens: Optional[torch.Tensor] = None
 ) -> torch.Tensor:
-    # Validate packing type
-    if packing not in ['none', 'kv', 'qkv']:
-        raise ValueError(f"Invalid packing type: {packing}. Must be 'none', 'kv', or 'qkv'")
-    
     x_orig = x_fp8.to(original_dtype)
     
     if layout in ("bshd", "bhsd"):
@@ -435,17 +384,8 @@ def decast_fp8(
         if cu_seqlens is None:
             raise ValueError("cu_seqlens must be provided for varlen layout ('thd')")
         
-        # validate tensor shape based on packing type
-        if packing == 'none':
-            if len(x_orig.shape) != 3:
-                raise ValueError(f"Unpacked tensor should have shape [total_seqlen, heads, dim], got {x_orig.shape}")
-        else:  # 'kv' or 'qkv'
-            if len(x_orig.shape) != 4:
-                raise ValueError(f"{packing.upper()}-packed tensor should have shape [total_seqlen, packed_dim, heads, dim], got {x_orig.shape}")
-            
-            expected_packed_dim = 2 if packing == 'kv' else 3
-            if x_orig.shape[1] != expected_packed_dim:
-                raise ValueError(f"{packing.upper()}-packed tensor should have packed_dim={expected_packed_dim}, got {x_orig.shape[1]}")
+        if len(x_orig.shape) != 3:
+            raise ValueError(f"tensor should have shape [total_seqlen, heads, dim], got {x_orig.shape}")
         
         # create output tensor
         x_out = x_orig.clone()
@@ -456,12 +396,8 @@ def decast_fp8(
             start = int(cu_seqlens[i].item())
             end = int(cu_seqlens[i + 1].item())
             
-            if packing != 'none':
-                # for packed tensors (KV or QKV): reshape to [1, 1, heads, 1]
-                factor = descale_factor[i].reshape(1, 1, -1, 1)
-            else:
-                # for unpacked tensors: reshape to [1, heads, 1]
-                factor = descale_factor[i].reshape(1, -1, 1)
+            # reshape to [1, heads, 1]
+            factor = descale_factor[i].reshape(1, -1, 1)
             
             # apply descaling
             x_out[start:end] = x_out[start:end] * factor
@@ -474,20 +410,15 @@ def cast_to_fp8(
     x: torch.Tensor,
     fp8_dtype: torch.dtype,
     layout: str,
-    packing: str = 'none',
     clamp_val: float = 1e-9,
     cu_seqlens=None
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # validate packing type
-    if packing not in ['none', 'kv', 'qkv']:
-        raise ValueError(f"Invalid packing type: {packing}. Must be 'none', 'kv', or 'qkv'")
-    
     if layout in ("bshd", "bhsd"):
-        return cast_nonvarlen_to_fp8(x, fp8_dtype, layout, packing=packing, clamp_val=clamp_val)
+        return cast_nonvarlen_to_fp8(x, fp8_dtype, layout, clamp_val=clamp_val)
     elif layout == "thd":
         if cu_seqlens is None:
             raise ValueError("cu_seqlens must be provided for varlen (thd) layout")
-        return cast_varlen_to_fp8(x, fp8_dtype, cu_seqlens, packing=packing, clamp_val=clamp_val)
+        return cast_varlen_to_fp8(x, fp8_dtype, cu_seqlens, clamp_val=clamp_val)
     else:
         raise ValueError(f"Unknown layout: {layout}")
 # -------------------------------
