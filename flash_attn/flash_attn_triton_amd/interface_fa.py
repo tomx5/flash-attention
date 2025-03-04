@@ -52,8 +52,13 @@ def fwd(q: torch.Tensor,
         print("descale_v:", descale_v)
         print("descale_o:", descale_o)
 
-
-    out = torch.zeros_like(q) if out is None else out.zero_()
+    if is_fp8(q):
+        if out is None:
+            out = torch.zeros_like(q, dtype=torch.float32) 
+        else:
+            assert out.dtype == torch.float32, "fp8 output tensor should be fp32 type" # the high level api doesnot provide
+    else:
+        out = torch.zeros_like(q) if out is None else out.zero_()
 
     # Setup metadata
     metadata = MetaData(sm_scale=softmax_scale)
@@ -285,7 +290,7 @@ def varlen_fwd(
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        o: Optional[torch.Tensor],
+        out: Optional[torch.Tensor],
         cu_seqlens_q: torch.Tensor,
         cu_seqlens_k: torch.Tensor,
         seqused_k: Optional[torch.Tensor],
@@ -331,7 +336,13 @@ def varlen_fwd(
         print("descale_v:", descale_v)
         print("descale_o:", descale_o)
 
-    o = create_output_tensor_like(q) if o is None else prep_output_tensor(o)
+    if is_fp8(q):
+        if out is None:
+            out = torch.zeros_like(q, dtype=torch.float32) 
+        else:
+            assert out.dtype == torch.float32, "fp8 output tensor should be fp32 type" # the high level api doesnot provide
+    else:
+        out = torch.zeros_like(q) if out is None else out.zero_()
 
     # Setup metadata
     metadata = MetaData(sm_scale=softmax_scale)
@@ -355,7 +366,7 @@ def varlen_fwd(
         rng_state = None
 
     # Check arguments
-    metadata.check_args(q, k, v, o)
+    metadata.check_args(q, k, v, out)
 
     # call implementation
     if USE_REF:
@@ -385,7 +396,7 @@ def varlen_fwd(
                                                             q,
                                                             k,
                                                             v,
-                                                            o,
+                                                            out,
                                                             metadata.sm_scale,
                                                             metadata.alibi_slopes,
                                                             metadata.causal,
@@ -408,12 +419,12 @@ def varlen_fwd(
 
     if DEBUG:
         print("varlen_fwd outputs")
-        print("o:", o, o.shape)
+        print("out:", out, out.shape)
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
         print("sd_mask:", sd_mask, sd_mask.shape if sd_mask is not None else None )
 
 
-    return o, softmax_lse, sd_mask, rng_state
+    return out, softmax_lse, sd_mask, rng_state
 
 def varlen_bwd(
     dout: torch.Tensor,

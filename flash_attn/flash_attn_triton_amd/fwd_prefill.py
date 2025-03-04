@@ -539,17 +539,17 @@ def attn_fwd(Q, K, V, bias,
     if PADDED_HEAD:
         o_ptrs_mask = o_ptrs_mask & (offs_d[None, :] < ACTUAL_BLOCK_DMODEL)
     
-    if IS_FP8:
-        scale_acc, descale_acc = compute_fp8_scaling_factors(acc, FP8_MAX)
+    # if IS_FP8:
+    #     scale_acc, descale_acc = compute_fp8_scaling_factors(acc, FP8_MAX)
 
-        # store the descale factor for later use
-        if FP8_RETURN_DESCALE:
-            o_descale_offset = DESCALE_O + off_z * stride_descale_o_z + off_h_q
-            tl.store(o_descale_offset, descale_acc)
+    #     # store the descale factor for later use
+    #     if FP8_RETURN_DESCALE:
+    #         o_descale_offset = DESCALE_O + off_z * stride_descale_o_z + off_h_q
+    #         tl.store(o_descale_offset, descale_acc)
         
-        tl.store(o_ptrs, (acc*scale_acc).to(Out.dtype.element_ty), mask=o_ptrs_mask)
-    else:
-        tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
+    #     tl.store(o_ptrs, (acc*scale_acc).to(Out.dtype.element_ty), mask=o_ptrs_mask)
+    # else:
+    tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
 
 
 def attention_prefill_forward_triton_impl(
@@ -591,7 +591,7 @@ def attention_prefill_forward_triton_impl(
         descale_q_stride_z = descale_q.stride(0)
         descale_k_stride_z = descale_k.stride(0)
         descale_v_stride_z = descale_v.stride(0)
-        descale_o_stride_z = descale_o.stride(0)
+        descale_o_stride_z = descale_o.stride(0) if descale_o else None
     else:
         descale_q = descale_k = descale_v = None
         descale_q_stride_z = descale_k_stride_z = descale_v_stride_z = descale_o_stride_z = None
