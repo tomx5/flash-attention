@@ -49,17 +49,6 @@ jobs:
           export FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
           python setup.py install
 
-      - name: Flash Attention Tests using Pytorch reference implementation
-        if: False
-        run: |
-          export FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
-          FLASH_ATTENTION_TRITON_AMD_REF=1 pytest tests/test_flash_attn_triton_amd.py
-      
-      - name: Flash Attention Tests
-        run: |
-          export FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
-          pytest tests/test_flash_attn_triton_amd.py
-      
       - name: Install dependencies for bench and misc
         run: |
           pip install matplotlib pandas pytest
@@ -75,3 +64,15 @@ jobs:
         run: |
           export FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
           FLASH_ATTENTION_TRITON_AMD_AUTOTUNE=1 python flash_attn/flash_attn_triton_amd/bench.py
+
+      # run big test suites
+      - name: Flash Attention Tests using Pytorch reference implementation
+        if: False
+        run: |
+          export FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
+          FLASH_ATTENTION_TRITON_AMD_REF=1 pytest tests/test_flash_attn_triton_amd.py
+        
+      - name: Flash Attention Tests
+        run: |
+          export FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
+          pytest tests/test_flash_attn_triton_amd.py
