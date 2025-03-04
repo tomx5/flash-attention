@@ -494,9 +494,9 @@ def varlen_bwd(
         print("descale_dk:", descale_dk)
         print("descale_dv:", descale_dv)
 
-    dq = create_output_tensor_like(q) if dq is None else prep_output_tensor(dq)
-    dk =  create_output_tensor_like(k) if dk is None else prep_output_tensor(dk)
-    dv =  create_output_tensor_like(v) if dv is None else prep_output_tensor(dv)
+    dq = torch.zeros_like(q) if dq is None else dq.zero_()
+    dk = torch.zeros_like(k) if dk is None else dk.zero_()
+    dv = torch.zeros_like(v) if dv is None else dv.zero_()
 
     if dropout_p > 0.0:
         philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
@@ -597,7 +597,7 @@ def fwd_kvcache(
         num_splits: int
     ):
 
-    out = create_output_tensor_like(q) if out is None else prep_output_tensor(out)
+    out = torch.zeros_like(q) if out is None else out.zero_()
 
     # fill metadata
     metadata = MetaData(sm_scale=softmax_scale)

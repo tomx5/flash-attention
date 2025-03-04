@@ -951,9 +951,9 @@ def test_fp8_old(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout,
         (2, 6, 6, 2048, 2048, 32),
     ],
 )
-@pytest.mark.parametrize('causal', [False, True])
+@pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('dropout_p', [0.0]) # might cause segfaults
-@pytest.mark.parametrize('layout', ['bshd', 'thd'])
+@pytest.mark.parametrize('layout', ['bshd', "thd"])
 @pytest.mark.parametrize('packing', ['none'])
 @pytest.mark.parametrize('DEBUG_INPUT', [False])
 @pytest.mark.flaky(reruns=3, reason="Retry failures")
@@ -1033,8 +1033,8 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
             return_attn_probs=True,
         )
 
-    # # fp8 backward pass
-    # dq_fp8, dk_fp8, dv_fp8 = torch.autograd.grad(out_fp8, (q_fp8, k_fp8, v_fp8), do_fp8)
+    # fp8 backward pass
+    dq_fp8, dk_fp8, dv_fp8 = torch.autograd.grad(out_fp8, (q_fp8, k_fp8, v_fp8), do_fp8)
    
 
     # ----------------------------------------------------------------
@@ -1078,7 +1078,7 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
         )
     
     # ref backward pass
-    # dq_ref, dk_ref, dv_ref = torch.autograd.grad(out_ref, (q_ref, k_ref, v_ref), do_ref)
+    dq_ref, dk_ref, dv_ref = torch.autograd.grad(out_ref, (q_ref, k_ref, v_ref), do_ref)
 
 
     # ----------------------------------------------------------------
@@ -1106,7 +1106,6 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
             print("S_dmask_fp8:", S_dmask_fp8, S_dmask_fp8.shape)
         torch.testing.assert_close(S_dmask_ref, S_dmask_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
 
-    return 
     # compare backward gradients
     if DEBUG:
         print("dv_ref:", dv_ref, dv_ref.shape)

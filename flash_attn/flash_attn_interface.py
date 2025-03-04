@@ -1079,7 +1079,7 @@ class FlashAttnFP8Func(torch.autograd.Function):
         
         # descale factors that are returned with kernel outputs
         fp8_dtype = torch.float8_e4m3fnuz 
-        dout_padded_fp8, descale_q = cast_to_fp8(dout_padded, fp8_dtype, "bshd")
+        dout_padded_fp8, descale_do = cast_to_fp8(dout_padded, fp8_dtype, "bshd")
         
         _wrapped_flash_attn_backward(
             dout_padded_fp8,
@@ -1103,7 +1103,7 @@ class FlashAttnFP8Func(torch.autograd.Function):
             descale_q=descale_q,
             descale_k=descale_k,
             descale_v=descale_v,
-            descale_do=None,
+            descale_do=descale_do,
             descale_o=None,
             descale_dq=None,
             descale_dk=None,
