@@ -1,6 +1,10 @@
+import os
+import glob
+import shutil
 import torch
 import pytest
 import numpy as np
+from pathlib import Path
 from flash_attn import (
     flash_attn_func,
     flash_attn_fp8_func,
@@ -935,14 +939,15 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
         (2, 4, 2, 256, 512, 128),
     ],
 )
-@pytest.mark.parametrize('causal', [True, False])
+@pytest.mark.parametrize('causal', [False, True])
 @pytest.mark.parametrize('dropout_p', [0.0, 0.1])
 @pytest.mark.parametrize('layout', ['bshd', "thd"])
-@pytest.mark.parametrize('packing', ['none', "qkv"])
-@pytest.mark.parametrize('test_backward', [True, False])
+@pytest.mark.parametrize('packing', ['none'])
+@pytest.mark.parametrize('test_backward', [False, True])
 @pytest.mark.skipif(not arch_supports_fp8(), reason="fp8 not supported on this device")
-def test_fp8_ir(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, packing, test_backward):
+def test_ir(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, packing, test_backward):
     torch.manual_seed(20)
+    use_fp8 = True # sanity check
     device = "cuda"
     window_size = (-1, -1)
     softcap = 0.0
@@ -951,42 +956,97 @@ def test_fp8_ir(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, 
     ref_dtype = torch.float32
     is_varlen = True if layout == "thd" else False
 
+    # remove cache
+    cache_path = Path(os.path.expanduser("~/.triton/cache"))
+    if cache_path.exists():
+        shutil.rmtree(cache_path)
+        os.makedirs(cache_path)
+
     # inputs
     q, k, v, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, ref_dtype, layout, device=device)
 
     if packing == "none":
         # fp8 forward pass
         if not is_varlen:
-            out, lse, S_dmask = flash_attn_fp8_func(
-                q,
-                k,
-                v,
-                dropout_p,
-                causal=causal,
-                window_size=window_size,
-                softcap=softcap,
-                alibi_slopes=alibi_slopes,
-                deterministic=deterministic,
-                return_attn_probs=True,
-            )
+            if use_fp8:
+                out, lse, S_dmask = flash_attn_fp8_func(
+                    q,
+                    k,
+                    v,
+                    dropout_p,
+                    causal=causal,
+                    window_size=window_size,
+                    softcap=softcap,
+                    alibi_slopes=alibi_slopes,
+                    deterministic=deterministic,
+                    return_attn_probs=True,
+                )
+            else:
+                out, lse, S_dmask = flash_attn_func(
+                    q,
+                    k,
+                    v,
+                    dropout_p,
+                    causal=causal,
+                    window_size=window_size,
+                    softcap=softcap,
+                    alibi_slopes=alibi_slopes,
+                    deterministic=deterministic,
+                    return_attn_probs=True,
+                )
         else:
-            out, lse, S_dmask = flash_attn_varlen_fp8_func(
-                q,
-                k,
-                v,
-                metadata.cu_seqlens_q,
-                metadata.cu_seqlens_k,
-                metadata.max_seqlens_q,
-                metadata.max_seqlens_k,
-                dropout_p,
-                causal=causal,
-                window_size=window_size,
-                softcap=softcap,
-                alibi_slopes=alibi_slopes,
-                deterministic=deterministic,
-                return_attn_probs=True,
-            )
+            if use_fp8:
+                out, lse, S_dmask = flash_attn_varlen_fp8_func(
+                    q,
+                    k,
+                    v,
+                    metadata.cu_seqlens_q,
+                    metadata.cu_seqlens_k,
+                    metadata.max_seqlens_q,
+                    metadata.max_seqlens_k,
+                    dropout_p,
+                    causal=causal,
+                    window_size=window_size,
+                    softcap=softcap,
+                    alibi_slopes=alibi_slopes,
+                    deterministic=deterministic,
+                    return_attn_probs=True,
+                )
+            else:
+                out, lse, S_dmask = flash_attn_varlen_func(
+                    q,
+                    k,
+                    v,
+                    metadata.cu_seqlens_q,
+                    metadata.cu_seqlens_k,
+                    metadata.max_seqlens_q,
+                    metadata.max_seqlens_k,
+                    dropout_p,
+                    causal=causal,
+                    window_size=window_size,
+                    softcap=softcap,
+                    alibi_slopes=alibi_slopes,
+                    deterministic=deterministic,
+                    return_attn_probs=True,
+                )
+
 
         # fp8 backward pass
         if test_backward:
             dq, dk, dv = torch.autograd.grad(out, (q, k, v), do)
+
+    # search the cache for .ttir files and check for fp8 type string
+    ttir_files = glob.glob(str(cache_path) + "/**/*.ttir", recursive=True)
+    assert len(ttir_files) > 0, "No .ttir files found in cache"
+    
+    fp8_found = False
+    fp8_types = ['f8E4M3', 'f8E5M2']
+    for ttir_file in ttir_files:
+        with open(ttir_file, 'r') as f:
+            content = f.read()
+            for f8_type in fp8_types:
+                if f8_type in content:
+                    fp8_found = True
+                    break
+    
+    assert fp8_found, f"{fp8_types} not found in {ttir_files}"
