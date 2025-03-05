@@ -265,7 +265,12 @@ def input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device=
     else:
         q, k, v, metadata = nonvarlen_input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
 
-    return q, k, v, metadata
+    if DEBUG_INPUT:
+        do = torch.ones_like(q)
+    else:
+        do = torch.randn_like(q)
+
+    return q, k, v, do, metadata
 
 # -------------------------------
 # FP8

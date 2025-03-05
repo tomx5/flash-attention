@@ -82,14 +82,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     alibi_slopes = None
     device = "cuda"
 
-    if layout == "thd":
-        q, k, v, metadata = varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device=device, DEBUG_INPUT=DEBUG_INPUT)
-    else:
-        q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
-    if DEBUG_INPUT:
-        output_triton = torch.zeros_like(q).contiguous()
-    else:
-        output_triton = torch.empty_like(q)
+    q, k, v, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=DEBUG_INPUT)
 
     if DEBUG:
         if HQ // HK != 1:
@@ -228,14 +221,7 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     torch.manual_seed(20) # seed from test_op_bwd
 
     alibi_slopes = None
-    if layout == "thd":
-        q, k, v, metadata = varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, DEBUG_INPUT=DEBUG_INPUT)
-    else:
-        q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=DEBUG_INPUT)
-    if DEBUG_INPUT:
-        do = torch.ones_like(q).contiguous()
-    else:
-        do = torch.randn_like(q)
+    q, k, v, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=DEBUG_INPUT)
 
     # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
     if dropout_p > 0.0:
@@ -301,7 +287,7 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     # =============================================== Triton ==============================================================
     o = output_ref.clone().contiguous()
     softmax_lse = softmax_lse_ref.clone().contiguous()
-    dq_triton, dk_triton, dv_triton, delta_triton, _, _ = attention_prefill_backward_triton_impl(
+    dq_triton, dk_triton, dv_triton, delta_triton = attention_prefill_backward_triton_impl(
         do,
         q,
         k,
@@ -438,14 +424,7 @@ def test_op_prefill_bwd_split_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, 
     torch.manual_seed(20) # seed from test_op_bwd
 
     alibi_slopes = None
-    if layout == "thd":
-        q, k, v, metadata = varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, DEBUG_INPUT=DEBUG_INPUT)
-    else:
-        q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=DEBUG_INPUT)
-    if DEBUG_INPUT:
-        do = torch.ones_like(q).contiguous()
-    else:
-        do = torch.randn_like(q)
+    q, k, v, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=DEBUG_INPUT)
 
     # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
     if dropout_p > 0.0:
@@ -703,13 +682,7 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
             pytest.skip("QKV packing requires HQ == HK")
 
     # choose input helper based on layout
-    q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, ref_dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
-    
-    # create gradient tensor
-    if DEBUG_INPUT:
-        do = torch.ones_like(q)
-    else:
-        do = torch.randn_like(q)
+    q, k, v, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, ref_dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
 
     # pack input tensors
     if packing == 'qkv':
@@ -955,3 +928,65 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
         # torch.testing.assert_close(dq_ref, dq_fp8, atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
         fp8_assert_close(dq_ref, dq_fp8, atol=ATOL_fp8, rtol=RTOL_fp8 )
 
+
+@pytest.mark.parametrize(
+    "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD",
+    [
+        (2, 4, 2, 256, 512, 128),
+    ],
+)
+@pytest.mark.parametrize('causal', [True, False])
+@pytest.mark.parametrize('dropout_p', [0.0, 0.1])
+@pytest.mark.parametrize('layout', ['bshd', "thd"])
+@pytest.mark.parametrize('packing', ['none', "qkv"])
+@pytest.mark.parametrize('test_backward', [True, False])
+@pytest.mark.skipif(not arch_supports_fp8(), reason="fp8 not supported on this device")
+def test_fp8_ir(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, packing, test_backward):
+    torch.manual_seed(20)
+    device = "cuda"
+    window_size = (-1, -1)
+    softcap = 0.0
+    alibi_slopes = None
+    deterministic = False
+    ref_dtype = torch.float32
+    is_varlen = True if layout == "thd" else False
+
+    # inputs
+    q, k, v, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, ref_dtype, layout, device=device)
+
+    if packing == "none":
+        # fp8 forward pass
+        if not is_varlen:
+            out, lse, S_dmask = flash_attn_fp8_func(
+                q,
+                k,
+                v,
+                dropout_p,
+                causal=causal,
+                window_size=window_size,
+                softcap=softcap,
+                alibi_slopes=alibi_slopes,
+                deterministic=deterministic,
+                return_attn_probs=True,
+            )
+        else:
+            out, lse, S_dmask = flash_attn_varlen_fp8_func(
+                q,
+                k,
+                v,
+                metadata.cu_seqlens_q,
+                metadata.cu_seqlens_k,
+                metadata.max_seqlens_q,
+                metadata.max_seqlens_k,
+                dropout_p,
+                causal=causal,
+                window_size=window_size,
+                softcap=softcap,
+                alibi_slopes=alibi_slopes,
+                deterministic=deterministic,
+                return_attn_probs=True,
+            )
+
+        # fp8 backward pass
+        if test_backward:
+            dq, dk, dv = torch.autograd.grad(out, (q, k, v), do)
