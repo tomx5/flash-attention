@@ -40,7 +40,8 @@ datamodule:
   ddp: ${eval:"${trainer.devices} > 1"}
 
 train:
-  gpu_mem: ${eval:"round(float(__import__('subprocess').check_output('nvidia-smi -i 0 --query-gpu=memory.total --format=csv,noheader,nounits', shell=True).strip().decode()) / 1000)"}
+  gpu_mem: 24
+  # gpu_mem: ${eval:"round(float(__import__('subprocess').check_output('nvidia-smi -i 0 --query-gpu=memory.total --format=csv,noheader,nounits', shell=True).strip().decode()) / 1000)"}
   global_batch_size: 512
   optimizer:
     lr: 6e-4
