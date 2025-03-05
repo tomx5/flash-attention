@@ -55,7 +55,7 @@ jobs:
       # FIXME: run the full suite
       - name: AMD Internal Tests
         run: |
-          FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE" pytest flash_attn/flash_attn_triton_amd/test.py::test_fp8
+          FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE" pytest -n 2 flash_attn/flash_attn_triton_amd/test.py::test_fp8
 
       - name: AMD Bench
         if: False
@@ -70,4 +70,4 @@ jobs:
         
       - name: Flash Attention Tests
         run: |
-          FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE" pytest tests/test_flash_attn_triton_amd.py
+          FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE" pytest -n 16 tests/test_flash_attn_triton_amd.py
