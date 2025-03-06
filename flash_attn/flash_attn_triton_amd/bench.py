@@ -4,10 +4,7 @@ import triton
 from flash_attn import flash_attn_func, flash_attn_qkvpacked_func, flash_attn_kvpacked_func, \
     flash_attn_varlen_func, flash_attn_varlen_qkvpacked_func, flash_attn_varlen_kvpacked_func, \
     flash_attn_with_kvcache
-from flash_attn.flash_attn_triton_amd.utils import (
-    nonvarlen_input_helper,
-    varlen_input_helper,
-)
+from flash_attn.flash_attn_triton_amd.utils import input_helper
 
 ARGS_TO_TORCH_DTYPE = {
     "fp16": torch.float16,
@@ -80,9 +77,7 @@ def get_benchmark_configs(args, is_varlen=False):
 
 def create_benchmark_fn(fn_name, BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device, dropout_p, causal, mode):
     if fn_name == "flash_attn":
-        q, k, v, _ = nonvarlen_input_helper(
-            BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, "bshd", device=device
-        )
+        q, k, v, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, "bshd", device=device)
         def flash_attn_bench_fn():
             out, lse, S_dmask = flash_attn_func(
                 q,
@@ -97,27 +92,21 @@ def create_benchmark_fn(fn_name, BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype,
                 return_attn_probs=True,
             )
             if mode == "full":
-                do = torch.randn_like(out)
-                (
-                dq,
-                dk,
-                dv,
-                ) = torch.autograd.grad(out, (q, k, v), do)
+                dq, dk, dv = torch.autograd.grad(out, (q, k, v), do)
 
         return flash_attn_bench_fn
        
     elif fn_name == "flash_attn_varlen":
-        q_unpad, k_unpad, v_unpad, metadata = varlen_input_helper(
-            BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device=device)
+        q_unpad, k_unpad, v_unpad, do_unpad, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, "thd", device=device)
         def flash_attn_varlen_bench_fn():
-            out_unpad, sm_lse, S_dmask = flash_attn_varlen_func(
+            out_unpad, lse, S_dmask = flash_attn_varlen_func(
                 q_unpad,
                 k_unpad,
                 v_unpad,
                 metadata.cu_seqlens_q,
                 metadata.cu_seqlens_k,
-                metadata.max_seqlen_q,
-                metadata.max_seqlen_k,
+                metadata.max_seqlens_q,
+                metadata.max_seqlens_k,
                 dropout_p,
                 causal=causal,
                 window_size=(-1, -1),
@@ -127,17 +116,10 @@ def create_benchmark_fn(fn_name, BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype,
                 return_attn_probs=True,
             )
             if mode == "full":
-                do_unpad = torch.randn_like(out_unpad)
-                (
-                dq_unpad,
-                dk_unpad,
-                dv_unpad,
-                ) = torch.autograd.grad(out_unpad, (q_unpad, k_unpad, v_unpad), do_unpad)
+                dq_unpad, dk_unpad, dv_unpad = torch.autograd.grad(out_unpad, (q_unpad, k_unpad, v_unpad), do_unpad)
         return flash_attn_varlen_bench_fn
     elif fn_name == "flash_attn_with_kvcache":
-        q, k_cache, v_cache, _ = nonvarlen_input_helper(
-            BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, "bshd", device=device
-        )
+        q, k_cache, v_cache, _, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, "bshd", device=device)
         def flash_attn_with_kvcache_bench_fn():
             out = flash_attn_with_kvcache(
                 q,
@@ -165,7 +147,10 @@ def run_benchmark(args, fn_name, fn, mode):
     """
     Runs the benchmark for the provided function based on the provided arguments.
     """
-    print(f"Benchmarking {fn_name} in {mode} mode...")
+    if fn_name in ["flash_attn_with_kvcache"] and mode == "full":
+        print(f"Benchmarking {fn_name} in {mode} mode. It does not have a backward pass so we will be running the forward pass only.")
+    else:
+        print(f"Benchmarking {fn_name} in {mode} mode ...")
 
     # get configs
     dtype = ARGS_TO_TORCH_DTYPE[args.dtype]
@@ -173,6 +158,9 @@ def run_benchmark(args, fn_name, fn, mode):
     causal = args.causal
     dropout_p = 0.0
     configs = get_benchmark_configs(args, is_varlen=True if "varlen" in fn_name else False)
+
+    if mode not in MODES:
+        raise ValueError(f"{mode} not in {MODES}")
 
     # Setup benchmark configurations
     configs = [
@@ -253,7 +241,7 @@ def parse_args():
         "-mode",
         type=str,
         nargs='*',
-        default= MODES.keys(),
+        default= ["full"],
         choices= MODES.keys(),
         help=f"Mode(s) to run: {mode_help_str}",
     )
@@ -285,9 +273,6 @@ def main():
         if fn_name not in FUNCTIONS:
             raise ValueError(f"invalid benchmark function specified: {fn_name}")
         for mode in args.mode:
-            if fn_name in ["flash_attn_with_kvcache"] and mode == "full":
-                print(f"{fn_name} kernel does not have a backward pass")
-                continue
             run_benchmark(args, fn_name, FUNCTIONS[fn_name], mode)
 
 if __name__ == "__main__":
