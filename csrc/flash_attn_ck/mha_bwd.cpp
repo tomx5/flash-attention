@@ -85,7 +85,7 @@ fmha_bwd_traits get_ck_fmha_bwd_traits(const mask_info &mask,
                            has_dropout,
                            false, // s_randval
                            deterministic,
-                           get_env_var("FMHA_USE_BWD_V3", true),
+                           get_env_var("FMHA_USE_BWD_V3", false),
                            true, // is_v3_atomic_fp32
                            get_env_var("FMHA_V3_BF16_CVT", 1)}; // how_v3_bf16_cvt 0:RTNE; 1:RTNA; 2:RTZ
 }
