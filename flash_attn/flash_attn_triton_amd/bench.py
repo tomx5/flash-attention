@@ -14,11 +14,11 @@ ARGS_TO_TORCH_DTYPE = {
 
 FUNCTIONS = {
     "flash_attn": flash_attn_func,
+    "flash_attn_kvpacked": flash_attn_kvpacked_func,
     # "flash_attn_qkvpacked": flash_attn_qkvpacked_func,
-    # "flash_attn_kvpacked": flash_attn_kvpacked_func,
     "flash_attn_varlen": flash_attn_varlen_func,
-    # "flash_attn_varlen_qkvpacked": flash_attn_varlen_qkvpacked_func,
     # "flash_attn_varlen_kvpacked": flash_attn_varlen_kvpacked_func,
+    # "flash_attn_varlen_qkvpacked": flash_attn_varlen_qkvpacked_func,
     "flash_attn_with_kvcache": flash_attn_with_kvcache,
 }
 
@@ -77,7 +77,7 @@ def get_benchmark_configs(args, is_varlen=False):
 
 def create_benchmark_fn(fn_name, BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device, dropout_p, causal, mode):
     if fn_name == "flash_attn":
-        q, k, v, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, "bshd", device=device)
+        q, k, v, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", device=device)
         def flash_attn_bench_fn():
             out, lse, S_dmask = flash_attn_func(
                 q,
@@ -95,9 +95,28 @@ def create_benchmark_fn(fn_name, BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype,
                 dq, dk, dv = torch.autograd.grad(out, (q, k, v), do)
 
         return flash_attn_bench_fn
+    
+    elif fn_name == "flash_attn_kvpacked":
+        q, kv, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", packing="kv", device=device)
+        def flash_attn_kvpacked_bench_fn():
+            out, lse, S_dmask = flash_attn_kvpacked_func(
+                q,
+                kv,
+                dropout_p,
+                causal=causal,
+                window_size=(-1, -1),
+                softcap=0.0,
+                alibi_slopes=None,
+                deterministic=False,
+                return_attn_probs=True,
+            )
+            if mode == "full":
+                dq, dkv = torch.autograd.grad(out, (q, kv), do)
+
+        return flash_attn_kvpacked_bench_fn
        
     elif fn_name == "flash_attn_varlen":
-        q_unpad, k_unpad, v_unpad, do_unpad, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, "thd", device=device)
+        q_unpad, k_unpad, v_unpad, do_unpad, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", device=device)
         def flash_attn_varlen_bench_fn():
             out_unpad, lse, S_dmask = flash_attn_varlen_func(
                 q_unpad,
@@ -119,7 +138,7 @@ def create_benchmark_fn(fn_name, BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype,
                 dq_unpad, dk_unpad, dv_unpad = torch.autograd.grad(out_unpad, (q_unpad, k_unpad, v_unpad), do_unpad)
         return flash_attn_varlen_bench_fn
     elif fn_name == "flash_attn_with_kvcache":
-        q, k_cache, v_cache, _, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, "bshd", device=device)
+        q, k_cache, v_cache, _, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", device=device)
         def flash_attn_with_kvcache_bench_fn():
             out = flash_attn_with_kvcache(
                 q,
