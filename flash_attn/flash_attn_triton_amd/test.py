@@ -936,13 +936,13 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
 @pytest.mark.parametrize(
     "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD",
     [
-        (2, 4, 2, 256, 512, 128),
+        (2, 4, 4, 512, 512, 128),
     ],
 )
 @pytest.mark.parametrize('causal', [False, True])
 @pytest.mark.parametrize('dropout_p', [0.0, 0.1])
 @pytest.mark.parametrize('layout', ['bshd', "thd"])
-@pytest.mark.parametrize('packing', ['none'])
+@pytest.mark.parametrize('packing', ["qkv"])
 @pytest.mark.parametrize('test_backward', [False, True])
 @pytest.mark.skipif(not arch_supports_fp8(), reason="fp8 not supported on this device")
 def test_ir(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, packing, test_backward):
@@ -1030,23 +1030,93 @@ def test_ir(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pack
                     return_attn_probs=True,
                 )
 
-
         # fp8 backward pass
         if test_backward:
             dq, dk, dv = torch.autograd.grad(out, (q, k, v), do)
+    elif packing == "qkv":
+        # qkv packing path
+        # pack input tensors (use dim=1 for varlen, else dim=2)
+        if is_varlen:
+            qkv = torch.stack([q, k, v], dim=1)
+        else:
+            qkv = torch.stack([q, k, v], dim=2)
 
+        # fp8 forward pass for qkv-packed input
+        if not is_varlen:
+            if use_fp8:
+                out, lse, S_dmask = flash_attn_qkvpacked_fp8_func(
+                    qkv,
+                    dropout_p,
+                    causal=causal,
+                    window_size=window_size,
+                    softcap=softcap,
+                    alibi_slopes=alibi_slopes,
+                    deterministic=deterministic,
+                    return_attn_probs=True,
+                )
+            else:
+                out, lse, S_dmask = flash_attn_qkvpacked_func(
+                    qkv,
+                    dropout_p,
+                    causal=causal,
+                    window_size=window_size,
+                    softcap=softcap,
+                    alibi_slopes=alibi_slopes,
+                    deterministic=deterministic,
+                    return_attn_probs=True,
+                )
+        else:
+            if use_fp8:
+                out, lse, S_dmask = flash_attn_varlen_qkvpacked_fp8_func(
+                    qkv,
+                    metadata.cu_seqlens_q,
+                    metadata.max_seqlens_q,
+                    dropout_p,
+                    causal=causal,
+                    window_size=window_size,
+                    softcap=softcap,
+                    alibi_slopes=alibi_slopes,
+                    deterministic=deterministic,
+                    return_attn_probs=True,
+                )
+            else:
+                out, lse, S_dmask = flash_attn_varlen_qkvpacked_func(
+                    qkv,
+                    metadata.cu_seqlens_q,
+                    metadata.max_seqlens_q,
+                    dropout_p,
+                    causal=causal,
+                    window_size=window_size,
+                    softcap=softcap,
+                    alibi_slopes=alibi_slopes,
+                    deterministic=deterministic,
+                    return_attn_probs=True,
+                )
+
+        # fp8 backward pass for qkv-packed input
+        if test_backward:
+            dqkv, = torch.autograd.grad(out, (qkv,), do)
+    else:
+        raise ValueError(f"unknown packing type {packing}")
+    
     # search the cache for .ttir files and check for fp8 type string
     ttir_files = glob.glob(str(cache_path) + "/**/*.ttir", recursive=True)
     assert len(ttir_files) > 0, "No .ttir files found in cache"
     
-    fp8_found = False
+    # check if there is fp8
+    ttir_files_fp8_found_status = {}
     fp8_types = ['f8E4M3', 'f8E5M2']
     for ttir_file in ttir_files:
+        base_name = os.path.basename(ttir_file)
         with open(ttir_file, 'r') as f:
             content = f.read()
+
+            # check content for fp8
+            fp8_found = False
             for f8_type in fp8_types:
                 if f8_type in content:
                     fp8_found = True
-                    break
-    
-    assert fp8_found, f"{fp8_types} not found in {ttir_files}"
+            ttir_files_fp8_found_status[base_name] = fp8_found
+
+    for file, fp8_found in ttir_files_fp8_found_status.items():
+        assert fp8_found, f"{fp8_types} not found in {file}"
