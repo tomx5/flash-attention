@@ -114,7 +114,23 @@ def create_benchmark_fn(fn_name, BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype,
                 dq, dkv = torch.autograd.grad(out, (q, kv), do)
 
         return flash_attn_kvpacked_bench_fn
-       
+    elif fn_name == "flash_attn_qkvpacked":
+        qkv, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", packing="qkv", device=device)
+        def flash_attn_qkvpacked_bench_fn():
+            out, lse, S_dmask = flash_attn_qkvpacked_func(
+                qkv,
+                dropout_p,
+                causal=causal,
+                window_size=(-1, -1),
+                softcap=0.0,
+                alibi_slopes=None,
+                deterministic=False,
+                return_attn_probs=True,
+            )
+            if mode == "full":
+                dqkv = torch.autograd.grad(out, (qkv), do)
+
+        return flash_attn_qkvpacked_bench_fn   
     elif fn_name == "flash_attn_varlen":
         q_unpad, k_unpad, v_unpad, do_unpad, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", device=device)
         def flash_attn_varlen_bench_fn():
