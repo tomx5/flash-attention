@@ -262,182 +262,33 @@ def nonvarlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, d
     metadata.layout = layout
     return q, k, v, do, metadata
 
-def varlen_input_helper_kvpacked(BATCH, HQ, HK, TOTAL_SEQLENS_Q, TOTAL_SEQLENS_K, D_HEAD, dtype, device="cuda", equal_seqlens=False, DEBUG_INPUT=False):
-    torch.manual_seed(20)
-    q, cu_seqlens_q, _ = generate_varlen_tensor(BATCH, TOTAL_SEQLENS_Q, HQ, D_HEAD, dtype=dtype, device=device, equal_seqlens=equal_seqlens, DEBUG_INPUT=DEBUG_INPUT)
-    k, cu_seqlens_k, _ = generate_varlen_tensor(BATCH, TOTAL_SEQLENS_K, HK, D_HEAD, dtype=dtype, device=device, equal_seqlens=equal_seqlens, DEBUG_INPUT=DEBUG_INPUT)
-    v, _, _ = generate_varlen_tensor(BATCH, TOTAL_SEQLENS_K, HK, D_HEAD, dtype=dtype, device=device, equal_seqlens=equal_seqlens, DEBUG_INPUT=DEBUG_INPUT)
-    
-    # pack k and v
-    kv = torch.stack([k, v], dim=1)
-
-    if DEBUG_INPUT:
-        do = torch.ones_like(q)
-    else:
-        do = torch.randn_like(q)
-    
-    sm_scale = D_HEAD ** -0.5
-
-    metadata = MetaData(sm_scale=sm_scale)
-    metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k)
-    metadata.packing = "kv"
-
-    return q, kv, do, metadata
-
-def varlen_input_helper_qkvpacked(BATCH, HQ, HK, TOTAL_SEQLENS, D_HEAD, dtype, device="cuda", equal_seqlens=False, DEBUG_INPUT=False):
-    # for qkv packing, q and k must have the same sequence length
-    torch.manual_seed(20)
-    q, cu_seqlens, _ = generate_varlen_tensor(BATCH, TOTAL_SEQLENS, HQ, D_HEAD, dtype=dtype, device=device, equal_seqlens=equal_seqlens, DEBUG_INPUT=DEBUG_INPUT)
-    k, _, _ = generate_varlen_tensor(BATCH, TOTAL_SEQLENS, HK, D_HEAD, dtype=dtype, device=device, equal_seqlens=equal_seqlens, DEBUG_INPUT=DEBUG_INPUT)
-    v, _, _ = generate_varlen_tensor(BATCH, TOTAL_SEQLENS, HK, D_HEAD, dtype=dtype, device=device, equal_seqlens=equal_seqlens, DEBUG_INPUT=DEBUG_INPUT)
-    
-    # pack q, k and v
-    qkv = torch.stack([q, k, v], dim=1)
-
-    if DEBUG_INPUT:
-        do = torch.ones_like(q)
-    else:
-        do = torch.randn_like(q)
-    
-    sm_scale = D_HEAD ** -0.5
-
-    metadata = MetaData(sm_scale=sm_scale)
-    metadata.set_varlen_params(cu_seqlens, cu_seqlens)
-    metadata.packing = "qkv"
-
-    return qkv, do, metadata
-
-def nonvarlen_input_helper_kvpacked(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device="cuda", DEBUG_INPUT=False):
-    torch.manual_seed(20)
-
-    # Initialize q, k, v
-    if layout == 'bhsd':
-        q_tensor_shape = (Z, HQ, N_CTX_Q, D_HEAD)
-        k_tensor_shape = (Z, HK, N_CTX_K, D_HEAD)
-    elif layout == 'bshd':
-        q_tensor_shape = (Z, N_CTX_Q, HQ, D_HEAD)
-        k_tensor_shape = (Z, N_CTX_K, HK, D_HEAD)
-    else:
-        assert False, f'Got unsupported tensor layout: {layout}'
-
-    if DEBUG_INPUT:
-        if layout == "bhsd":
-            q = torch.arange(N_CTX_Q, dtype=dtype, device=device).view(1, 1, N_CTX_Q, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
-            k = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
-            v = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
-        elif layout == "bshd":
-            q = torch.arange(N_CTX_Q, dtype=dtype, device=device).view(1, N_CTX_Q, 1, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
-            k = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
-            v = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
-    else:
-        q = torch.randn(q_tensor_shape, dtype=dtype, device=device, requires_grad=True)
-        k = torch.randn(k_tensor_shape, dtype=dtype, device=device, requires_grad=True)
-        v = torch.randn(k_tensor_shape, dtype=dtype, device=device, requires_grad=True)
-    
-    # pack k and v
-    if layout == "bhsd":
-        kv = torch.stack([k, v], dim=1)
-    elif layout == "bshd":
-        kv = torch.stack([k, v], dim=2)
-
-    if DEBUG_INPUT:
-        do = torch.ones_like(q)
-    else:
-        do = torch.randn_like(q)
-    
-    if DEBUG_INPUT:
-        sm_scale = 1
-    else:
-        sm_scale = D_HEAD**-0.5
-        
-    metadata = MetaData(sm_scale=sm_scale)
-    metadata.max_seqlens_q = N_CTX_Q
-    metadata.max_seqlens_k = N_CTX_K
-    metadata.layout = layout
-    metadata.packing = "kv"
-    
-    return q, kv, do, metadata
-
-def nonvarlen_input_helper_qkvpacked(Z, HQ, HK, N_CTX, D_HEAD, dtype, layout, device="cuda", DEBUG_INPUT=False):
-    torch.manual_seed(20)
-
-    # Initialize q, k, v with same sequence length
-    if layout == 'bhsd':
-        q_tensor_shape = (Z, HQ, N_CTX, D_HEAD)
-        k_tensor_shape = (Z, HK, N_CTX, D_HEAD)
-    elif layout == 'bshd':
-        q_tensor_shape = (Z, N_CTX, HQ, D_HEAD)
-        k_tensor_shape = (Z, N_CTX, HK, D_HEAD)
-    else:
-        assert False, f'Got unsupported tensor layout: {layout}'
-
-    if DEBUG_INPUT:
-        if layout == "bhsd":
-            q = torch.arange(N_CTX, dtype=dtype, device=device).view(1, 1, N_CTX, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
-            k = torch.arange(N_CTX, dtype=dtype, device=device).view(1, 1, N_CTX, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
-            v = torch.arange(N_CTX, dtype=dtype, device=device).view(1, 1, N_CTX, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
-        elif layout == "bshd":
-            q = torch.arange(N_CTX, dtype=dtype, device=device).view(1, N_CTX, 1, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
-            k = torch.arange(N_CTX, dtype=dtype, device=device).view(1, N_CTX, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
-            v = torch.arange(N_CTX, dtype=dtype, device=device).view(1, N_CTX, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
-    else:
-        q = torch.randn(q_tensor_shape, dtype=dtype, device=device, requires_grad=True)
-        k = torch.randn(k_tensor_shape, dtype=dtype, device=device, requires_grad=True)
-        v = torch.randn(k_tensor_shape, dtype=dtype, device=device, requires_grad=True)
-    
-    # pack q, k, and v
-    if layout == "bhsd":
-        qkv = torch.stack([q, k, v], dim=1)
-    elif layout == "bshd":
-        qkv = torch.stack([q, k, v], dim=2)
-
-    if DEBUG_INPUT:
-        do = torch.ones_like(q)
-    else:
-        do = torch.randn_like(q)
-    
-    if DEBUG_INPUT:
-        sm_scale = 1
-    else:
-        sm_scale = D_HEAD**-0.5
-        
-    metadata = MetaData(sm_scale=sm_scale)
-    metadata.max_seqlens_q = N_CTX
-    metadata.max_seqlens_k = N_CTX
-    metadata.layout = layout
-    metadata.packing = "qkv"
-    
-    return qkv, do, metadata
-
 def input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, packing=None, device="cuda", DEBUG_INPUT=False):
+    if layout == "thd":
+        q, k, v, do, metadata = varlen_input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device=device, DEBUG_INPUT=DEBUG_INPUT)
+    else:
+        q, k, v, do, metadata = nonvarlen_input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
+
     if packing is None:
-        if layout == "thd":
-            q, k, v, do, metadata = varlen_input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device=device, DEBUG_INPUT=DEBUG_INPUT)
-        else:
-            q, k, v, do, metadata = nonvarlen_input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
-            
         return q, k, v, do, metadata
-        
     elif packing == "kv":
-        # kv packing
-        if layout == "thd":
-            q, kv, do, metadata = varlen_input_helper_kvpacked(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device=device, DEBUG_INPUT=DEBUG_INPUT)
-        else:
-            q, kv, do, metadata = nonvarlen_input_helper_kvpacked(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
-            
+        # pack k and v
+        if layout == "bhsd":
+            kv = torch.stack([k, v], dim=1)
+        elif layout == "bshd":
+            kv = torch.stack([k, v], dim=2)
+
         return q, kv, do, metadata
-        
     elif packing == "qkv":
         # qkv packing - requires same sequence length for q and k
         assert N_CTX_Q == N_CTX_K, "For QKV packing, Q and K must have same sequence length"
         
-        if layout == "thd":
-            qkv, do, metadata = varlen_input_helper_qkvpacked(BATCH, HQ, HK, N_CTX_Q, D_HEAD, dtype, device=device, DEBUG_INPUT=DEBUG_INPUT)
-        else:
-            qkv, do, metadata = nonvarlen_input_helper_qkvpacked(BATCH, HQ, HK, N_CTX_Q, D_HEAD, dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)           
-
-        return qkv, do, metadata
+        # pack q, k, and v
+        if layout == "bhsd":
+            qkv = torch.stack([q, k, v], dim=1)
+        elif layout == "bshd":
+            qkv = torch.stack([q, k, v], dim=2)
         
+        return qkv, do, metadata
     else:
         assert False, f"Unsupported packing mode: {packing}"
 
