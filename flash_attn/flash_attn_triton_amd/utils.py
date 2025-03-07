@@ -281,6 +281,7 @@ def input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, packing
     elif packing == "qkv":
         # qkv packing - requires same sequence length for q and k
         assert N_CTX_Q == N_CTX_K, "For QKV packing, Q and K must have same sequence length"
+        assert HQ == HK, "For QKV packing, Q and K must have same number of heads"
         
         # pack q, k, and v
         if layout == "bhsd":

@@ -15,7 +15,7 @@ ARGS_TO_TORCH_DTYPE = {
 FUNCTIONS = {
     "flash_attn": flash_attn_func,
     "flash_attn_kvpacked": flash_attn_kvpacked_func,
-    # "flash_attn_qkvpacked": flash_attn_qkvpacked_func,
+    "flash_attn_qkvpacked": flash_attn_qkvpacked_func,
     "flash_attn_varlen": flash_attn_varlen_func,
     # "flash_attn_varlen_kvpacked": flash_attn_varlen_kvpacked_func,
     # "flash_attn_varlen_qkvpacked": flash_attn_varlen_qkvpacked_func,
@@ -27,52 +27,73 @@ MODES = {
         "full": "for forward and backward pass"
          }
 
-def get_benchmark_configs(args, is_varlen=False):
+def get_benchmark_configs(args, fn_name):
     """
-    Returns benchmark configurations based on whether variable-length sequences are used.
+    returns benchmark configurations based on whether variable-length sequences are used.
     """
     if args.custom_config:
         hk = args.hq if not args.hk else args.hk
         sk = args.sq if not args.sk else args.sk
-        return [(args.b, args.hq, hk, args.sq, sk)]
-    elif is_varlen:
+        return [(args.b, args.hq, hk, args.sq, sk, args.d)]
+    elif fn_name in ["flash_attn_varlen"]:
         return [
-            (2, 16, 4, 1024, 1024),
-            (8, 16, 2, 2048, 2048),
-            (4, 16, 8, 4096, 4096),
-            (2, 16, 4, 8192, 8192),
-            (2, 16, 8, 16384, 16384),
-            (2, 48, 12, 1024, 1024),
-            (2, 48, 24, 2048, 2048),
-            (2, 48, 8, 4096, 4096),
-            (2, 48, 4, 8192, 8192),
-            (2, 48, 2, 16384, 16384),
-            (2, 64, 32, 1024, 1024),
-            (4, 64, 16, 2048, 2048),
-            (4, 64, 8, 4096, 4096),
-            (4, 64, 32, 8192, 8192),
-            (4, 128, 16, 16384, 16384),
+            (2, 16, 4, 1024, 1024, 128),
+            (8, 16, 2, 2048, 2048, 128),
+            (4, 16, 8, 4096, 4096, 128),
+            (2, 16, 4, 8192, 8192, 128),
+            (2, 16, 8, 16384, 16384, 128),
+            (2, 48, 12, 1024, 1024, 128),
+            (2, 48, 24, 2048, 2048, 128),
+            (2, 48, 8, 4096, 4096, 128),
+            (2, 48, 4, 8192, 8192, 128),
+            (2, 48, 2, 16384, 16384, 128),
+            (2, 64, 32, 1024, 1024, 128),
+            (4, 64, 16, 2048, 2048, 128),
+            (4, 64, 8, 4096, 4096, 128),
+            (4, 64, 32, 8192, 8192, 128),
+            (4, 128, 16, 16384, 16384, 128),
         ]
-    else:
+    elif fn_name in ["flash_attn", "flash_attn_kvpacked", "flash_attn_with_kvcache"]:
         return [
-            (16, 16, 16, 1024, 1024),
-            (8, 16, 16, 2048, 2048),
-            (4, 16, 16, 4096, 4096),
-            (1, 8, 8, 8192, 8192),
-            (1, 2, 2, 16384, 16384),
-            (2, 48, 48, 1024, 1024),
-            (2, 48, 48, 2048, 1024),
-            (1, 8, 8, 4096, 8192),
-            (1, 8, 8, 8192, 4096),
-            (2, 4, 4, 16384, 8192),
-            (2, 8, 8, 1989, 15344),
-            (4, 16, 16, 4097, 163),
-            (2, 16, 16, 8122, 2159),
-            (1, 16, 16, 16281, 7),
-            (2, 48, 48, 1021, 1020),
-            (2, 48, 48, 2001, 2048),
-            (2, 8, 8, 3996, 9639),
-            (2, 8, 8, 8181, 1021),
+            (16, 16, 16, 1024, 1024, 128),
+            (8, 16, 16, 2048, 2048, 128),
+            (4, 16, 16, 4096, 4096, 128),
+            (1, 8, 8, 8192, 8192, 128),
+            (1, 2, 2, 16384, 16384, 128),
+            (2, 48, 48, 1024, 1024, 128),
+            (2, 48, 48, 2048, 1024, 128),
+            (1, 8, 8, 4096, 8192, 128),
+            (1, 8, 8, 8192, 4096, 128),
+            (2, 4, 4, 16384, 8192, 128),
+            (2, 8, 8, 1989, 15344, 128),
+            (4, 16, 16, 4097, 163, 128),
+            (2, 16, 16, 8122, 2159, 128),
+            (1, 16, 16, 16281, 7, 128),
+            (2, 48, 48, 1021, 1020, 128),
+            (2, 48, 48, 2001, 2048, 128),
+            (2, 8, 8, 3996, 9639, 128),
+            (2, 8, 8, 8181, 1021, 128),
+        ]
+    elif fn_name in ["flash_attn_qkvpacked"]:
+        return [
+            (16, 16, 16, 1024, 1024, 128),
+            (8, 16, 16, 2048, 2048, 128),
+            (4, 16, 16, 4096, 4096, 128),
+            (1, 8, 8, 8192, 8192, 128),
+            (1, 2, 2, 16384, 16384, 128),
+            (2, 48, 48, 1024, 1024, 128),
+            (2, 48, 48, 2048, 2048, 128),
+            (1, 8, 8, 4096, 4096, 128),
+            (1, 8, 8, 8192, 8192, 128),
+            (2, 4, 4, 8192, 8192, 128),
+            (2, 8, 8, 1989, 1989, 128),
+            (4, 16, 16, 163, 163, 128),
+            (2, 16, 16, 8122, 8122, 128),
+            (1, 16, 16, 1021, 1021, 128),
+            (2, 48, 48, 1020, 1020, 128),
+            (2, 48, 48, 2001, 2001, 128),
+            (2, 8, 8, 3996, 3996, 128),
+            (2, 8, 8, 1021, 1021, 128),
         ]
 
 def create_benchmark_fn(fn_name, BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device, dropout_p, causal, mode):
@@ -182,6 +203,11 @@ def run_benchmark(args, fn_name, fn, mode):
     """
     Runs the benchmark for the provided function based on the provided arguments.
     """
+    # check mode
+    if mode not in MODES:
+        raise ValueError(f"{mode} not in {MODES}")
+
+    # print bench fn
     if fn_name in ["flash_attn_with_kvcache"] and mode == "full":
         print(f"Benchmarking {fn_name} in {mode} mode. It does not have a backward pass so we will be running the forward pass only.")
     else:
@@ -189,18 +215,14 @@ def run_benchmark(args, fn_name, fn, mode):
 
     # get configs
     dtype = ARGS_TO_TORCH_DTYPE[args.dtype]
-    head_size = args.d if args.d else 128
     causal = args.causal
     dropout_p = 0.0
-    configs = get_benchmark_configs(args, is_varlen=True if "varlen" in fn_name else False)
-
-    if mode not in MODES:
-        raise ValueError(f"{mode} not in {MODES}")
+    configs = get_benchmark_configs(args, fn_name)
 
     # Setup benchmark configurations
-    configs = [
+    bench_configs = [
         triton.testing.Benchmark(
-            x_names=["BATCH", "HQ", "HK", "N_CTX_Q", "N_CTX_K"],
+            x_names=["BATCH", "HQ", "HK", "N_CTX_Q", "N_CTX_K", "D_HEAD"],
             x_vals=configs,
             line_arg="provider",
             line_vals=["triton"],
@@ -209,7 +231,6 @@ def run_benchmark(args, fn_name, fn, mode):
             ylabel="ms",
             plot_name=f"benchmark-{fn_name}-{mode}",
             args={
-                "D_HEAD": head_size,
                 "dtype": dtype,
                 "causal": causal,
                 "dropout_p": dropout_p,
@@ -218,7 +239,7 @@ def run_benchmark(args, fn_name, fn, mode):
         )
     ]
 
-    @triton.testing.perf_report(configs)
+    @triton.testing.perf_report(bench_configs)
     def bench_function(
         BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, causal, dropout_p, mode, provider, device="cuda"
     ):
