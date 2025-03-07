@@ -272,7 +272,7 @@ def input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, packing
         return q, k, v, do, metadata
     elif packing == "kv":
         # pack k and v
-        if layout == "bhsd":
+        if layout in ["bhsd", "thd"]:
             kv = torch.stack([k, v], dim=1)
         elif layout == "bshd":
             kv = torch.stack([k, v], dim=2)
@@ -284,7 +284,7 @@ def input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, packing
         assert HQ == HK, "For QKV packing, Q and K must have same number of heads"
         
         # pack q, k, and v
-        if layout == "bhsd":
+        if layout in ["bhsd", "thd"]:
             qkv = torch.stack([q, k, v], dim=1)
         elif layout == "bshd":
             qkv = torch.stack([q, k, v], dim=2)

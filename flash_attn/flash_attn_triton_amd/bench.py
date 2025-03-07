@@ -17,8 +17,8 @@ FUNCTIONS = {
     "flash_attn_kvpacked": flash_attn_kvpacked_func,
     "flash_attn_qkvpacked": flash_attn_qkvpacked_func,
     "flash_attn_varlen": flash_attn_varlen_func,
-    # "flash_attn_varlen_kvpacked": flash_attn_varlen_kvpacked_func,
-    # "flash_attn_varlen_qkvpacked": flash_attn_varlen_qkvpacked_func,
+    "flash_attn_varlen_kvpacked": flash_attn_varlen_kvpacked_func,
+    "flash_attn_varlen_qkvpacked": flash_attn_varlen_qkvpacked_func,
     "flash_attn_with_kvcache": flash_attn_with_kvcache,
 }
 
@@ -35,7 +35,7 @@ def get_benchmark_configs(args, fn_name):
         hk = args.hq if not args.hk else args.hk
         sk = args.sq if not args.sk else args.sk
         return [(args.b, args.hq, hk, args.sq, sk, args.d)]
-    elif fn_name in ["flash_attn_varlen"]:
+    elif fn_name in ["flash_attn_varlen", "flash_attn_varlen_kvpacked"]:
         return [
             (2, 16, 4, 1024, 1024, 128, False, 0.0),
             (8, 16, 2, 2048, 2048, 128, False, 0.0),
@@ -74,7 +74,7 @@ def get_benchmark_configs(args, fn_name):
             (2, 8, 8, 3996, 9639, 128, False, 0.0),
             (2, 8, 8, 8181, 1021, 128, False, 0.0),
         ]
-    elif fn_name in ["flash_attn_qkvpacked"]:
+    elif fn_name in ["flash_attn_qkvpacked", "flash_attn_varlen_qkvpacked"]:
         return [
             (16, 16, 16, 1024, 1024, 128, False, 0.0),
             (8, 16, 16, 2048, 2048, 128, False, 0.0),
@@ -95,6 +95,8 @@ def get_benchmark_configs(args, fn_name):
             (2, 8, 8, 3996, 3996, 128, False, 0.0),
             (2, 8, 8, 1021, 1021, 128, False, 0.0),
         ]
+    else:
+        raise ValueError(f"Unknown function {fn_name}")
 
 def create_benchmark_fn(fn_name, BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device, dropout_p, causal, mode):
     if fn_name == "flash_attn":
@@ -174,6 +176,45 @@ def create_benchmark_fn(fn_name, BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype,
             if mode == "full":
                 dq_unpad, dk_unpad, dv_unpad = torch.autograd.grad(out_unpad, (q_unpad, k_unpad, v_unpad), do_unpad)
         return flash_attn_varlen_bench_fn
+    elif fn_name == "flash_attn_varlen_kvpacked":
+        q_unpad, kv_unpad, do_unpad, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", packing="kv", device=device)
+        def flash_attn_varlen_kvpacked_bench_fn():
+            out_unpad, lse, S_dmask = flash_attn_varlen_kvpacked_func(
+                q_unpad,
+                kv_unpad,
+                metadata.cu_seqlens_q,
+                metadata.cu_seqlens_k,
+                metadata.max_seqlens_q,
+                metadata.max_seqlens_k,
+                dropout_p,
+                causal=causal,
+                window_size=(-1, -1),
+                softcap=0.0 ,
+                alibi_slopes=None,
+                deterministic=False,
+                return_attn_probs=True,
+            )
+            if mode == "full":
+                dq_unpad, dkv_unpad = torch.autograd.grad(out_unpad, (q_unpad, kv_unpad), do_unpad)
+        return flash_attn_varlen_kvpacked_bench_fn
+    elif fn_name == "flash_attn_varlen_qkvpacked":
+        qkv_unpad, do_unpad, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", packing="qkv", device=device)
+        def flash_attn_varlen_qkvpacked_bench_fn():
+            out_unpad, lse, S_dmask = flash_attn_varlen_qkvpacked_func(
+                qkv_unpad,
+                metadata.cu_seqlens_q,
+                metadata.max_seqlens_q,
+                dropout_p,
+                causal=causal,
+                window_size=(-1, -1),
+                softcap=0.0 ,
+                alibi_slopes=None,
+                deterministic=False,
+                return_attn_probs=True,
+            )
+            if mode == "full":
+                dqkv_unpad = torch.autograd.grad(out_unpad, (qkv_unpad), do_unpad)
+        return flash_attn_varlen_qkvpacked_bench_fn
     elif fn_name == "flash_attn_with_kvcache":
         q, k_cache, v_cache, _, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", device=device)
         def flash_attn_with_kvcache_bench_fn():
