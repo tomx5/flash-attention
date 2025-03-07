@@ -1027,21 +1027,10 @@ def attention_prefill_backward_triton_split_impl(
     IS_FP8 = is_fp8(q)
     if IS_FP8:
         FP8_MAX = torch.finfo(q.dtype).max
-        
-        # assert descale_o is not None and descale_dq is not None and descale_dk is not None and descale_dv is not None, f"In fp8, you need to provide empty tensors to store descale factors for dq, dk, dv and o"
-           
-        FP8_RETURN_DESCALE: tl.constexpr = False 
+        FP8_RETURN_DESCALE: tl.constexpr = False
 
-        # auto grad implict casting cause do to be fp32 for some reason
-        # do = do.to(q.dtype)
-
-        # assert that fp8 types are the same
-        assert do.dtype == q.dtype == k.dtype == v.dtype, f"Data type mismatch: do.dtype={do.dtype}, q.dtype={q.dtype}, k.dtype={k.dtype}, v.dtype={v.dtype}. All tensors must have the same dtype."
-
-        # check that the grads are in fp32 to accumlate values
-        # assert dv.dtype == torch.float32
-        # assert dk.dtype == torch.float32
-        # assert dv.dtype == torch.float32
+        # assert that the main inputs are fp8
+        assert is_fp8(do) and is_fp8(q) and is_fp8(k) and is_fp8(v), f"Non fp8 type found: do.dtype={do.dtype}, q.dtype={q.dtype}, k.dtype={k.dtype}, v.dtype={v.dtype}. All tensors must be fp8."
 
         stride_descale_q_z = descale_q.stride(0)
         stride_descale_k_z = descale_k.stride(0)

@@ -574,7 +574,7 @@ def attention_prefill_forward_triton_impl(
         FP8_MAX: tl.constexpr=torch.finfo(q.dtype).max
         FP8_RETURN_DESCALE: tl.constexpr = False
 
-        assert q.dtype == k.dtype == v.dtype, f"Data type mismatch: q.dtype={q.dtype}, k.dtype={k.dtype}, v.dtype={v.dtype}. All tensors must have the same dtype."
+        assert is_fp8(q) and is_fp8(k) and is_fp8(v), f"Non fp8 type found: q.dtype={q.dtype}, k.dtype={k.dtype}, v.dtype={v.dtype}. All tensors must be fp8."
 
         # Get strides for the kernel
         descale_q_stride_z = descale_q.stride(0)
