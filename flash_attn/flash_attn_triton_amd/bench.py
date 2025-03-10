@@ -5,7 +5,8 @@ from flash_attn import flash_attn_func, flash_attn_qkvpacked_func, flash_attn_kv
     flash_attn_varlen_func, flash_attn_varlen_qkvpacked_func, flash_attn_varlen_kvpacked_func, \
     flash_attn_with_kvcache
 from flash_attn.flash_attn_triton_amd.utils import input_helper
-from typing import Literal
+from typing import Literal, Optional
+from functools import lru_cache
 
 ARGS_TO_TORCH_DTYPE = {
     "fp16": torch.float16,
@@ -28,76 +29,69 @@ MODES = {
         "full": "for forward and backward pass"
          }
 
-def get_benchmark_configs(args, fn_name):
+def estimate_memory(config):
+    batch, hq, hk, sq, sk, d_head, causal, dropout = config
+    memory_estimate = batch * (hq * sq + hk * sk) * d_head * 4  # bytes
+    return memory_estimate
+
+@lru_cache(maxsize=100)
+def generate_benchmark_configs(packing: Optional[Literal["kv", "qkv"]]):
     """
-    returns benchmark configurations based on whether variable-length sequences are used.
+    generates a small number of configs that cover the parameter space well
     """
-    if args.custom_config:
-        hk = args.hq if not args.hk else args.hk
-        sk = args.sq if not args.sk else args.sk
-        return [(args.b, args.hq, hk, args.sq, sk, args.d, args.causal, args.dropout)]
-    elif fn_name in ["flash_attn_varlen", "flash_attn_varlen_kvpacked"]:
-        return [
-            (2, 16, 4, 1024, 1024, 128, False, 0.0),
-            (8, 16, 2, 2048, 2048, 128, False, 0.0),
-            (4, 16, 8, 4096, 4096, 128, False, 0.0),
-            (2, 16, 4, 8192, 8192, 128, False, 0.0),
-            (2, 16, 8, 16384, 16384, 128, False, 0.0),
-            (2, 48, 12, 1024, 1024, 128, False, 0.0),
-            (2, 48, 24, 2048, 2048, 128, False, 0.0),
-            (2, 48, 8, 4096, 4096, 128, False, 0.0),
-            (2, 48, 4, 8192, 8192, 128, False, 0.0),
-            (2, 48, 2, 16384, 16384, 128, False, 0.0),
-            (2, 64, 32, 1024, 1024, 128, False, 0.0),
-            (4, 64, 16, 2048, 2048, 128, False, 0.0),
-            (4, 64, 8, 4096, 4096, 128, False, 0.0),
-            (4, 64, 32, 8192, 8192, 128, False, 0.0),
-            (4, 128, 16, 16384, 16384, 128, False, 0.0),
-        ]
-    elif fn_name in ["flash_attn", "flash_attn_kvpacked", "flash_attn_with_kvcache"]:
-        return [
-            (16, 16, 16, 1024, 1024, 128, False, 0.0),
-            (8, 16, 16, 2048, 2048, 128, False, 0.0),
-            (4, 16, 16, 4096, 4096, 128, False, 0.0),
-            (1, 8, 8, 8192, 8192, 128, False, 0.0),
-            (1, 2, 2, 16384, 16384, 128, False, 0.0),
-            (2, 48, 48, 1024, 1024, 128, False, 0.0),
-            (2, 48, 48, 2048, 1024, 128, False, 0.0),
-            (1, 8, 8, 4096, 8192, 128, False, 0.0),
-            (1, 8, 8, 8192, 4096, 128, False, 0.0),
-            (2, 4, 4, 16384, 8192, 128, False, 0.0),
-            (2, 8, 8, 1989, 15344, 128, False, 0.0),
-            (4, 16, 16, 4097, 163, 128, False, 0.0),
-            (2, 16, 16, 8122, 2159, 128, False, 0.0),
-            (1, 16, 16, 16281, 7, 128, False, 0.0),
-            (2, 48, 48, 1021, 1020, 128, False, 0.0),
-            (2, 48, 48, 2001, 2048, 128, False, 0.0),
-            (2, 8, 8, 3996, 9639, 128, False, 0.0),
-            (2, 8, 8, 8181, 1021, 128, False, 0.0),
-        ]
-    elif fn_name in ["flash_attn_qkvpacked", "flash_attn_varlen_qkvpacked"]:
-        return [
-            (16, 16, 16, 1024, 1024, 128, False, 0.0),
-            (8, 16, 16, 2048, 2048, 128, False, 0.0),
-            (4, 16, 16, 4096, 4096, 128, False, 0.0),
-            (1, 8, 8, 8192, 8192, 128, False, 0.0),
-            (1, 2, 2, 16384, 16384, 128, False, 0.0),
-            (2, 48, 48, 1024, 1024, 128, False, 0.0),
-            (2, 48, 48, 2048, 2048, 128, False, 0.0),
-            (1, 8, 8, 4096, 4096, 128, False, 0.0),
-            (1, 8, 8, 8192, 8192, 128, False, 0.0),
-            (2, 4, 4, 8192, 8192, 128, False, 0.0),
-            (2, 8, 8, 1989, 1989, 128, False, 0.0),
-            (4, 16, 16, 163, 163, 128, False, 0.0),
-            (2, 16, 16, 8122, 8122, 128, False, 0.0),
-            (1, 16, 16, 1021, 1021, 128, False, 0.0),
-            (2, 48, 48, 1020, 1020, 128, False, 0.0),
-            (2, 48, 48, 2001, 2001, 128, False, 0.0),
-            (2, 8, 8, 3996, 3996, 128, False, 0.0),
-            (2, 8, 8, 1021, 1021, 128, False, 0.0),
-        ]
-    else:
-        raise ValueError(f"Unknown function {fn_name}")
+
+    # define all parameter options as lists
+    batch_sizes = [1, 4]
+    hq_values = [4, 64]
+    hk_values = [4, 64]
+    sq_values = [128, 512]
+    sk_values = [128, 512]
+    d_head_values = [64, 128]
+    causal_values = [False, True]
+    dropout_values = [0.0, False]
+    
+    # generate all possible configs
+    configs = []
+    
+    # one big loop to generate configs
+    for batch in batch_sizes:
+        for hq in hq_values:
+            for hk in hk_values:
+                for sq in sq_values:
+                    for sk in sk_values:
+                        for d_head in d_head_values:
+                            for causal in causal_values:
+                                for dropout in dropout_values:
+                                    # filter configs
+                                    config = (batch, hq, hk, sq, sk, d_head, causal, dropout)
+
+                                    # skip if memory usage would be too high
+                                    if estimate_memory(config) > 8 * 1024 * 1024 * 1024:  # 8 GB limit
+                                        continue
+
+                                    # we need hq to be a multiple of hk
+                                    if hq % hk != 0:
+                                        continue
+                                    
+                                    # skip very asymmetric head configs
+                                    if max(hq, hk) / min(hq, hk) > 16:
+                                        continue
+                                        
+                                    # skip if both seq length and heads are very large
+                                    if max(sq, sk) > 8192 and max(hq, hk) > 32:
+                                        continue
+                                    
+                                    # for qkvpacked functions, q and k must have same dimensions
+                                    if packing == "qkv" and (sq != sk or hq != hk):
+                                        continue
+                                        
+                                    # add config
+                                    configs.append(config)
+    
+    # sort by memory usage (smallest to largest) for better visualization
+    configs.sort(key=estimate_memory)
+    
+    return configs
 
 
 def create_benchmark_fn(
@@ -256,6 +250,16 @@ def create_benchmark_fn(
         raise ValueError(f"{fn_name} is not supported for benchmarking")
 
 
+def get_packing_type(fn_name: str) -> Optional[Literal["kv", "qkv"]]:
+    if "_kvpacked" in fn_name:
+        packing = "kv"
+    elif "_qkvpacked" in fn_name:
+        packing = "qkv"
+    else:
+        packing = None
+
+    return packing
+
 def run_benchmark(args, fn_name, fn, mode):
     """
     Runs the benchmark for the provided function based on the provided arguments.
@@ -264,15 +268,29 @@ def run_benchmark(args, fn_name, fn, mode):
     if mode not in MODES:
         raise ValueError(f"{mode} not in {MODES}")
 
-    # print bench fn
-    if fn_name in ["flash_attn_with_kvcache"] and mode == "full":
-        print(f"Benchmarking {fn_name} in {mode} mode. It does not have a backward pass so we will be running the forward pass only.")
-    else:
-        print(f"Benchmarking {fn_name} in {mode} mode ...")
-
     # get configs
     dtype = ARGS_TO_TORCH_DTYPE[args.dtype]
-    configs = get_benchmark_configs(args, fn_name)
+    packing = get_packing_type(fn_name)
+    if args.custom_config:
+        # handle custom config case
+        configs = [(args.b, args.hq, 
+                    args.hq if not args.hk else args.hk, 
+                    args.sq, 
+                    args.sq if not args.sk else args.sk, 
+                    args.d, 
+                    args.causal, 
+                    args.dropout)]
+    else:
+        configs = generate_benchmark_configs(packing)
+
+    # check that we have at least one config
+    assert len(configs) > 0
+
+    # print bench fn
+    if fn_name in ["flash_attn_with_kvcache"] and mode == "full":
+        print(f"Benchmarking {fn_name} with {len(configs)} configs in {mode} mode. It does not have a backward pass so we will be running the forward pass only.")
+    else:
+        print(f"Benchmarking {fn_name} with {len(configs)} configs in {mode} mode ...")
 
     # Setup benchmark configurations
     bench_configs = [
@@ -284,7 +302,7 @@ def run_benchmark(args, fn_name, fn, mode):
             line_names=["Time (ms)"],
             styles=[("red", "-")],
             ylabel="ms",
-            plot_name=f"benchmark-{fn_name}-{mode}",
+            plot_name=f"benchmark-{fn_name}-{dtype}-{mode}",
             args={
                 "dtype": dtype,
                 "mode": mode
