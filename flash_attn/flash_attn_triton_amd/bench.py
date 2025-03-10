@@ -5,6 +5,7 @@ from flash_attn import flash_attn_func, flash_attn_qkvpacked_func, flash_attn_kv
     flash_attn_varlen_func, flash_attn_varlen_qkvpacked_func, flash_attn_varlen_kvpacked_func, \
     flash_attn_with_kvcache
 from flash_attn.flash_attn_triton_amd.utils import input_helper
+from typing import Literal
 
 ARGS_TO_TORCH_DTYPE = {
     "fp16": torch.float16,
@@ -34,7 +35,7 @@ def get_benchmark_configs(args, fn_name):
     if args.custom_config:
         hk = args.hq if not args.hk else args.hk
         sk = args.sq if not args.sk else args.sk
-        return [(args.b, args.hq, hk, args.sq, sk, args.d)]
+        return [(args.b, args.hq, hk, args.sq, sk, args.d, args.causal, args.dropout)]
     elif fn_name in ["flash_attn_varlen", "flash_attn_varlen_kvpacked"]:
         return [
             (2, 16, 4, 1024, 1024, 128, False, 0.0),
@@ -98,7 +99,21 @@ def get_benchmark_configs(args, fn_name):
     else:
         raise ValueError(f"Unknown function {fn_name}")
 
-def create_benchmark_fn(fn_name, BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device, dropout_p, causal, mode):
+
+def create_benchmark_fn(
+    fn_name: str,
+    BATCH: int,
+    HQ: int,
+    HK: int,
+    N_CTX_Q: int,
+    N_CTX_K: int,
+    D_HEAD: int,
+    causal: bool,
+    dropout_p: float,
+    dtype: torch.dtype,
+    mode: Literal["fwd", "full"],
+    device: Literal["cpu", "cuda"],
+):
     if fn_name == "flash_attn":
         q, k, v, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", device=device)
         def flash_attn_bench_fn():
@@ -118,7 +133,7 @@ def create_benchmark_fn(fn_name, BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype,
                 dq, dk, dv = torch.autograd.grad(out, (q, k, v), do)
 
         return flash_attn_bench_fn
-    
+
     elif fn_name == "flash_attn_kvpacked":
         q, kv, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", packing="kv", device=device)
         def flash_attn_kvpacked_bench_fn():
@@ -240,6 +255,7 @@ def create_benchmark_fn(fn_name, BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype,
     else:
         raise ValueError(f"{fn_name} is not supported for benchmarking")
 
+
 def run_benchmark(args, fn_name, fn, mode):
     """
     Runs the benchmark for the provided function based on the provided arguments.
@@ -278,7 +294,7 @@ def run_benchmark(args, fn_name, fn, mode):
 
     @triton.testing.perf_report(bench_configs)
     def bench_function(
-        BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, CAUSAL, DROPOUT,  dtype, mode, provider, device="cuda"
+        BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, CAUSAL, DROPOUT, dtype, mode, provider, device="cuda"
     ):
         warmup = 25
         rep = 100
@@ -289,12 +305,13 @@ def run_benchmark(args, fn_name, fn, mode):
                                            HK, 
                                            N_CTX_Q, 
                                            N_CTX_K, 
-                                           D_HEAD, 
-                                           dtype, 
-                                           device,
+                                           D_HEAD,
                                            CAUSAL,
                                            DROPOUT,
-                                           mode)
+                                           dtype,
+                                           mode,
+                                           device
+                                           )
 
         # run the benchmark
         ms = triton.testing.do_bench(benchmark_fn, warmup=warmup, rep=rep)
@@ -318,6 +335,7 @@ def parse_args():
     parser.add_argument("-sk", type=int, default=0)
     parser.add_argument("-d", type=int, default=0)
     parser.add_argument("-causal", action="store_true", default=False)
+    parser.add_argument("-dropout", type=float, default=0.0)
     parser.add_argument("-dtype", default="fp16")
     parser.add_argument(
         "-benchmark_fn",

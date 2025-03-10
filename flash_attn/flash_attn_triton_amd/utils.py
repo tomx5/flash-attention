@@ -1,12 +1,12 @@
 import csv
 import math
-from typing import Optional
 import torch
 import os
 import random
 import functools
 import triton
 import triton.language as tl
+from typing import Literal, Optional
 
 # -------------------------------
 # Gloabl Variables
@@ -251,7 +251,7 @@ def nonvarlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, d
         do = torch.ones_like(q)
     else:
         do = torch.randn_like(q)
-    
+
     if DEBUG_INPUT:
         sm_scale = 1
     else:
@@ -262,7 +262,20 @@ def nonvarlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, d
     metadata.layout = layout
     return q, k, v, do, metadata
 
-def input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, packing=None, device="cuda", DEBUG_INPUT=False):
+
+def input_helper(
+    BATCH: int,
+    HQ: int,
+    HK: int,
+    N_CTX_Q: int,
+    N_CTX_K: int,
+    D_HEAD: int,
+    dtype: torch.dtype,
+    layout: Literal["bshd", "bhsd", "thd"],
+    packing: Optional[Literal["kv", "qkv"]] = None,
+    device: Literal["cpu", "cuda"] = "cuda",
+    DEBUG_INPUT: bool = False,
+):
     if layout == "thd":
         q, k, v, do, metadata = varlen_input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device=device, DEBUG_INPUT=DEBUG_INPUT)
     else:
@@ -282,16 +295,17 @@ def input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, packing
         # qkv packing - requires same sequence length for q and k
         assert N_CTX_Q == N_CTX_K, "For QKV packing, Q and K must have same sequence length"
         assert HQ == HK, "For QKV packing, Q and K must have same number of heads"
-        
+
         # pack q, k, and v
         if layout in ["bhsd", "thd"]:
             qkv = torch.stack([q, k, v], dim=1)
         elif layout == "bshd":
             qkv = torch.stack([q, k, v], dim=2)
-        
+
         return qkv, do, metadata
     else:
         assert False, f"Unsupported packing mode: {packing}"
+
 
 # -------------------------------
 # FP8
