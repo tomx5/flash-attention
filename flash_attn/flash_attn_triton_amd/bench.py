@@ -36,17 +36,25 @@ def estimate_memory(config):
     return memory_estimate
 
 @lru_cache(maxsize=100)
-def generate_benchmark_configs(packing: Optional[Literal["kv", "qkv"]]):
+def generate_benchmark_configs(is_varlen: bool, packing: Optional[Literal["kv", "qkv"]]):
     """
     generates a small number of configs that cover the parameter space well
     """
 
     # define all parameter options as lists
     batch_sizes = [1, 64]
-    hq_values = [64, 128] # test mqa/gqa
-    hk_values = [8, 64]
-    sq_values = [4, 4096]
-    sk_values = [4096, 8192] # test kvcache
+    if packing == "qkv":
+        hq_values = hk_values = [2, 8]
+        sq_values = sk_values = [256, 8192]
+    else:
+        hq_values = [64, 128] # test mqa/gqa
+        hk_values = [16, 64]
+        if is_varlen: # make sure the seqlen is greater than the batchsize so that subsequences are greater than 0
+            sq_values = [128, 512]
+            sk_values = [512, 2024]
+        else:
+            sq_values = [4, 4096]
+            sk_values = [4096, 16384] # test large k values for inference perf
     d_head_values = [64, 128]
     causal_values = [False]
     dropout_values = [0.0]
@@ -73,15 +81,7 @@ def generate_benchmark_configs(packing: Optional[Literal["kv", "qkv"]]):
                                     # we need hq to be a multiple of hk
                                     if hq % hk != 0:
                                         continue
-                                    
-                                    # skip very asymmetric head configs
-                                    if max(hq, hk) / min(hq, hk) > 16:
-                                        continue
-                                        
-                                    # skip if both seq length and heads are very large
-                                    if max(sq, sk) > 8192 and max(hq, hk) > 32:
-                                        continue
-                                    
+
                                     # for qkvpacked functions, q and k must have same dimensions
                                     if packing == "qkv" and (sq != sk or hq != hk):
                                         continue
@@ -275,6 +275,7 @@ def run_benchmark(args, fn_name, fn, mode):
     # get configs
     dtype = ARGS_TO_TORCH_DTYPE[args.dtype]
     packing = get_packing_type(fn_name)
+    is_varlen = True if "varlen" in fn_name else False
     if args.custom_config:
         # handle custom config case
         configs = [(args.b, args.hq, 
@@ -285,7 +286,7 @@ def run_benchmark(args, fn_name, fn, mode):
                     args.causal, 
                     args.dropout)]
     else:
-        configs = generate_benchmark_configs(packing)
+        configs = generate_benchmark_configs(is_varlen, packing)
 
     # check that we have at least one config
     assert len(configs) > 0
