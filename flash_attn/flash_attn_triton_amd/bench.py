@@ -1,6 +1,7 @@
 import argparse
 import torch
 import triton
+import time
 from flash_attn import flash_attn_func, flash_attn_qkvpacked_func, flash_attn_kvpacked_func, \
     flash_attn_varlen_func, flash_attn_varlen_qkvpacked_func, flash_attn_varlen_kvpacked_func, \
     flash_attn_with_kvcache
@@ -41,14 +42,14 @@ def generate_benchmark_configs(packing: Optional[Literal["kv", "qkv"]]):
     """
 
     # define all parameter options as lists
-    batch_sizes = [1, 4]
-    hq_values = [4, 64]
-    hk_values = [4, 64]
-    sq_values = [128, 512]
-    sk_values = [128, 512]
+    batch_sizes = [1, 64]
+    hq_values = [64, 128] # test mqa/gqa
+    hk_values = [8, 64]
+    sq_values = [4, 4096]
+    sk_values = [4096, 8192] # test kvcache
     d_head_values = [64, 128]
-    causal_values = [False, True]
-    dropout_values = [0.0, False]
+    causal_values = [False]
+    dropout_values = [0.0]
     
     # generate all possible configs
     configs = []
@@ -264,6 +265,9 @@ def run_benchmark(args, fn_name, fn, mode):
     """
     Runs the benchmark for the provided function based on the provided arguments.
     """
+    # start timing the benchmark
+    start_time = time.time()
+    
     # check mode
     if mode not in MODES:
         raise ValueError(f"{mode} not in {MODES}")
@@ -336,6 +340,10 @@ def run_benchmark(args, fn_name, fn, mode):
         return ms
 
     bench_function.run(save_path=".", print_data=True)
+    
+    # calculate and print elapsed time
+    elapsed_time = time.time() - start_time
+    print(f"Total time for benchmarking {fn_name} in {mode} mode: {elapsed_time:.2f} seconds")
 
 
 def parse_args():
@@ -377,6 +385,9 @@ def main():
     """
     Main function to run benchmarks.
     """
+    # start timing the entire benchmarking process
+    total_start_time = time.time()
+    
     args = parse_args()
 
     # Validate arguments
@@ -400,6 +411,10 @@ def main():
             raise ValueError(f"invalid benchmark function specified: {fn_name}")
         for mode in args.mode:
             run_benchmark(args, fn_name, FUNCTIONS[fn_name], mode)
+    
+    # print total time for all benchmarks
+    total_elapsed_time = time.time() - total_start_time
+    print(f"\nTotal time for all benchmarks: {total_elapsed_time:.2f} seconds")
 
 if __name__ == "__main__":
     main()
