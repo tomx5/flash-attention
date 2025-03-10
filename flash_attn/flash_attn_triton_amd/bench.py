@@ -2,9 +2,20 @@ import argparse
 import torch
 import triton
 import time
-from flash_attn import flash_attn_func, flash_attn_qkvpacked_func, flash_attn_kvpacked_func, \
-    flash_attn_varlen_func, flash_attn_varlen_qkvpacked_func, flash_attn_varlen_kvpacked_func, \
-    flash_attn_with_kvcache
+from flash_attn import (
+    flash_attn_func,
+    flash_attn_qkvpacked_func,
+    flash_attn_kvpacked_func,
+    flash_attn_varlen_func,
+    flash_attn_varlen_qkvpacked_func,
+    flash_attn_varlen_kvpacked_func,
+    flash_attn_with_kvcache,
+    flash_attn_fp8_func,
+    flash_attn_qkvpacked_fp8_func,
+    flash_attn_varlen_fp8_func,
+    flash_attn_varlen_qkvpacked_fp8_func,
+)
+
 from flash_attn.flash_attn_triton_amd.utils import input_helper
 from typing import Literal, Optional
 from functools import lru_cache
@@ -16,19 +27,23 @@ ARGS_TO_TORCH_DTYPE = {
 }
 
 FUNCTIONS = {
-    "flash_attn": flash_attn_func,
-    "flash_attn_kvpacked": flash_attn_kvpacked_func,
-    "flash_attn_qkvpacked": flash_attn_qkvpacked_func,
-    "flash_attn_varlen": flash_attn_varlen_func,
-    "flash_attn_varlen_kvpacked": flash_attn_varlen_kvpacked_func,
-    "flash_attn_varlen_qkvpacked": flash_attn_varlen_qkvpacked_func,
+    "flash_attn_func": flash_attn_func,
+    "flash_attn_kvpacked_func": flash_attn_kvpacked_func,
+    "flash_attn_qkvpacked_func": flash_attn_qkvpacked_func,
+    "flash_attn_varlen_func": flash_attn_varlen_func,
+    "flash_attn_varlen_kvpacked_func": flash_attn_varlen_kvpacked_func,
+    "flash_attn_varlen_qkvpacked_func": flash_attn_varlen_qkvpacked_func,
     "flash_attn_with_kvcache": flash_attn_with_kvcache,
+    "flash_attn_fp8_func": flash_attn_fp8_func,
+    "flash_attn_qkvpacked_fp8_func": flash_attn_qkvpacked_fp8_func,
+    "flash_attn_varlen_fp8_func": flash_attn_varlen_fp8_func,
+    "flash_attn_varlen_qkvpacked_fp8_func": flash_attn_varlen_qkvpacked_fp8_func,
 }
 
 MODES = {
         "fwd": "for forward pass only", 
         "full": "for forward and backward pass"
-         }
+        }
 
 def estimate_memory(config):
     batch, hq, hk, sq, sk, d_head, causal, dropout = config
@@ -109,7 +124,7 @@ def create_benchmark_fn(
     mode: Literal["fwd", "full"],
     device: Literal["cpu", "cuda"],
 ):
-    if fn_name == "flash_attn":
+    if fn_name == "flash_attn_func":
         q, k, v, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", device=device)
         def flash_attn_bench_fn():
             out, lse, S_dmask = flash_attn_func(
@@ -129,7 +144,7 @@ def create_benchmark_fn(
 
         return flash_attn_bench_fn
 
-    elif fn_name == "flash_attn_kvpacked":
+    elif fn_name == "flash_attn_kvpacked_func":
         q, kv, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", packing="kv", device=device)
         def flash_attn_kvpacked_bench_fn():
             out, lse, S_dmask = flash_attn_kvpacked_func(
@@ -147,7 +162,7 @@ def create_benchmark_fn(
                 dq, dkv = torch.autograd.grad(out, (q, kv), do)
 
         return flash_attn_kvpacked_bench_fn
-    elif fn_name == "flash_attn_qkvpacked":
+    elif fn_name == "flash_attn_qkvpacked_func":
         qkv, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", packing="qkv", device=device)
         def flash_attn_qkvpacked_bench_fn():
             out, lse, S_dmask = flash_attn_qkvpacked_func(
@@ -164,7 +179,7 @@ def create_benchmark_fn(
                 dqkv = torch.autograd.grad(out, (qkv), do)
 
         return flash_attn_qkvpacked_bench_fn   
-    elif fn_name == "flash_attn_varlen":
+    elif fn_name == "flash_attn_varlen_func":
         q_unpad, k_unpad, v_unpad, do_unpad, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", device=device)
         def flash_attn_varlen_bench_fn():
             out_unpad, lse, S_dmask = flash_attn_varlen_func(
@@ -186,7 +201,7 @@ def create_benchmark_fn(
             if mode == "full":
                 dq_unpad, dk_unpad, dv_unpad = torch.autograd.grad(out_unpad, (q_unpad, k_unpad, v_unpad), do_unpad)
         return flash_attn_varlen_bench_fn
-    elif fn_name == "flash_attn_varlen_kvpacked":
+    elif fn_name == "flash_attn_varlen_kvpacked_func":
         q_unpad, kv_unpad, do_unpad, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", packing="kv", device=device)
         def flash_attn_varlen_kvpacked_bench_fn():
             out_unpad, lse, S_dmask = flash_attn_varlen_kvpacked_func(
@@ -207,7 +222,7 @@ def create_benchmark_fn(
             if mode == "full":
                 dq_unpad, dkv_unpad = torch.autograd.grad(out_unpad, (q_unpad, kv_unpad), do_unpad)
         return flash_attn_varlen_kvpacked_bench_fn
-    elif fn_name == "flash_attn_varlen_qkvpacked":
+    elif fn_name == "flash_attn_varlen_qkvpacked_func":
         qkv_unpad, do_unpad, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", packing="qkv", device=device)
         def flash_attn_varlen_qkvpacked_bench_fn():
             out_unpad, lse, S_dmask = flash_attn_varlen_qkvpacked_func(
@@ -247,8 +262,85 @@ def create_benchmark_fn(
                 num_splits=0,
             )
         return flash_attn_with_kvcache_bench_fn
+    elif fn_name == "flash_attn_fp8_func":
+        q, k, v, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", device=device)
+        def flash_attn_f8_bench_fn():
+            out, lse, S_dmask = flash_attn_fp8_func(
+                q,
+                k,
+                v,
+                dropout_p,
+                causal=causal,
+                window_size=(-1, -1),
+                softcap=0.0,
+                alibi_slopes=None,
+                deterministic=False,
+                return_attn_probs=True,
+            )
+            if mode == "full":
+                dq, dk, dv = torch.autograd.grad(out, (q, k, v), do)
+
+        return flash_attn_f8_bench_fn
+    elif fn_name == "flash_attn_qkvpacked_fp8_func":
+        qkv, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", packing="qkv", device=device)
+        def flash_attn_qkvpacked_fp8_bench_fn():
+            out, lse, S_dmask = flash_attn_qkvpacked_fp8_func(
+                qkv,
+                dropout_p,
+                causal=causal,
+                window_size=(-1, -1),
+                softcap=0.0,
+                alibi_slopes=None,
+                deterministic=False,
+                return_attn_probs=True,
+            )
+            if mode == "full":
+                dqkv = torch.autograd.grad(out, (qkv), do)
+
+        return flash_attn_qkvpacked_fp8_bench_fn   
+    elif fn_name == "flash_attn_varlen_fp8_func":
+        q_unpad, k_unpad, v_unpad, do_unpad, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", device=device)
+        def flash_attn_varlen_fp8_bench_fn():
+            out_unpad, lse, S_dmask = flash_attn_varlen_fp8_func(
+                q_unpad,
+                k_unpad,
+                v_unpad,
+                metadata.cu_seqlens_q,
+                metadata.cu_seqlens_k,
+                metadata.max_seqlens_q,
+                metadata.max_seqlens_k,
+                dropout_p,
+                causal=causal,
+                window_size=(-1, -1),
+                softcap=0.0 ,
+                alibi_slopes=None,
+                deterministic=False,
+                return_attn_probs=True,
+            )
+            if mode == "full":
+                dq_unpad, dk_unpad, dv_unpad = torch.autograd.grad(out_unpad, (q_unpad, k_unpad, v_unpad), do_unpad)
+        return flash_attn_varlen_fp8_bench_fn
+    elif fn_name == "flash_attn_varlen_qkvpacked_fp8_func":
+        qkv_unpad, do_unpad, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", packing="qkv", device=device)
+        def flash_attn_varlen_qkvpacked_fp8_bench_fn():
+            out_unpad, lse, S_dmask = flash_attn_varlen_qkvpacked_fp8_func(
+                qkv_unpad,
+                metadata.cu_seqlens_q,
+                metadata.max_seqlens_q,
+                dropout_p,
+                causal=causal,
+                window_size=(-1, -1),
+                softcap=0.0 ,
+                alibi_slopes=None,
+                deterministic=False,
+                return_attn_probs=True,
+            )
+            if mode == "full":
+                dqkv_unpad = torch.autograd.grad(out_unpad, (qkv_unpad), do_unpad)
+        return flash_attn_varlen_qkvpacked_fp8_bench_fn
     else:
-        raise ValueError(f"{fn_name} is not supported for benchmarking")
+        valid_fn_names = ", ".join(FUNCTIONS.keys())
+        raise ValueError(f"{fn_name} should be one of the following functions. {valid_fn_names}")
 
 
 def get_packing_type(fn_name: str) -> Optional[Literal["kv", "qkv"]]:
@@ -273,9 +365,10 @@ def run_benchmark(args, fn_name, fn, mode):
         raise ValueError(f"{mode} not in {MODES}")
 
     # get configs
-    dtype = ARGS_TO_TORCH_DTYPE[args.dtype]
     packing = get_packing_type(fn_name)
     is_varlen = True if "varlen" in fn_name else False
+    is_fp8 = True if "fp8" in fn_name else False
+    dtype =  torch.float32 if is_fp8 else ARGS_TO_TORCH_DTYPE[args.dtype]
     if args.custom_config:
         # handle custom config case
         configs = [(args.b, args.hq, 
@@ -364,12 +457,13 @@ def parse_args():
     parser.add_argument("-causal", action="store_true", default=False)
     parser.add_argument("-dropout", type=float, default=0.0)
     parser.add_argument("-dtype", default="fp16")
+    valid_fn_names = ", ".join(FUNCTIONS.keys())
     parser.add_argument(
         "-benchmark_fn",
         type=str,
         nargs="*",
-        choices=FUNCTIONS.keys(),
-        help=f"Function(s) to benchmark: {FUNCTIONS.keys()}",
+        choices=list(FUNCTIONS.keys()),
+        help=f"Function(s) to benchmark: {valid_fn_names}",
     )
     mode_help_str = ". ".join(f'"{k}" {v.replace(" only", "")}' for k, v in MODES.items())
     parser.add_argument(
