@@ -365,12 +365,12 @@ def cast_nonvarlen_to_fp8(
 
     return x_fp8, descale_factor
 
-def cast_varlen_to_fp8(
+def cast_varlen_to_fp8_old_impl(
     x: torch.Tensor,
     fp8_dtype: torch.dtype,
     cu_seqlens,
-    clamp_val: float = 1e-9,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    clamp_val: float = 1e-9
+)-> tuple[torch.Tensor, torch.Tensor]:
     # validate tensor shape
     if len(x.shape) != 3:
         raise ValueError(f"tensor should have shape [total_seqlen, heads, dim], got {x.shape}")
@@ -408,6 +408,106 @@ def cast_varlen_to_fp8(
         x_fp8[start:end] = (x_slice * scale_reshape).to(fp8_dtype)
         
     return x_fp8, descale_factors
+
+@triton.jit
+def _cast_varlen_to_fp8_kernel(
+    X, X_fp8, Descale,
+    cu_seqlens, H,
+    stride_batch, stride_seq, stride_head, stride_dim,
+    stride_out_batch, stride_out_seq, stride_out_head, stride_out_dim,
+    stride_desc_batch, stride_desc_head,
+    FP8_CLAMP_VAL, 
+    FP8_MAX,
+    BLOCK: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    ACTUAL_HEAD_DIM: tl.constexpr
+    ):
+    # program ids
+    seq_id = tl.program_id(0)
+    b_id = tl.program_id(1)
+    h_id = tl.program_id(2)
+
+    # compute actual sequence lengths
+    seq_start = tl.load(cu_seqlens + b_id)
+    seq_end = tl.load(cu_seqlens + b_id + 1)
+    seqlen_len = seq_end - seq_start
+
+    # create mask for sequence
+    start_seq = seq_id * BLOCK
+    offs_dim = tl.arange(0, HEAD_DIM)
+    offs_seq = start_seq + tl.arange(0, BLOCK)
+    mask_seq = offs_seq[:, None] < seqlen_len
+    PADDED_HEAD: tl.constexpr = (ACTUAL_HEAD_DIM != HEAD_DIM)
+    if PADDED_HEAD:
+        mask_dim = offs_dim < ACTUAL_HEAD_DIM
+        mask_seq &= mask_dim[None, :]
+
+    # load block
+    adj_x = b_id * stride_batch + h_id * stride_head + seq_start * stride_seq + offs_seq[:, None] * stride_seq + offs_dim[None, :] * stride_dim
+    x = tl.load(X + adj_x, mask=mask_seq, other=0.0)
+
+    # cast to fp8
+    scale_x, descale_x = compute_fp8_scaling_factors(x, FP8_MAX)
+    x_fp8 = (x * scale_x).to(X_fp8.type.element_ty)
+
+    # store
+    adj_o = b_id * stride_out_batch + h_id * stride_out_head + seq_start * stride_out_seq + offs_seq[:, None] * stride_out_seq + offs_dim[None, :] * stride_out_dim
+    tl.store(X_fp8 + adj_o, x_fp8, mask=mask_seq)
+
+    adj_descale = b_id * stride_desc_batch + h_id * stride_desc_head
+    tl.store(Descale + adj_descale, descale_x)
+
+def cast_varlen_to_fp8(
+    x: torch.Tensor,
+    fp8_dtype: torch.dtype,
+    cu_seqlens,
+    max_seqlen,
+    clamp_val: float = 1e-9,
+) -> tuple[torch.Tensor, torch.Tensor]:
+
+    if True:
+        # extract dimensions
+        total_seqlen, num_heads, head_dim = x.shape
+        batch = cu_seqlens.shape[0] - 1
+        fp8_max = torch.finfo(fp8_dtype).max
+
+        # get closest power of 2 for head_dim
+        padded_head_dim = 1 << (head_dim - 1).bit_length()
+        padded_head_dim = max(padded_head_dim, 32)
+
+        # kernel params
+        x_fp8 = torch.zeros_like(x, dtype=fp8_dtype)
+        descale_factors = torch.zeros((batch, num_heads), device=x.device, dtype=torch.float32)
+        BLOCK = 128
+
+        # calculate strides
+        stride_batch, stride_seq, stride_head, stride_dim = get_stride_from_layout(x, "thd")
+        stride_out_batch, stride_out_seq, stride_out_head, stride_out_dim = get_stride_from_layout(x_fp8, "thd")
+        stride_desc_batch, stride_desc_head = descale_factors.stride()
+
+        grid = ((max_seqlen + BLOCK - 1) // BLOCK, batch, num_heads)
+        _cast_varlen_to_fp8_kernel[grid](
+            x, x_fp8, descale_factors,
+            cu_seqlens, num_heads,
+            stride_batch, stride_seq, stride_head, stride_dim,
+            stride_out_batch, stride_out_seq, stride_out_head, stride_out_dim,
+            stride_desc_batch, stride_desc_head,
+            clamp_val, fp8_max,
+            BLOCK=BLOCK,
+            HEAD_DIM=padded_head_dim, 
+            ACTUAL_HEAD_DIM=head_dim,
+        )
+
+        return x_fp8, descale_factors
+
+    else:
+        return cast_varlen_to_fp8_old_impl(
+            x,
+            fp8_dtype,
+            cu_seqlens,
+            clamp_val
+        )
+    
 
 def decast_fp8(
     x_fp8: torch.Tensor,
@@ -451,14 +551,17 @@ def cast_to_fp8(
     fp8_dtype: torch.dtype,
     layout: str,
     clamp_val: float = 1e-9,
-    cu_seqlens=None
+    cu_seqlens=None,
+    max_seqlen=None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if layout in ("bshd", "bhsd"):
         return cast_nonvarlen_to_fp8(x, fp8_dtype, layout, clamp_val=clamp_val)
     elif layout == "thd":
         if cu_seqlens is None:
             raise ValueError("cu_seqlens must be provided for varlen (thd) layout")
-        return cast_varlen_to_fp8(x, fp8_dtype, cu_seqlens, clamp_val=clamp_val)
+        if max_seqlen is None:
+            raise ValueError("max_seqlen must be provided for varlen (thd) layout")
+        return cast_varlen_to_fp8(x, fp8_dtype, cu_seqlens, max_seqlen, clamp_val=clamp_val)
     else:
         raise ValueError(f"Unknown layout: {layout}")
 # -------------------------------
@@ -483,24 +586,22 @@ def get_shape_from_layout(q, k, layout, cu_seqlens_q = None, cu_seqlens_k = None
 
     return batch_q, nheads_q, nheads_k, head_size_q, max_seqlen_q, max_seqlen_k
 
-def get_strides_from_layout(q, k, v, o, layout):
+def get_stride_from_layout(x, layout):
     if layout == 'thd':
-        q_strides = (0, q.stride(1), q.stride(0), q.stride(2))
-        k_strides = (0, k.stride(1), k.stride(0), k.stride(2))
-        v_strides = (0, v.stride(1), v.stride(0), v.stride(2))
-        o_strides = (0, o.stride(1), o.stride(0), o.stride(2))
+        strides = (0, x.stride(1), x.stride(0), x.stride(2))  
     elif layout == 'bhsd':
-        q_strides = (q.stride(0), q.stride(1), q.stride(2), q.stride(3))
-        k_strides = (k.stride(0), k.stride(1), k.stride(2), k.stride(3))
-        v_strides = (v.stride(0), v.stride(1), v.stride(2), v.stride(3))
-        o_strides = (o.stride(0), o.stride(1), o.stride(2), o.stride(3))
+        strides = (x.stride(0), x.stride(1), x.stride(2), x.stride(3))
     elif layout == 'bshd':
-        q_strides = (q.stride(0), q.stride(2), q.stride(1), q.stride(3))
-        k_strides = (k.stride(0), k.stride(2), k.stride(1), k.stride(3))
-        v_strides = (v.stride(0), v.stride(2), v.stride(1), v.stride(3))
-        o_strides = (o.stride(0), o.stride(2), o.stride(1), o.stride(3))
+        strides = (x.stride(0), x.stride(2), x.stride(1), x.stride(3))
     else:
         assert False, 'Got unsupported layout.'
+    return strides
+
+def get_strides_from_layout(q, k, v, o, layout):
+    q_strides = get_stride_from_layout(q, layout)
+    k_strides = get_stride_from_layout(k, layout)
+    v_strides = get_stride_from_layout(v, layout)
+    o_strides = get_stride_from_layout(o, layout)
     return q_strides, k_strides, v_strides, o_strides
 
 def get_padded_headsize(size):
