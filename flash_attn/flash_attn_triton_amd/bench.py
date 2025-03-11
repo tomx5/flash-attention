@@ -2,6 +2,7 @@ import argparse
 import torch
 import triton
 import time
+import pandas as pd
 from flash_attn import (
     flash_attn_func,
     flash_attn_qkvpacked_func,
@@ -412,9 +413,6 @@ def run_benchmark(args, fn_name, fn, mode):
     def bench_function(
         BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, CAUSAL, DROPOUT, dtype, mode, provider, device="cuda"
     ):
-        warmup = 25
-        rep = 100
-
         benchmark_fn = create_benchmark_fn(fn_name,
                                            BATCH, 
                                            HQ, 
@@ -430,15 +428,16 @@ def run_benchmark(args, fn_name, fn, mode):
                                            )
 
         # run the benchmark
-        ms = triton.testing.do_bench(benchmark_fn, warmup=warmup, rep=rep)
+        ms = triton.testing.do_bench(benchmark_fn, warmup=25, rep=100)
         return ms
 
-    bench_function.run(save_path=".", print_data=True)
+    df = bench_function.run(save_path=".", print_data=True, return_df=True)[0]
     
     # calculate and print elapsed time
     elapsed_time = time.time() - start_time
     print(f"Total time for benchmarking {fn_name} in {mode} mode: {elapsed_time:.2f} seconds")
 
+    return df
 
 def parse_args():
     """
@@ -501,15 +500,35 @@ def main():
         bench_fn_list = args.benchmark_fn
 
     # run benchmarks
+    combined_dfs = {}
     for fn_name in bench_fn_list:
         if fn_name not in FUNCTIONS:
             raise ValueError(f"invalid benchmark function specified: {fn_name}")
         for mode in args.mode:
-            run_benchmark(args, fn_name, FUNCTIONS[fn_name], mode)
+            df = run_benchmark(args, fn_name, FUNCTIONS[fn_name], mode)
+            config_cols = [col for col in df.columns if col != "Time (ms)"]
+            df = df.rename(columns={"Time (ms)": f"{fn_name}_{mode}_ms"})
+
+            # add to combined dataframe
+            if mode not in combined_dfs:
+                combined_dfs[mode] = df
+            else:
+                combined_dfs[mode] = combined_dfs[mode].merge(df, on=config_cols, how="outer")
     
     # print total time for all benchmarks
     total_elapsed_time = time.time() - total_start_time
     print(f"\nTotal time for all benchmarks: {total_elapsed_time:.2f} seconds")
+
+    # print and save combined results
+    for mode, combined_df in combined_dfs.items():
+        # save the combined results
+        combined_filename = f"combined_benchmark_results_{mode}.csv"
+        combined_df.to_csv(combined_filename, index=False)
+        
+        # print summary info
+        print(f"\nCombined benchmark results for {mode} mode:")
+        print(f"{combined_filename}")
+        print(combined_df)
 
 if __name__ == "__main__":
     main()
