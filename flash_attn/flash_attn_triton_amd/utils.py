@@ -465,7 +465,8 @@ def cast_varlen_to_fp8(
     clamp_val: float = 1e-9,
 ) -> tuple[torch.Tensor, torch.Tensor]:
 
-    if True:
+    NEW_CAST = os.environ.get('NEW_CAST', '0').lower() in ('1', 'true', 'yes')
+    if NEW_CAST:
         # extract dimensions
         total_seqlen, num_heads, head_dim = x.shape
         batch = cu_seqlens.shape[0] - 1
