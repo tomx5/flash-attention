@@ -387,9 +387,9 @@ def run_benchmark(args, fn_name, fn, mode):
 
     # print bench fn
     if fn_name in ["flash_attn_with_kvcache"] and mode == "full":
-        print(f"Benchmarking {fn_name} with {len(configs)} configs in {mode} mode. It does not have a backward pass so we will be running the forward pass only.")
-    else:
-        print(f"Benchmarking {fn_name} with {len(configs)} configs in {mode} mode ...")
+        mode = "fwd"
+        print(f"{fn_name} does not have a backward pass.", end=" ")
+    print(f"Benchmarking {fn_name} with {len(configs)} configs in {mode} mode ...")
 
     # Setup benchmark configurations
     bench_configs = [
