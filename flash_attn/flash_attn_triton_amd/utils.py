@@ -577,7 +577,7 @@ def cast_varlen_to_fp8(
     # kernel params
     x_fp8 = torch.zeros_like(x, dtype=fp8_dtype)
     descale_factors = torch.zeros((batch, num_heads), device=x.device, dtype=torch.float32)
-    BLOCK_SIZE = 64
+    BLOCK_SIZE = 128
 
     # calculate strides
     stride_batch, stride_head, stride_seq, stride_dim = get_stride_from_layout(x, "thd")
@@ -596,8 +596,15 @@ def cast_varlen_to_fp8(
         print("stride_desc_batch", stride_desc_batch)
         print("stride_desc_head", stride_desc_head)
 
-    NEW_CAST = os.environ.get('NEW_CAST', '0').lower() in ('1', 'true', 'yes')
-    if NEW_CAST:
+    OLD_CAST = os.environ.get('OLD_CAST', '0').lower() in ('1', 'true', 'yes')
+    if False:
+        return cast_varlen_to_fp8_old_impl(
+            x,
+            fp8_dtype,
+            cu_seqlens,
+            clamp_val
+        )
+    else:
         grid = (batch, num_heads)
         _cast_varlen_to_fp8_kernel_2d[grid](
             x, x_fp8, descale_factors,
@@ -610,31 +617,7 @@ def cast_varlen_to_fp8(
             HEAD_DIM=padded_head_dim, 
             ACTUAL_HEAD_DIM=head_dim,
         )
-        # exit()
         return x_fp8, descale_factors
-    elif False:
-        num_blocks = (max_seqlen + BLOCK_SIZE - 1) // BLOCK_SIZE
-        grid = (num_blocks, batch, num_heads)
-        _cast_varlen_to_fp8_kernel[grid](
-            x, x_fp8, descale_factors,
-            cu_seqlens, num_heads,
-            stride_batch, stride_seq, stride_head, stride_dim,
-            stride_out_batch, stride_out_seq, stride_out_head, stride_out_dim,
-            stride_desc_batch, stride_desc_head,
-            clamp_val, fp8_max,
-            BLOCK_SIZE=BLOCK_SIZE,
-            HEAD_DIM=padded_head_dim, 
-            ACTUAL_HEAD_DIM=head_dim,
-        )
-
-        return x_fp8, descale_factors
-    else:
-        return cast_varlen_to_fp8_old_impl(
-            x,
-            fp8_dtype,
-            cu_seqlens,
-            clamp_val
-        )
     
 
 def decast_fp8(

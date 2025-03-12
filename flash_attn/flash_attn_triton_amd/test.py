@@ -661,16 +661,16 @@ def fp8_assert_close(tensor_a, tensor_b, atol=ATOL_fp8, rtol=RTOL_fp8, max_diff_
         (2, 6, 6, 2048, 2048, 32),
     ],
 )
-@pytest.mark.parametrize('causal', [False])
-@pytest.mark.parametrize('dropout_p', [0.0])
-@pytest.mark.parametrize('layout', ["thd"])
-@pytest.mark.parametrize('packing', ['none'])
+@pytest.mark.parametrize('causal', [True, False])
+@pytest.mark.parametrize('dropout_p', [0.0, 0.1])
+@pytest.mark.parametrize('layout', ['bshd', "thd"])
+@pytest.mark.parametrize('packing', ['none', "qkv"])
 @pytest.mark.parametrize('DEBUG_INPUT', [False])
-# @pytest.mark.flaky(reruns=3, reason="Retry failures")
+@pytest.mark.flaky(reruns=3, reason="Retry failures")
 @pytest.mark.skipif(not arch_supports_fp8(), reason="fp8 not supported on this device")
 def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, packing, DEBUG_INPUT):
     torch.manual_seed(20)
-    test_backward = False
+    test_backward = True
     device = "cuda"
     window_size = (-1, -1)
     softcap = 0.0
@@ -727,8 +727,6 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
                 return_attn_probs=True,
             )
 
-        
-
         # ----------------------------------------------------------------
         # --- Reference ---
         # ----------------------------------------------------------------
@@ -760,7 +758,7 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
                 deterministic=deterministic,
                 return_attn_probs=True,
             )
-        
+
         # ----------------------------------------------------------------
         # --- Compare ---
         # ----------------------------------------------------------------
@@ -787,7 +785,6 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
                 print("S_dmask_fp8:", S_dmask_fp8, S_dmask_fp8.shape)
             fp8_assert_close(S_dmask_ref, S_dmask_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
 
-        
         if not test_backward:
             return
         
@@ -796,7 +793,6 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
 
         # ref backward pass
         dqkv_ref, = torch.autograd.grad(out_ref, (qkv_ref), do_ref)
-
 
         # compare backward gradients
         if DEBUG:
@@ -883,7 +879,7 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
                 deterministic=deterministic,
                 return_attn_probs=True,
             )
- 
+
         # ----------------------------------------------------------------
         # --- Compare ---
         # ----------------------------------------------------------------
@@ -940,7 +936,6 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
             print("dq_fp8:", dq_fp8, dq_fp8.shape)
         # torch.testing.assert_close(dq_ref, dq_fp8, atol=ATOL_fp8, rtol=RTOL_fp8, equal_nan=EQUAL_NAN)
         fp8_assert_close(dq_ref, dq_fp8, atol=ATOL_fp8, rtol=RTOL_fp8 )
-
 
 @pytest.mark.parametrize(
     "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD",
