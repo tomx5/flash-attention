@@ -522,6 +522,31 @@ def _cast_varlen_to_fp8_kernel_2d(
     desc_ptr = Descale + b_id * stride_desc_batch + h_id# * stride_desc_head
     tl.store(desc_ptr, descale)
 
+    # STEP 2: Apply scaling to the entire sequence and convert to FP8
+    for seq_offset in range(0, seqlen, BLOCK_SIZE):
+        # Create offsets for this block
+        block_size = tl.minimum(BLOCK_SIZE, seqlen - seq_offset)
+        offs_seq = seq_offset + tl.arange(0, BLOCK_SIZE)
+        offs_dim = tl.arange(0, HEAD_DIM)
+        
+        # Create mask for valid elements
+        mask_seq = offs_seq[:, None] < block_size
+        if ACTUAL_HEAD_DIM != HEAD_DIM:
+            mask_dim = offs_dim[None, :] < ACTUAL_HEAD_DIM
+            mask_seq = mask_seq & mask_dim
+        
+        # Load block - Using the fixed addressing
+        abs_seq_pos = seq_start + seq_offset
+        addr = b_id * stride_batch + h_id * stride_head + abs_seq_pos * stride_seq + offs_seq[:, None] * stride_seq + offs_dim[None, :] * stride_dim
+        x_block = tl.load(X + addr, mask=mask_seq, other=0.0)
+        
+        # Apply scale and convert to FP8
+        x_fp8_block = (x_block * scale).to(X_fp8.type.element_ty)
+        
+        # Store results
+        addr_out = b_id * stride_out_batch + h_id * stride_out_head + abs_seq_pos * stride_out_seq + offs_seq[:, None] * stride_out_seq + offs_dim[None, :] * stride_out_dim
+        tl.store(X_fp8 + addr_out, x_fp8_block, mask=mask_seq)
+
 def cast_varlen_to_fp8(
     x: torch.Tensor,
     fp8_dtype: torch.dtype,
@@ -529,21 +554,23 @@ def cast_varlen_to_fp8(
     max_seqlen,
     clamp_val: float = 1e-9,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    print()
-    print("cast_varlen_to_fp8")
-    print("x:", x, x.shape)
-    print("fp8_dtype:", fp8_dtype)
-    print("cu_seqlens:", cu_seqlens)
-    print("max_seqlen:", max_seqlen)
-    print("clamp_val:", clamp_val)
+    if DEBUG:
+        print()
+        print("cast_varlen_to_fp8")
+        print("x:", x, x.shape)
+        print("fp8_dtype:", fp8_dtype)
+        print("cu_seqlens:", cu_seqlens)
+        print("max_seqlen:", max_seqlen)
+        print("clamp_val:", clamp_val)
 
     # extract dimensions
     total_seqlen, num_heads, head_dim = x.shape
     batch = cu_seqlens.shape[0] - 1
     fp8_max = torch.finfo(fp8_dtype).max
-    print("batch:", batch)
-    print("num_heads:", num_heads)
-    print("head_dim:", head_dim)
+    if DEBUG:
+        print("batch:", batch)
+        print("num_heads:", num_heads)
+        print("head_dim:", head_dim)
 
     # get closest power of 2 for head_dim
     padded_head_dim = 1 << (head_dim - 1).bit_length()
@@ -555,14 +582,15 @@ def cast_varlen_to_fp8(
     BLOCK_SIZE = 64
 
     # calculate strides
-    stride_batch,  stride_head, stride_seq, stride_dim = get_stride_from_layout(x, "thd")
+    stride_batch, stride_head, stride_seq, stride_dim = get_stride_from_layout(x, "thd")
     stride_out_batch, stride_out_head, stride_out_seq,  stride_out_dim = get_stride_from_layout(x_fp8, "thd")
     stride_desc_batch, stride_desc_head = descale_factors.stride()
 
-    print("stride_batch", stride_batch)
-    print("stride_seq", stride_seq)
-    print("stride_head", stride_head)
-    print("stride_dim", stride_dim)
+    if DEBUG:
+        print("stride_batch", stride_batch)
+        print("stride_seq", stride_seq)
+        print("stride_head", stride_head)
+        print("stride_dim", stride_dim)
 
     NEW_CAST = os.environ.get('NEW_CAST', '0').lower() in ('1', 'true', 'yes')
     if NEW_CAST:
