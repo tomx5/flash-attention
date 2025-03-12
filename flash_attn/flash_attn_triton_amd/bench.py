@@ -17,6 +17,7 @@ from flash_attn import (
     flash_attn_varlen_qkvpacked_fp8_func,
 )
 
+from lean_attention import lean_attention
 from flash_attn.flash_attn_triton_amd.utils import input_helper
 from typing import Literal, Optional
 from functools import lru_cache
@@ -39,6 +40,7 @@ FUNCTIONS = {
     "flash_attn_qkvpacked_fp8_func": flash_attn_qkvpacked_fp8_func,
     "flash_attn_varlen_fp8_func": flash_attn_varlen_fp8_func,
     "flash_attn_varlen_qkvpacked_fp8_func": flash_attn_varlen_qkvpacked_fp8_func,
+    "lean_attention": lean_attention
 }
 
 MODES = {
@@ -339,6 +341,24 @@ def create_benchmark_fn(
             if mode == "full":
                 dqkv_unpad = torch.autograd.grad(out_unpad, (qkv_unpad), do_unpad)
         return flash_attn_varlen_qkvpacked_fp8_bench_fn
+    elif fn_name == "lean_attention":
+        q, k, v, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bhsd", device=device)
+        sm_scale = 1.3
+        total_sm = 608
+
+        # Allocate separate memory region to store partial result for host CTAs and non-host CTAs
+        Mp = torch.empty((total_sm, N_CTX_Q), device=q.device, dtype=torch.float32)
+        Lp = torch.empty((total_sm, N_CTX_Q), device=q.device, dtype=torch.float32)
+        Op = torch.empty((total_sm, N_CTX_Q, D_HEAD), device=q.device, dtype=torch.float32)
+
+        Mph = torch.empty((total_sm, N_CTX_Q), device=q.device, dtype=torch.float32)
+        Lph = torch.empty((total_sm, N_CTX_Q), device=q.device, dtype=torch.float32)
+        Oph = torch.empty((total_sm, N_CTX_Q, D_HEAD), device=q.device, dtype=torch.float32)
+        
+        def lean_attention_bench_fn():
+            lean_attention(q, k, v, sm_scale, Mp, Lp, Op, Mph, Lph, Oph, total_sm)
+
+        return lean_attention_bench_fn
     else:
         valid_fn_names = ", ".join(FUNCTIONS.keys())
         raise ValueError(f"{fn_name} should be one of the following functions. {valid_fn_names}")
@@ -386,8 +406,9 @@ def run_benchmark(args, fn_name, fn, mode):
     assert len(configs) > 0
 
     # print bench fn
-    if fn_name in ["flash_attn_with_kvcache"] and mode == "full":
-        print(f"Benchmarking {fn_name} with {len(configs)} configs in {mode} mode. It does not have a backward pass so we will be running the forward pass only.")
+    if fn_name in ["flash_attn_with_kvcache", "lean_attention"] and mode == "full":
+        mode = "fwd"
+        print(f"Benchmarking {fn_name} with {len(configs)} configs in {mode} mode. It does not have a backward pass.")
     else:
         print(f"Benchmarking {fn_name} with {len(configs)} configs in {mode} mode ...")
 
