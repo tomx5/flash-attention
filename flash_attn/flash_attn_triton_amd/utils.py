@@ -478,29 +478,29 @@ def _cast_varlen_to_fp8_kernel_2d(
     seq_start = tl.load(cu_seqlens + b_id)
     seq_end = tl.load(cu_seqlens + b_id + 1)
     seqlen = seq_end - seq_start
+    # print("seq_start:", seq_start)
+    # print("seqlen:", seqlen)
     
     # initialize max value tracker
     x_max_val = 0.0
     
     # STEP 1: Find max absolute value across the entire sequence
-    # Process sequence in blocks to stay within SRAM limits
-    for seq_offset in range(0, seqlen, BLOCK_SIZE):
-        # print("seq_offset:", seq_offset)
-        # Create offsets for this block
-        block_size = tl.minimum(BLOCK_SIZE, seqlen - seq_offset)
-        offs_seq = seq_offset + tl.arange(0, BLOCK_SIZE)
+    num_of_blocks = tl.cdiv(seqlen, BLOCK_SIZE)
+    for blk_idx in range(0, num_of_blocks):
+        # print("blk_idx:", blk_idx)
+        # offsets
+        offs_seq = blk_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         offs_dim = tl.arange(0, HEAD_DIM)
         
         # Create mask for valid elements
-        seq_mask = offs_seq[:, None] < block_size
+        mask_seq = offs_seq[:, None] < seqlen
         if ACTUAL_HEAD_DIM != HEAD_DIM:
-            dim_mask = offs_dim[None, :] < ACTUAL_HEAD_DIM
-            seq_mask = seq_mask & dim_mask
+            mask_dim = offs_dim[None, :] < ACTUAL_HEAD_DIM
+            mask_seq = mask_seq & mask_dim
 
         # Load block
-        abs_seq_pos = seq_start + seq_offset
-        adj_x =  b_id * stride_batch + h_id * stride_head + abs_seq_pos * stride_seq + offs_seq[:, None] * stride_seq + offs_dim[None, :] * stride_dim
-        x_block = tl.load(X + adj_x, mask=seq_mask, other=0.0)
+        adj_x =  b_id * stride_batch + h_id * stride_head + seq_start * stride_seq + offs_seq[:, None] * stride_seq + offs_dim[None, :] * stride_dim
+        x_block = tl.load(X + adj_x, mask=mask_seq, other=0.0)
         # print("x_block:", x_block)
         
         # Find max absolute value in this block
@@ -523,28 +523,26 @@ def _cast_varlen_to_fp8_kernel_2d(
     tl.store(desc_ptr, descale)
 
     # STEP 2: Apply scaling to the entire sequence and convert to FP8
-    for seq_offset in range(0, seqlen, BLOCK_SIZE):
-        # Create offsets for this block
-        block_size = tl.minimum(BLOCK_SIZE, seqlen - seq_offset)
-        offs_seq = seq_offset + tl.arange(0, BLOCK_SIZE)
+    for blk_idx in range(0, num_of_blocks):
+        # offsets
+        offs_seq = blk_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         offs_dim = tl.arange(0, HEAD_DIM)
         
         # Create mask for valid elements
-        mask_seq = offs_seq[:, None] < block_size
+        mask_seq = offs_seq[:, None] < seqlen
         if ACTUAL_HEAD_DIM != HEAD_DIM:
             mask_dim = offs_dim[None, :] < ACTUAL_HEAD_DIM
             mask_seq = mask_seq & mask_dim
         
         # Load block - Using the fixed addressing
-        abs_seq_pos = seq_start + seq_offset
-        addr = b_id * stride_batch + h_id * stride_head + abs_seq_pos * stride_seq + offs_seq[:, None] * stride_seq + offs_dim[None, :] * stride_dim
+        addr = b_id * stride_batch + h_id * stride_head + seq_start * stride_seq + offs_seq[:, None] * stride_seq + offs_dim[None, :] * stride_dim
         x_block = tl.load(X + addr, mask=mask_seq, other=0.0)
         
         # Apply scale and convert to FP8
         x_fp8_block = (x_block * scale).to(X_fp8.type.element_ty)
         
         # Store results
-        addr_out = b_id * stride_out_batch + h_id * stride_out_head + abs_seq_pos * stride_out_seq + offs_seq[:, None] * stride_out_seq + offs_dim[None, :] * stride_out_dim
+        addr_out = b_id * stride_out_batch + h_id * stride_out_head + seq_start * stride_out_seq + offs_seq[:, None] * stride_out_seq + offs_dim[None, :] * stride_out_dim
         tl.store(X_fp8 + addr_out, x_fp8_block, mask=mask_seq)
 
 def cast_varlen_to_fp8(
@@ -588,9 +586,15 @@ def cast_varlen_to_fp8(
 
     if DEBUG:
         print("stride_batch", stride_batch)
-        print("stride_seq", stride_seq)
         print("stride_head", stride_head)
+        print("stride_seq", stride_seq)
         print("stride_dim", stride_dim)
+        print("stride_out_batch", stride_out_batch)
+        print("stride_out_head", stride_out_head)
+        print("stride_out_seq", stride_out_seq)
+        print("stride_out_dim", stride_out_dim)
+        print("stride_desc_batch", stride_desc_batch)
+        print("stride_desc_head", stride_desc_head)
 
     NEW_CAST = os.environ.get('NEW_CAST', '0').lower() in ('1', 'true', 'yes')
     if NEW_CAST:
