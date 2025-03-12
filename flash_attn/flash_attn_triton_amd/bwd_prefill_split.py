@@ -1025,20 +1025,19 @@ def attention_prefill_backward_triton_split_impl(
     DEBUG_TRITON_DETAIL: bool = False,
 ):
     IS_FP8 = is_fp8(q)
+    FP8_RETURN_DESCALE: tl.constexpr = False
     if IS_FP8:
         FP8_MAX = torch.finfo(q.dtype).max
-        FP8_RETURN_DESCALE: tl.constexpr = False
 
         # assert that the main inputs are fp8
         assert is_fp8(do) and is_fp8(q) and is_fp8(k) and is_fp8(v), f"Non fp8 type found: do.dtype={do.dtype}, q.dtype={q.dtype}, k.dtype={k.dtype}, v.dtype={v.dtype}. All tensors must be fp8."
 
-        stride_descale_q_z = descale_q.stride(0)
-        stride_descale_k_z = descale_k.stride(0)
-        stride_descale_v_z = descale_v.stride(0)
-        stride_descale_do_z = descale_do.stride(0)
+        stride_descale_q_z = descale_q.stride(0) if descale_q is not None else None
+        stride_descale_k_z = descale_k.stride(0)  if descale_k is not None else None
+        stride_descale_v_z = descale_v.stride(0)  if descale_v is not None else None
+        stride_descale_do_z = descale_do.stride(0)  if descale_do is not None else None
     else:
         FP8_MAX = None
-        FP8_RETURN_DESCALE: tl.constexpr = False
         stride_descale_q_z = stride_descale_k_z = stride_descale_v_z = stride_descale_do_z = None
 
 

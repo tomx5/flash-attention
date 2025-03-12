@@ -418,7 +418,7 @@ def _cast_varlen_to_fp8_kernel(
     stride_desc_batch, stride_desc_head,
     FP8_CLAMP_VAL, 
     FP8_MAX,
-    BLOCK: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     ACTUAL_HEAD_DIM: tl.constexpr
     ):
@@ -433,9 +433,9 @@ def _cast_varlen_to_fp8_kernel(
     seqlen_len = seq_end - seq_start
 
     # create mask for sequence
-    start_seq = seq_id * BLOCK
+    start_seq = seq_id * BLOCK_SIZE
     offs_dim = tl.arange(0, HEAD_DIM)
-    offs_seq = start_seq + tl.arange(0, BLOCK)
+    offs_seq = start_seq + tl.arange(0, BLOCK_SIZE)
     mask_seq = offs_seq[:, None] < seqlen_len
     PADDED_HEAD: tl.constexpr = (ACTUAL_HEAD_DIM != HEAD_DIM)
     if PADDED_HEAD:
@@ -454,8 +454,73 @@ def _cast_varlen_to_fp8_kernel(
     adj_o = b_id * stride_out_batch + h_id * stride_out_head + seq_start * stride_out_seq + offs_seq[:, None] * stride_out_seq + offs_dim[None, :] * stride_out_dim
     tl.store(X_fp8 + adj_o, x_fp8, mask=mask_seq)
 
-    adj_descale = b_id * stride_desc_batch + h_id * stride_desc_head
+    adj_descale = b_id * stride_desc_batch + h_id
     tl.store(Descale + adj_descale, descale_x)
+
+@triton.jit
+def _cast_varlen_to_fp8_kernel_2d(
+    X, X_fp8, Descale,
+    cu_seqlens, H,
+    stride_batch, stride_seq, stride_head, stride_dim,
+    stride_out_batch, stride_out_seq, stride_out_head, stride_out_dim,
+    stride_desc_batch, stride_desc_head,
+    FP8_CLAMP_VAL, 
+    FP8_MAX,
+    BLOCK_SIZE: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    ACTUAL_HEAD_DIM: tl.constexpr
+    ):
+    # Process one (batch, head) pair per kernel
+    b_id = tl.program_id(0)
+    h_id = tl.program_id(1)
+    
+    # Get sequence bounds for this batch
+    seq_start = tl.load(cu_seqlens + b_id)
+    seq_end = tl.load(cu_seqlens + b_id + 1)
+    seqlen = seq_end - seq_start
+    
+    # initialize max value tracker
+    x_max_val = 0.0
+    
+    # STEP 1: Find max absolute value across the entire sequence
+    # Process sequence in blocks to stay within SRAM limits
+    for seq_offset in range(0, seqlen, BLOCK_SIZE):
+        # print("seq_offset:", seq_offset)
+        # Create offsets for this block
+        block_size = tl.minimum(BLOCK_SIZE, seqlen - seq_offset)
+        offs_seq = seq_offset + tl.arange(0, BLOCK_SIZE)
+        offs_dim = tl.arange(0, HEAD_DIM)
+        
+        # Create mask for valid elements
+        seq_mask = offs_seq[:, None] < block_size
+        if ACTUAL_HEAD_DIM != HEAD_DIM:
+            dim_mask = offs_dim[None, :] < ACTUAL_HEAD_DIM
+            seq_mask = seq_mask & dim_mask
+
+        # Load block
+        abs_seq_pos = seq_start + seq_offset
+        adj_x =  b_id * stride_batch + h_id * stride_head + abs_seq_pos * stride_seq + offs_seq[:, None] * stride_seq + offs_dim[None, :] * stride_dim
+        x_block = tl.load(X + adj_x, mask=seq_mask, other=0.0)
+        # print("x_block:", x_block)
+        
+        # Find max absolute value in this block
+        block_max = tl.max(tl.abs(x_block))
+        # print("block_max:", block_max)
+        
+        # Update overall max
+        x_max_val = tl.maximum(x_max_val, block_max)
+        # print("x_max_val:", x_max_val)
+    
+    # clamp to avoid division by zero issues
+    x_max_val = tl.maximum(x_max_val, FP8_CLAMP_VAL)
+    
+    # compute scale and descale factors for the entire sequence
+    scale = FP8_MAX / x_max_val
+    descale = x_max_val / FP8_MAX
+    
+    # store descale factor for this (batch, head) pair
+    desc_ptr = Descale + b_id * stride_desc_batch + h_id# * stride_desc_head
+    tl.store(desc_ptr, descale)
 
 def cast_varlen_to_fp8(
     x: torch.Tensor,
@@ -464,29 +529,60 @@ def cast_varlen_to_fp8(
     max_seqlen,
     clamp_val: float = 1e-9,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    print()
+    print("cast_varlen_to_fp8")
+    print("x:", x, x.shape)
+    print("fp8_dtype:", fp8_dtype)
+    print("cu_seqlens:", cu_seqlens)
+    print("max_seqlen:", max_seqlen)
+    print("clamp_val:", clamp_val)
+
+    # extract dimensions
+    total_seqlen, num_heads, head_dim = x.shape
+    batch = cu_seqlens.shape[0] - 1
+    fp8_max = torch.finfo(fp8_dtype).max
+    print("batch:", batch)
+    print("num_heads:", num_heads)
+    print("head_dim:", head_dim)
+
+    # get closest power of 2 for head_dim
+    padded_head_dim = 1 << (head_dim - 1).bit_length()
+    padded_head_dim = max(padded_head_dim, 32)
+
+    # kernel params
+    x_fp8 = torch.zeros_like(x, dtype=fp8_dtype)
+    descale_factors = torch.zeros((batch, num_heads), device=x.device, dtype=torch.float32)
+    BLOCK_SIZE = 64
+
+    # calculate strides
+    stride_batch,  stride_head, stride_seq, stride_dim = get_stride_from_layout(x, "thd")
+    stride_out_batch, stride_out_head, stride_out_seq,  stride_out_dim = get_stride_from_layout(x_fp8, "thd")
+    stride_desc_batch, stride_desc_head = descale_factors.stride()
+
+    print("stride_batch", stride_batch)
+    print("stride_seq", stride_seq)
+    print("stride_head", stride_head)
+    print("stride_dim", stride_dim)
 
     NEW_CAST = os.environ.get('NEW_CAST', '0').lower() in ('1', 'true', 'yes')
     if NEW_CAST:
-        # extract dimensions
-        total_seqlen, num_heads, head_dim = x.shape
-        batch = cu_seqlens.shape[0] - 1
-        fp8_max = torch.finfo(fp8_dtype).max
-
-        # get closest power of 2 for head_dim
-        padded_head_dim = 1 << (head_dim - 1).bit_length()
-        padded_head_dim = max(padded_head_dim, 32)
-
-        # kernel params
-        x_fp8 = torch.zeros_like(x, dtype=fp8_dtype)
-        descale_factors = torch.zeros((batch, num_heads), device=x.device, dtype=torch.float32)
-        BLOCK = 128
-
-        # calculate strides
-        stride_batch, stride_seq, stride_head, stride_dim = get_stride_from_layout(x, "thd")
-        stride_out_batch, stride_out_seq, stride_out_head, stride_out_dim = get_stride_from_layout(x_fp8, "thd")
-        stride_desc_batch, stride_desc_head = descale_factors.stride()
-
-        grid = ((max_seqlen + BLOCK - 1) // BLOCK, batch, num_heads)
+        grid = (batch, num_heads)
+        _cast_varlen_to_fp8_kernel_2d[grid](
+            x, x_fp8, descale_factors,
+            cu_seqlens, num_heads,
+            stride_batch, stride_seq, stride_head, stride_dim,
+            stride_out_batch, stride_out_seq, stride_out_head, stride_out_dim,
+            stride_desc_batch, stride_desc_head,
+            clamp_val, fp8_max,
+            BLOCK_SIZE=BLOCK_SIZE,
+            HEAD_DIM=padded_head_dim, 
+            ACTUAL_HEAD_DIM=head_dim,
+        )
+        # exit()
+        return x_fp8, descale_factors
+    elif False:
+        num_blocks = (max_seqlen + BLOCK_SIZE - 1) // BLOCK_SIZE
+        grid = (num_blocks, batch, num_heads)
         _cast_varlen_to_fp8_kernel[grid](
             x, x_fp8, descale_factors,
             cu_seqlens, num_heads,
@@ -494,13 +590,12 @@ def cast_varlen_to_fp8(
             stride_out_batch, stride_out_seq, stride_out_head, stride_out_dim,
             stride_desc_batch, stride_desc_head,
             clamp_val, fp8_max,
-            BLOCK=BLOCK,
+            BLOCK_SIZE=BLOCK_SIZE,
             HEAD_DIM=padded_head_dim, 
             ACTUAL_HEAD_DIM=head_dim,
         )
 
         return x_fp8, descale_factors
-
     else:
         return cast_varlen_to_fp8_old_impl(
             x,

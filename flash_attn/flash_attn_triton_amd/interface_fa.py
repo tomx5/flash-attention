@@ -46,9 +46,9 @@ def fwd(q: torch.Tensor,
         print("window_size_right:", window_size_right)
         print("softcap:", softcap)
         print("return_softmax:", return_softmax)
-        print("descale_q:", descale_q)
-        print("descale_k:", descale_k)
-        print("descale_v:", descale_v)
+        print("descale_q:", descale_q, descale_q.shape if descale_q is not None else None)
+        print("descale_k:", descale_k, descale_k.shape if descale_k is not None else None)
+        print("descale_v:", descale_v, descale_v.shape if descale_v is not None else None)
 
     if is_fp8(q):
         if out is None:
@@ -187,10 +187,10 @@ def bwd(
         print("deterministic:", deterministic)
         print("gen_:", gen_)
         print("rng_state:", rng_state)
-        print("descale_q:", descale_q)
-        print("descale_k:", descale_k)
-        print("descale_v:", descale_v)
-        print("descale_do:", descale_do)
+        print("descale_q:", descale_q, descale_q.shape if descale_q is not None  else None)
+        print("descale_k:", descale_k, descale_k.shape if descale_k is not None  else None)
+        print("descale_v:", descale_v, descale_v.shape if descale_v is not None  else None)
+        print("descale_do:", descale_do, descale_do.shape if descale_do is not None  else None)
 
     dq = torch.zeros_like(q) if dq is None else dq.zero_()
     dk = torch.zeros_like(k) if dk is None else dk.zero_()
@@ -315,9 +315,9 @@ def varlen_fwd(
         print("window_size_left:", window_size_left)
         print("window_size_right:", window_size_right)
         print("gen_:", gen_)
-        print("descale_q:", descale_q)
-        print("descale_k:", descale_k)
-        print("descale_v:", descale_v)
+        print("descale_q:", descale_q, descale_q.shape if descale_q is not None else None)
+        print("descale_k:", descale_k, descale_k.shape if descale_k is not None else None)
+        print("descale_v:", descale_v, descale_v.shape if descale_v is not None else None)
 
     if is_fp8(q):
         if out is None:
@@ -464,10 +464,10 @@ def varlen_bwd(
         print("deterministic:", deterministic)
         print("gen_:", gen_)
         print("rng_state:", rng_state)
-        print("descale_q:", descale_q)
-        print("descale_k:", descale_k)
-        print("descale_v:", descale_v)
-        print("descale_do:", descale_do)
+        print("descale_q:", descale_q, descale_q.shape if descale_q is not None  else None)
+        print("descale_k:", descale_k, descale_k.shape if descale_k is not None  else None)
+        print("descale_v:", descale_v, descale_v.shape if descale_v is not None  else None)
+        print("descale_do:", descale_do, descale_do.shape if descale_do else None)
 
     dq = torch.zeros_like(q) if dq is None else dq.zero_()
     dk = torch.zeros_like(k) if dk is None else dk.zero_()
