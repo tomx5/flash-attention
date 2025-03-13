@@ -4,8 +4,6 @@ on:
   workflow_dispatch:
   pull_request:
     branches: [main_perf]
-  push:
-    branches: [main_perf, rebase/main_perf]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -67,7 +65,7 @@ jobs:
         if: False
         run: |
           FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE" FLASH_ATTENTION_TRITON_AMD_REF=1 pytest tests/test_flash_attn_triton_amd.py
-        
+
       - name: Flash Attention Tests
         run: |
           FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE" pytest -n 16 tests/test_flash_attn_triton_amd.py
