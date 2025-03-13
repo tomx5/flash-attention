@@ -311,7 +311,7 @@ def main():
     num_epochs = 20
     learning_rate = 3e-4
     max_len = 128 # total length including both input and target tokens
-    is_varlen = True
+    is_varlen = False
     causal=True
     dropout=0.1
     
