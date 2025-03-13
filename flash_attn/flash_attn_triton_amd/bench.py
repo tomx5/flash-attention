@@ -447,31 +447,29 @@ def parse_args():
         prog="Benchmark FlashAttention",
         allow_abbrev=False,
     )
-    parser.add_argument("-b", type=int, default=0)
-    parser.add_argument("-hq", type=int, default=0)
-    parser.add_argument("-hk", type=int, default=0)
-    parser.add_argument("-sq", type=int, default=0)
-    parser.add_argument("-sk", type=int, default=0)
-    parser.add_argument("-d", type=int, default=0)
-    parser.add_argument("-causal", action="store_true", default=False)
-    parser.add_argument("-dropout", type=float, default=0.0)
-    parser.add_argument("-dtype", default="fp16")
-    valid_fn_names = ", ".join(FUNCTIONS.keys())
+    parser.add_argument("-b", type=int, default=0, help=f"Batch size")
+    parser.add_argument("-hq", type=int, default=0, help=f"Q Number of heads")
+    parser.add_argument("-hk", type=int, default=0, help=f"K and V Number of heads")
+    parser.add_argument("-sq", type=int, default=0, help=f"Q Sequence Length")
+    parser.add_argument("-sk", type=int, default=0, help=f"K and V Sequence Length")
+    parser.add_argument("-d", type=int, default=0, help=f"Head Dimension")
+    parser.add_argument("-causal", action="store_true", default=False, help=f"Causal")
+    parser.add_argument("-dropout", type=float, default=0.0, help=f"Dropout")
+    parser.add_argument("-dtype", choices=ARGS_TO_TORCH_DTYPE.keys(), default="fp16", help=f"Datatype")
     parser.add_argument(
         "-benchmark_fn",
         type=str,
         nargs="*",
-        choices=list(FUNCTIONS.keys()),
-        help=f"Function(s) to benchmark: {valid_fn_names}",
+        choices=FUNCTIONS.keys(),
+        help=f"Function(s) to benchmark",
     )
-    mode_help_str = ". ".join(f'"{k}" {v.replace(" only", "")}' for k, v in MODES.items())
     parser.add_argument(
         "-mode",
         type=str,
         nargs='*',
         default= ["full"],
         choices= MODES.keys(),
-        help=f"Mode(s) to run: {mode_help_str}",
+        help=f"Mode(s) to benchmark kernels. ",
     )
     return parser.parse_args()
 
