@@ -18,7 +18,7 @@ jobs:
       fail-fast: false # disables failing the entire job when one matrix entry fails
     timeout-minutes: 720 # self hosted runners can run jobs for longer than the default of 360 minutes
     container:
-      image: rocm/pytorch:rocm6.3.2_ubuntu22.04_py3.10_pytorch_release_2.4.0
+      image: rocm/pytorch:latest
       options: --device=/dev/kfd --device=/dev/dri --security-opt seccomp=unconfined --group-add video --user root
     steps:
       - name: Checkout
