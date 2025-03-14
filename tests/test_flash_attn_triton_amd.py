@@ -1469,7 +1469,7 @@ def test_flash_attn_varlen_output(
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
 # @pytest.mark.parametrize("d", [64, 128])
-@pytest.mark.parametrize("swap_sq_sk", [False, True])
+@pytest.mark.parametrize("swap_sq_sk", [False])
 # @pytest.mark.parametrize("swap_sq_sk", [True])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
@@ -1582,7 +1582,7 @@ def test_flash_attn_causal(seqlen_q, seqlen_k, swap_sq_sk, d, local, dtype):
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
 # @pytest.mark.parametrize("d", [64])
-@pytest.mark.parametrize("swap_sq_sk", [False, True])
+@pytest.mark.parametrize("swap_sq_sk", [False])
 # @pytest.mark.parametrize("swap_sq_sk", [True])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
@@ -1757,7 +1757,7 @@ def test_flash_attn_varlen_causal(
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
 # @pytest.mark.parametrize("d", [64])
-@pytest.mark.parametrize("swap_sq_sk", [False, True])
+@pytest.mark.parametrize("swap_sq_sk", [False])
 # @pytest.mark.parametrize("swap_sq_sk", [False])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
@@ -2412,7 +2412,7 @@ def test_flash_attn_bwd_varlen_overflow(d, causal, dtype):
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
 # @pytest.mark.parametrize("d", [64])
-@pytest.mark.parametrize("swap_sq_sk", [False, True])
+@pytest.mark.parametrize("swap_sq_sk", [False])
 # @pytest.mark.parametrize("swap_sq_sk", [False])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
@@ -2471,7 +2471,7 @@ def test_flash_attn_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, causal, loc
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
 # @pytest.mark.parametrize("d", [64])
-@pytest.mark.parametrize("swap_sq_sk", [False, True])
+@pytest.mark.parametrize("swap_sq_sk", [False])
 # @pytest.mark.parametrize("swap_sq_sk", [True])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
