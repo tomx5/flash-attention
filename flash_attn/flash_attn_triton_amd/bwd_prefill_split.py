@@ -2,7 +2,7 @@ import torch
 import triton # type: ignore
 import triton.language as tl # type: ignore
 from typing import Literal, Optional
-from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, compute_fp8_scaling_factors, get_shape_from_layout, \
+from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, compute_fp8_scaling_factors, get_shapes_from_layout, \
     get_strides_from_layout, create_dropout_mask, create_dropout_mask_varlen, is_fp8
 
 # NOTE: triton fails to import tl.constexprs so create them here for the file
@@ -1043,7 +1043,7 @@ def attention_prefill_backward_triton_split_impl(
 
     # get strides and shape
     batch, nheads_q, nheads_k, head_size, max_seqlen_q, max_seqlen_k = \
-        get_shape_from_layout(
+        get_shapes_from_layout(
             q, k, layout,
             cu_seqlens_q, cu_seqlens_k,
             max_seqlen_q, max_seqlen_k

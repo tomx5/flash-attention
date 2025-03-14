@@ -119,7 +119,7 @@ class MetaData():
     def check_args(self, q, k, v, o):
         assert q.dim() == k.dim() and q.dim() == v.dim()
 
-        batch, nheads_q, nheads_k, head_size, _, _ = get_shape_from_layout(q, k, self.layout, self.cu_seqlens_q, self.cu_seqlens_k, self.max_seqlens_q, self.max_seqlens_k)
+        batch, nheads_q, nheads_k, head_size, _, _ = get_shapes_from_layout(q, k, self.layout, self.cu_seqlens_q, self.cu_seqlens_k, self.max_seqlens_q, self.max_seqlens_k)
         if self.varlen:
             assert q.dim() == 3
             assert self.cu_seqlens_q is not None
@@ -461,7 +461,7 @@ def _cast_varlen_to_fp8_kernel(
 @triton.jit
 def _cast_varlen_to_fp8_kernel_2d(
     X, X_fp8, Descale,
-    cu_seqlens, H,
+    cu_seqlens, H, MAX_SEQLEN,
     stride_batch, stride_seq, stride_head, stride_dim,
     stride_out_batch, stride_out_seq, stride_out_head, stride_out_dim,
     stride_desc_batch, stride_desc_head,
@@ -469,18 +469,21 @@ def _cast_varlen_to_fp8_kernel_2d(
     FP8_MAX,
     BLOCK_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
-    ACTUAL_HEAD_DIM: tl.constexpr
+    ACTUAL_HEAD_DIM: tl.constexpr,
+    IS_VARLEN: tl.constexpr
     ):
     # Process one (batch, head) pair per kernel
     b_id = tl.program_id(0)
     h_id = tl.program_id(1)
     
     # Get sequence bounds for this batch
-    seq_start = tl.load(cu_seqlens + b_id)
-    seq_end = tl.load(cu_seqlens + b_id + 1)
-    seqlen = seq_end - seq_start
-    # print("seq_start:", seq_start)
-    # print("seqlen:", seqlen)
+    if IS_VARLEN:
+        seq_start = tl.load(cu_seqlens + b_id)
+        seq_end = tl.load(cu_seqlens + b_id + 1)
+        seqlen = seq_end - seq_start
+    else:
+        seq_start = 0
+        seqlen = MAX_SEQLEN  
     
     # initialize max value tracker
     x_max_val = 0.0
@@ -564,11 +567,12 @@ def cast_to_fp8_triton_impl(
         print("clamp_val:", clamp_val)
 
     # extract dimensions
-    total_seqlen, num_heads, head_dim = x.shape
-    batch = cu_seqlens.shape[0] - 1
+    batch, max_seqlen_final, num_heads, head_dim = get_shape_from_layout(x, layout, cu_seqlens, max_seqlen)
+    is_varlen = layout == "thd"
     fp8_max = torch.finfo(fp8_dtype).max
     if DEBUG:
         print("batch:", batch)
+        print("max_seqlen_final:", max_seqlen_final)
         print("num_heads:", num_heads)
         print("head_dim:", head_dim)
 
@@ -602,7 +606,7 @@ def cast_to_fp8_triton_impl(
     grid = (batch, num_heads)
     _cast_varlen_to_fp8_kernel_2d[grid](
         x, x_fp8, descale_factors,
-        cu_seqlens, num_heads,
+        cu_seqlens, num_heads, max_seqlen_final,
         stride_batch, stride_seq, stride_head, stride_dim,
         stride_out_batch, stride_out_seq, stride_out_head, stride_out_dim,
         stride_desc_batch, stride_desc_head,
@@ -610,6 +614,7 @@ def cast_to_fp8_triton_impl(
         BLOCK_SIZE=BLOCK_SIZE,
         HEAD_DIM=padded_head_dim, 
         ACTUAL_HEAD_DIM=head_dim,
+        IS_VARLEN=is_varlen
     )
     return x_fp8, descale_factors
 
@@ -651,13 +656,14 @@ def decast_fp8(
     else:
         raise ValueError(f"Unknown layout: {layout}")
 
+
 def cast_to_fp8(
     x: torch.Tensor,
     fp8_dtype: torch.dtype,
     layout: Literal["bshd", "thd"],
     clamp_val: float = 1e-9,
-    cu_seqlens=None,
-    max_seqlen=None
+    cu_seqlens: Optional[torch.Tensor] = None,
+    max_seqlen: Optional[int] = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     OLD_CAST = os.environ.get('OLD_CAST', '0').lower() in ('1', 'true', 'yes')
     if False:
@@ -676,24 +682,39 @@ def cast_to_fp8(
 # -------------------------------
 # Misc
 # -------------------------------
-def get_shape_from_layout(q, k, layout, cu_seqlens_q = None, cu_seqlens_k = None, max_seqlen_q=None, max_seqlen_k=None):
+def get_shape_from_layout(
+    x: torch.Tensor,
+    layout: Literal["bshd", "thd"],
+    cu_seqlens: Optional[torch.Tensor] = None,
+    max_seqlen: Optional[int] = None,
+) -> tuple[int, int, int, int]:
     if layout == 'bhsd':
-        batch_q, nheads_q, max_seqlen_q, head_size_q = q.shape
-        batch_k, nheads_k, max_seqlen_k, head_size_k = k.shape
+        batch, num_heads, max_seqlen_final, head_dim = x.shape
     elif layout == 'bshd':
-        batch_q, max_seqlen_q, nheads_q, head_size_q = q.shape
-        batch_k, max_seqlen_k, nheads_k, head_size_k = k.shape
+        batch, max_seqlen_final, num_heads, head_dim = x.shape
     elif  layout == 'thd':
-        batch_q, max_seqlen_q, nheads_q, head_size_q = len(cu_seqlens_q) - 1, max_seqlen_q, q.shape[1], q.shape[2]
-        batch_k, max_seqlen_k, nheads_k, head_size_k = len(cu_seqlens_k) - 1, max_seqlen_k, k.shape[1], k.shape[2]
+        total_seqlen, num_heads, head_dim = x.shape
+        if cu_seqlens is None:
+            raise ValueError("cu_seqlens must be provided for varlen (thd) layout") 
+        if max_seqlen is None:
+            raise ValueError("max_seqlen must be provided for varlen (thd) layout")
+        
+        batch, max_seqlen_final, num_heads, head_dim = len(cu_seqlens) - 1, max_seqlen, num_heads, head_dim
     else:
         assert False, "Got unsupported layout."
+
+    return batch, max_seqlen_final, num_heads, head_dim
+
+
+def get_shapes_from_layout(q, k, layout, cu_seqlens_q = None, cu_seqlens_k = None, max_seqlen_q=None, max_seqlen_k=None):
+    batch_q, seqlen_q, nheads_q, head_size_q = get_shape_from_layout(q, layout, cu_seqlens_q, max_seqlen_q)
+    batch_k, seqlen_k, nheads_k, head_size_k = get_shape_from_layout(k, layout, cu_seqlens_k, max_seqlen_k)
     
     # assert
     assert batch_q == batch_k
     assert head_size_q == head_size_k
 
-    return batch_q, nheads_q, nheads_k, head_size_q, max_seqlen_q, max_seqlen_k
+    return batch_q, nheads_q, nheads_k, head_size_q, seqlen_q, seqlen_k
 
 def get_stride_from_layout(x, layout):
     if layout == 'thd':

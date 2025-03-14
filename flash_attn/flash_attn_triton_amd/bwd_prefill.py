@@ -2,7 +2,7 @@ from typing import Literal, Optional
 import torch
 import triton
 import triton.language as tl
-from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, compute_fp8_scaling_factors, get_shape_from_layout, get_strides_from_layout, is_fp8, write_dropout_mask, create_dropout_mask
+from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, compute_fp8_scaling_factors, get_shapes_from_layout, get_strides_from_layout, is_fp8, write_dropout_mask, create_dropout_mask
 
 # TODO: move this into utils.py so it's shared among kernels
 # NOTE: triton fails to import tl.constexprs so create them here for the file
@@ -650,7 +650,7 @@ def attention_prefill_backward_triton_impl(
     softmax_lse = softmax_lse.contiguous()
 
     # get strides and shape
-    batch, nheads_q, nheads_k, head_size, max_seqlen_q, max_seqlen_k = get_shape_from_layout(q, k, layout, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
+    batch, nheads_q, nheads_k, head_size, max_seqlen_q, max_seqlen_k = get_shapes_from_layout(q, k, layout, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
     q_strides, k_strides, v_strides, o_strides = get_strides_from_layout(q, k, v, o, layout)
     stride_qz, stride_qh, stride_qm, stride_qk =  q_strides
     stride_kz, stride_kh, stride_kn, stride_kk = k_strides

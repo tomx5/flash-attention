@@ -6,7 +6,7 @@ from .bwd_prefill_split import attention_prefill_backward_triton_split_impl
 from .fwd_decode import attention_decode_forward_triton_impl
 from .fwd_ref import attention_forward_pytorch_ref_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
-from .utils import DEBUG_TRITON, DEBUG_TRITON_DETAIL, MetaData, get_shape_from_layout, DEBUG, USE_SINGLE_BWD_KERNEL, is_fp8
+from .utils import DEBUG_TRITON, DEBUG_TRITON_DETAIL, MetaData, get_shapes_from_layout, DEBUG, USE_SINGLE_BWD_KERNEL, is_fp8
 from einops import rearrange, repeat
 from flash_attn.layers.rotary import apply_rotary_emb
 from typing import Optional, Union
@@ -66,7 +66,7 @@ def fwd(q: torch.Tensor,
     if return_softmax:
         metadata.return_scores = True
 
-    batch, nheads_q, nheads_k, head_size, _, _ = get_shape_from_layout(q, k, metadata.layout)
+    batch, nheads_q, nheads_k, head_size, _, _ = get_shapes_from_layout(q, k, metadata.layout)
 
     if causal:
         metadata.need_causal()
@@ -174,9 +174,9 @@ def bwd(
         print("v:", v, v.shape)
         print("out:", out, out.shape)
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
-        print("dq:", dq, dq.shape)
-        print("dk:", dk, dk.shape)
-        print("dv:", dv, dv.shape)
+        print("dq:", dq, dq.shape if dq is not None else None)
+        print("dk:", dk, dk.shape if dk is not None else None)
+        print("dv:", dv, dv.shape if dv is not None else None)
         print("alibi_slopes:", alibi_slopes)
         print("dropout_p:", dropout_p)
         print("out:", out)
@@ -187,16 +187,17 @@ def bwd(
         print("deterministic:", deterministic)
         print("gen_:", gen_)
         print("rng_state:", rng_state)
-        print("descale_q:", descale_q, descale_q.shape if descale_q is not None  else None)
-        print("descale_k:", descale_k, descale_k.shape if descale_k is not None  else None)
-        print("descale_v:", descale_v, descale_v.shape if descale_v is not None  else None)
-        print("descale_do:", descale_do, descale_do.shape if descale_do is not None  else None)
+        print("descale_q:", descale_q, descale_q.shape if descale_q is not None else None)
+        print("descale_k:", descale_k, descale_k.shape if descale_k is not None else None)
+        print("descale_v:", descale_v, descale_v.shape if descale_v is not None else None)
+        print("descale_do:", descale_do, descale_do.shape if descale_do is not None else None)
 
     dq = torch.zeros_like(q) if dq is None else dq.zero_()
     dk = torch.zeros_like(k) if dk is None else dk.zero_()
     dv = torch.zeros_like(v) if dv is None else dv.zero_()
 
     if dropout_p > 0.0:
+        assert rng_state
         philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
     else:
         philox_seed, philox_offset = None, None
@@ -334,7 +335,7 @@ def varlen_fwd(
     metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k)  # set layout to "thd" and other metdata
 
     # get shapes
-    batch, nheads_q, nheads_k, head_size , seqlen_q, seqlen_k = get_shape_from_layout(q, k, metadata.layout, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
+    batch, nheads_q, nheads_k, head_size , seqlen_q, seqlen_k = get_shapes_from_layout(q, k, metadata.layout, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
 
     if causal:
         metadata.need_causal()
