@@ -557,15 +557,6 @@ def cast_to_fp8_triton_impl(
     max_seqlen,
     clamp_val: float = 1e-9,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if DEBUG:
-        print()
-        print("cast_varlen_to_fp8")
-        print("x:", x, x.shape)
-        print("fp8_dtype:", fp8_dtype)
-        print("cu_seqlens:", cu_seqlens)
-        print("max_seqlen:", max_seqlen)
-        print("clamp_val:", clamp_val)
-
     # extract dimensions
     batch, max_seqlen_final, num_heads, head_dim = get_shape_from_layout(x, layout, cu_seqlens, max_seqlen)
     is_varlen = layout == "thd"
@@ -586,8 +577,8 @@ def cast_to_fp8_triton_impl(
     BLOCK_SIZE = 128
 
     # calculate strides
-    stride_batch, stride_head, stride_seq, stride_dim = get_stride_from_layout(x, "thd")
-    stride_out_batch, stride_out_head, stride_out_seq,  stride_out_dim = get_stride_from_layout(x_fp8, "thd")
+    stride_batch, stride_head, stride_seq, stride_dim = get_stride_from_layout(x, layout)
+    stride_out_batch, stride_out_head, stride_out_seq, stride_out_dim = get_stride_from_layout(x_fp8, layout)
     stride_desc_batch, stride_desc_head = descale_factors.stride()
 
     if DEBUG:
@@ -602,7 +593,6 @@ def cast_to_fp8_triton_impl(
         print("stride_desc_batch", stride_desc_batch)
         print("stride_desc_head", stride_desc_head)
 
-    
     grid = (batch, num_heads)
     _cast_varlen_to_fp8_kernel_2d[grid](
         x, x_fp8, descale_factors,
@@ -665,20 +655,34 @@ def cast_to_fp8(
     cu_seqlens: Optional[torch.Tensor] = None,
     max_seqlen: Optional[int] = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if DEBUG:
+        print()
+        print("cast_to_fp8")
+        print("x:", x, x.shape)
+        print("fp8_dtype:", fp8_dtype)
+        print("cu_seqlens:", cu_seqlens)
+        print("max_seqlen:", max_seqlen)
+        print("clamp_val:", clamp_val)
+
     OLD_CAST = os.environ.get('OLD_CAST', '0').lower() in ('1', 'true', 'yes')
-    if False:
+    if OLD_CAST:
         if layout in ("bshd", "bhsd"):
-            return cast_nonvarlen_to_fp8(x, fp8_dtype, layout, clamp_val=clamp_val)
+            x_fp8, descale_factors = cast_nonvarlen_to_fp8(x, fp8_dtype, layout, clamp_val=clamp_val)
         elif layout == "thd":
             if cu_seqlens is None:
                 raise ValueError("cu_seqlens must be provided for varlen (thd) layout")
             if max_seqlen is None:
                 raise ValueError("max_seqlen must be provided for varlen (thd) layout")
-            return cast_varlen_to_fp8(x, fp8_dtype, cu_seqlens, max_seqlen, clamp_val=clamp_val)
+            x_fp8, descale_factors = cast_varlen_to_fp8(x, fp8_dtype, cu_seqlens, max_seqlen, clamp_val=clamp_val)
         else:
             raise ValueError(f"Unknown layout: {layout}")
     else:
-        return cast_to_fp8_triton_impl(x, fp8_dtype, layout, cu_seqlens, max_seqlen, clamp_val=clamp_val)
+        x_fp8, descale_factors = cast_to_fp8_triton_impl(x, fp8_dtype, layout, cu_seqlens, max_seqlen, clamp_val=clamp_val)
+    
+    if DEBUG:
+        print("x_fp8:", x_fp8, x_fp8.shape)
+        print("descale_factors:", descale_factors, descale_factors.shape)
+    return x_fp8, descale_factors
 # -------------------------------
 # Misc
 # -------------------------------
