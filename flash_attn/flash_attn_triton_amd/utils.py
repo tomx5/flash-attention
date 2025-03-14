@@ -289,6 +289,8 @@ def input_helper(
             kv = torch.stack([k, v], dim=1)
         elif layout == "bshd":
             kv = torch.stack([k, v], dim=2)
+        else:
+            raise ValueError(f"Unknown layout: {layout}")
 
         return q, kv, do, metadata
     elif packing == "qkv":
@@ -301,6 +303,8 @@ def input_helper(
             qkv = torch.stack([q, k, v], dim=1)
         elif layout == "bshd":
             qkv = torch.stack([q, k, v], dim=2)
+        else:
+            raise ValueError(f"Unknown layout: {layout}")
 
         return qkv, do, metadata
     else:

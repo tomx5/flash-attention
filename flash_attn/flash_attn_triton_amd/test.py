@@ -598,75 +598,75 @@ def fp8_assert_close(tensor_a, tensor_b, atol=ATOL_fp8, rtol=RTOL_fp8, max_diff_
     "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD",
     [
         # seqlen q == k
-        # (1, 1, 1, 1, 1, 1),
-        # (1, 1, 1, 2, 2, 2),  # small enough to debug
-        # (1, 1, 1, 4, 4, 16),
+        (1, 1, 1, 1, 1, 1),
+        (1, 1, 1, 2, 2, 2),  # small enough to debug
+        (1, 1, 1, 4, 4, 16),
         (1, 2, 2, 4, 4, 16),
-        # (2, 1, 1, 4, 4, 16),
-        # (2, 2, 2, 4, 4, 16),
-        # (1, 1, 1, 128, 128, 32),  # only one block
-        # (3, 3, 3, 128, 128, 64),
-        # (1, 1, 1, 127, 127, 32),  # only one block but with masking
-        # # (1, 1, 1, 129, 129, 1),  # two blocks with 2nd block small enough to debug # fails
-        # (1, 2, 2, 129, 129, 32),  # two blocks with 2nd block small enough to debug
-        # (1, 1, 1, 350, 350, 32),  # two blocks with 2nd block small enough to debug
-        # (1, 1, 1, 350, 350, 68),  # generic masking on q, k and head
-        # (4, 1, 1, 512, 512, 128), # batch > 1
-        # (4, 2, 2, 512, 512, 128),
-        # (4, 2, 2, 512, 512, 68),
-        # (4, 2, 2, 500, 500, 68),
-        # (2, 4, 4, 1024, 1024, 64),
-        # (4, 8, 8, 2048, 2048, 128),
-        # (4, 16, 16, 4096, 4096, 64),
-        # (2, 4, 4, 8192, 8192, 32),
-        # # seqlen q > k
-        # (1, 1, 1, 4, 2, 16),
-        # (1, 1, 1, 64, 32, 8),
-        # (1, 1, 1, 128, 64, 16),
-        # (1, 1, 1, 192, 128, 32),
-        # (1, 2, 2, 1024, 512, 68),
-        # (1, 4, 4, 729, 516, 68),
-        # (2, 4, 4, 2753, 1528, 68),  # a comprehensive seqlen_q > seqlen_k
-        # # seqlen q < k
-        # (1, 1, 1, 2, 4, 16),
-        # (1, 2, 2, 2, 4, 16),
-        # (1, 4, 1, 2, 4, 16),
-        # (1, 4, 2, 2, 4, 16),
-        # (2, 2, 2, 2, 128, 1),
-        # (2, 3, 3, 2, 128, 16),
-        # (1, 1, 1, 32, 64, 8),
-        # (1, 1, 1, 128, 192, 32),
-        # (4, 6, 6, 108, 256, 32),
-        # (3, 2, 2, 256, 512, 16),
-        # (2, 2, 2, 512, 1024, 68),
-        # (1, 1, 1, 200, 413, 32),
-        # (1, 1, 1, 782, 1546, 32),
-        # # gqa/mqa                   # mismatch issue on varlen
-        # (4, 8, 2, 500, 500, 68), 
-        # (4, 8, 2, 512, 512, 68),
-        # (4, 8, 2, 512, 512, 128),
-        # (4, 8, 2, 512, 1024, 68),
-        # (4, 8, 2, 1024, 512, 64),
-        # (16, 16, 4, 1528, 2753, 68),
-        # # fa configs
-        # (2, 4, 1, 113, 203, 64),
-        # (2, 4, 2, 128, 217, 64),
-        # (2, 6, 2, 113, 211, 128),
-        # (2, 6, 2, 108, 256, 128),
-        # (2, 6, 2, 256, 512, 64),
-        # (2, 6, 2, 512, 256, 64),
-        # (2, 6, 2, 1024, 1024, 32),
-        # (2, 6, 2, 1023, 1024, 32),
-        # (2, 6, 6, 1024, 1023, 32),
-        # (2, 6, 6, 2048, 2048, 32),
+        (2, 1, 1, 4, 4, 16),
+        (2, 2, 2, 4, 4, 16),
+        (1, 1, 1, 128, 128, 32),  # only one block
+        (3, 3, 3, 128, 128, 64),
+        (1, 1, 1, 127, 127, 32),  # only one block but with masking
+        # (1, 1, 1, 129, 129, 1),  # two blocks with 2nd block small enough to debug # fails
+        (1, 2, 2, 129, 129, 32),  # two blocks with 2nd block small enough to debug
+        (1, 1, 1, 350, 350, 32),  # two blocks with 2nd block small enough to debug
+        (1, 1, 1, 350, 350, 68),  # generic masking on q, k and head
+        (4, 1, 1, 512, 512, 128), # batch > 1
+        (4, 2, 2, 512, 512, 128),
+        (4, 2, 2, 512, 512, 68),
+        (4, 2, 2, 500, 500, 68),
+        (2, 4, 4, 1024, 1024, 64),
+        (4, 8, 8, 2048, 2048, 128),
+        (4, 16, 16, 4096, 4096, 64),
+        (2, 4, 4, 8192, 8192, 32),
+        # seqlen q > k
+        (1, 1, 1, 4, 2, 16),
+        (1, 1, 1, 64, 32, 8),
+        (1, 1, 1, 128, 64, 16),
+        (1, 1, 1, 192, 128, 32),
+        (1, 2, 2, 1024, 512, 68),
+        (1, 4, 4, 729, 516, 68),
+        (2, 4, 4, 2753, 1528, 68),  # a comprehensive seqlen_q > seqlen_k
+        # seqlen q < k
+        (1, 1, 1, 2, 4, 16),
+        (1, 2, 2, 2, 4, 16),
+        (1, 4, 1, 2, 4, 16),
+        (1, 4, 2, 2, 4, 16),
+        (2, 2, 2, 2, 128, 1),
+        (2, 3, 3, 2, 128, 16),
+        (1, 1, 1, 32, 64, 8),
+        (1, 1, 1, 128, 192, 32),
+        (4, 6, 6, 108, 256, 32),
+        (3, 2, 2, 256, 512, 16),
+        (2, 2, 2, 512, 1024, 68),
+        (1, 1, 1, 200, 413, 32),
+        (1, 1, 1, 782, 1546, 32),
+        # gqa/mqa                   # mismatch issue on varlen
+        (4, 8, 2, 500, 500, 68), 
+        (4, 8, 2, 512, 512, 68),
+        (4, 8, 2, 512, 512, 128),
+        (4, 8, 2, 512, 1024, 68),
+        (4, 8, 2, 1024, 512, 64),
+        (16, 16, 4, 1528, 2753, 68),
+        # fa configs
+        (2, 4, 1, 113, 203, 64),
+        (2, 4, 2, 128, 217, 64),
+        (2, 6, 2, 113, 211, 128),
+        (2, 6, 2, 108, 256, 128),
+        (2, 6, 2, 256, 512, 64),
+        (2, 6, 2, 512, 256, 64),
+        (2, 6, 2, 1024, 1024, 32),
+        (2, 6, 2, 1023, 1024, 32),
+        (2, 6, 6, 1024, 1023, 32),
+        (2, 6, 6, 2048, 2048, 32),
     ],
 )
-@pytest.mark.parametrize('causal', [False])
-@pytest.mark.parametrize('dropout_p', [0.0])
-@pytest.mark.parametrize('layout', ['bshd'])
-@pytest.mark.parametrize('packing', ['none'])
-@pytest.mark.parametrize('DEBUG_INPUT', [True])
-# @pytest.mark.flaky(reruns=3, reason="Retry failures")
+@pytest.mark.parametrize('causal', [False, True])
+@pytest.mark.parametrize('dropout_p', [0.0, 0.1])
+@pytest.mark.parametrize('layout', ['bshd', "thd"])
+@pytest.mark.parametrize('packing', [None, "qkv"])
+@pytest.mark.parametrize('DEBUG_INPUT', [False])
+@pytest.mark.flaky(reruns=3, reason="Retry failures")
 @pytest.mark.skipif(not arch_supports_fp8(), reason="fp8 not supported on this device")
 def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, packing, DEBUG_INPUT):
     torch.manual_seed(20)
@@ -686,15 +686,10 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
         if HQ != HK:
             pytest.skip("QKV packing requires HQ == HK")
 
-    # choose input helper based on layout
-    q, k, v, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, ref_dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
-
-    # pack input tensors
+    # test apis
     if packing == 'qkv':
-        if is_varlen:
-            qkv = torch.stack([q, k, v], dim=1)
-        else:
-            qkv = torch.stack([q, k, v], dim=2)
+        # generate inputs
+        qkv, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, ref_dtype, layout, packing=packing, device=device, DEBUG_INPUT=DEBUG_INPUT)
 
         # ----------------------------------------------------------------
         # --- FP8 ---
@@ -801,6 +796,9 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
         fp8_assert_close(dqkv_ref, dqkv_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
 
     else:
+        # generate inputs
+        q, k, v, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, ref_dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
+
         # ----------------------------------------------------------------
         # --- FP8 ---
         # ----------------------------------------------------------------
