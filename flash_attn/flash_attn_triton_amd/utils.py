@@ -344,7 +344,6 @@ def cast_nonvarlen_to_fp8(
         reduce_dims = (2, 3)  # seq_len and dim dimensions
     else:
         raise ValueError(f"Unknown layout: {layout}")
-  
 
     # Compute the absolute max along reduce_dims, clamped to avoid 0-scale
     x_abs_max = x.abs().amax(dim=reduce_dims)
@@ -365,49 +364,51 @@ def cast_nonvarlen_to_fp8(
 
     return x_fp8, descale_factor
 
-def cast_varlen_to_fp8_old_impl(
+def cast_varlen_to_fp8(
     x: torch.Tensor,
     fp8_dtype: torch.dtype,
     cu_seqlens,
-    clamp_val: float = 1e-9
-)-> tuple[torch.Tensor, torch.Tensor]:
+    max_seqlen,
+    clamp_val: float = 1e-9,
+) -> tuple[torch.Tensor, torch.Tensor]:
     # validate tensor shape
     if len(x.shape) != 3:
         raise ValueError(f"tensor should have shape [total_seqlen, heads, dim], got {x.shape}")
     num_heads = x.shape[1]
-    
+
     # Get batch size from cu_seqlens
     batch = cu_seqlens.shape[0] - 1
     fp8_max = torch.finfo(fp8_dtype).max
-    
+
     # Compute scale and descale factors per sequence
     x_fp8 = torch.zeros_like(x, dtype=fp8_dtype)
     descale_factors = torch.zeros((batch, num_heads), device=x.device, dtype=torch.float32)
-    
+
     for i in range(batch):
         start = cu_seqlens[i]
         end = cu_seqlens[i + 1]
         x_slice = x[start:end]  # Slice for current sequence
-        
+
         # Standard tensor (0: seq_len, 2: head_dim)
         x_abs_max = x_slice.abs().amax(dim=(0, 2))  # [heads]
-        
+
         # apply minimum clamping
         x_abs_max = torch.maximum(x_abs_max, x.new_tensor(clamp_val))
-        
+
         # compute scale and descale factors
         scale_i = fp8_max / x_abs_max
         descale_i = x_abs_max / fp8_max
-        
+
         # store descale factors
         descale_factors[i, :] = descale_i
-        
+
         scale_reshape = scale_i.reshape(1, num_heads, 1)
-        
+
         # scale and cast to FP8
         x_fp8[start:end] = (x_slice * scale_reshape).to(fp8_dtype)
-        
+
     return x_fp8, descale_factors
+
 
 @triton.jit
 def _cast_varlen_to_fp8_kernel(
@@ -545,9 +546,10 @@ def _cast_varlen_to_fp8_kernel_2d(
         addr_out = b_id * stride_out_batch + h_id * stride_out_head + seq_start * stride_out_seq + offs_seq[:, None] * stride_out_seq + offs_dim[None, :] * stride_out_dim
         tl.store(X_fp8 + addr_out, x_fp8_block, mask=mask_seq)
 
-def cast_varlen_to_fp8(
+def cast_to_fp8_triton_impl(
     x: torch.Tensor,
     fp8_dtype: torch.dtype,
+    layout: Literal["bshd", "thd"],
     cu_seqlens,
     max_seqlen,
     clamp_val: float = 1e-9,
@@ -596,29 +598,21 @@ def cast_varlen_to_fp8(
         print("stride_desc_batch", stride_desc_batch)
         print("stride_desc_head", stride_desc_head)
 
-    OLD_CAST = os.environ.get('OLD_CAST', '0').lower() in ('1', 'true', 'yes')
-    if False:
-        return cast_varlen_to_fp8_old_impl(
-            x,
-            fp8_dtype,
-            cu_seqlens,
-            clamp_val
-        )
-    else:
-        grid = (batch, num_heads)
-        _cast_varlen_to_fp8_kernel_2d[grid](
-            x, x_fp8, descale_factors,
-            cu_seqlens, num_heads,
-            stride_batch, stride_seq, stride_head, stride_dim,
-            stride_out_batch, stride_out_seq, stride_out_head, stride_out_dim,
-            stride_desc_batch, stride_desc_head,
-            clamp_val, fp8_max,
-            BLOCK_SIZE=BLOCK_SIZE,
-            HEAD_DIM=padded_head_dim, 
-            ACTUAL_HEAD_DIM=head_dim,
-        )
-        return x_fp8, descale_factors
     
+    grid = (batch, num_heads)
+    _cast_varlen_to_fp8_kernel_2d[grid](
+        x, x_fp8, descale_factors,
+        cu_seqlens, num_heads,
+        stride_batch, stride_seq, stride_head, stride_dim,
+        stride_out_batch, stride_out_seq, stride_out_head, stride_out_dim,
+        stride_desc_batch, stride_desc_head,
+        clamp_val, fp8_max,
+        BLOCK_SIZE=BLOCK_SIZE,
+        HEAD_DIM=padded_head_dim, 
+        ACTUAL_HEAD_DIM=head_dim,
+    )
+    return x_fp8, descale_factors
+
 
 def decast_fp8(
     x_fp8: torch.Tensor,
@@ -660,21 +654,25 @@ def decast_fp8(
 def cast_to_fp8(
     x: torch.Tensor,
     fp8_dtype: torch.dtype,
-    layout: str,
+    layout: Literal["bshd", "thd"],
     clamp_val: float = 1e-9,
     cu_seqlens=None,
     max_seqlen=None
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if layout in ("bshd", "bhsd"):
-        return cast_nonvarlen_to_fp8(x, fp8_dtype, layout, clamp_val=clamp_val)
-    elif layout == "thd":
-        if cu_seqlens is None:
-            raise ValueError("cu_seqlens must be provided for varlen (thd) layout")
-        if max_seqlen is None:
-            raise ValueError("max_seqlen must be provided for varlen (thd) layout")
-        return cast_varlen_to_fp8(x, fp8_dtype, cu_seqlens, max_seqlen, clamp_val=clamp_val)
+    OLD_CAST = os.environ.get('OLD_CAST', '0').lower() in ('1', 'true', 'yes')
+    if False:
+        if layout in ("bshd", "bhsd"):
+            return cast_nonvarlen_to_fp8(x, fp8_dtype, layout, clamp_val=clamp_val)
+        elif layout == "thd":
+            if cu_seqlens is None:
+                raise ValueError("cu_seqlens must be provided for varlen (thd) layout")
+            if max_seqlen is None:
+                raise ValueError("max_seqlen must be provided for varlen (thd) layout")
+            return cast_varlen_to_fp8(x, fp8_dtype, cu_seqlens, max_seqlen, clamp_val=clamp_val)
+        else:
+            raise ValueError(f"Unknown layout: {layout}")
     else:
-        raise ValueError(f"Unknown layout: {layout}")
+        return cast_to_fp8_triton_impl(x, fp8_dtype, layout, cu_seqlens, max_seqlen, clamp_val=clamp_val)
 # -------------------------------
 # Misc
 # -------------------------------
