@@ -68,4 +68,4 @@ jobs:
 
       - name: Flash Attention Tests
         run: |
-          FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE" pytest -n 16 tests/test_flash_attn_triton_amd.py
+          FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE" pytest -n 8 tests/test_flash_attn_triton_amd.py
