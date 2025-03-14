@@ -517,17 +517,18 @@ def main():
     total_elapsed_time = time.time() - total_start_time
     print(f"\nTotal time for all benchmarks: {total_elapsed_time:.2f} seconds")
 
-    # print and save combined results
-    combined_name = "-".join(bench_fn_list)
-    for mode, combined_df in combined_dfs.items():
-        # save the combined results
-        combined_filename = f"combined_{combined_name}_{mode}.csv"
-        combined_df.to_csv(combined_filename, index=False)
-        
-        # print summary info
-        print(f"\nCombined benchmark results for {mode} mode:")
-        print(f"{combined_filename}")
-        print(combined_df)
+    if len(bench_fn_list) > 1:
+        # print and save combined results
+        combined_name = "-".join(bench_fn_list)
+        for mode, combined_df in combined_dfs.items():
+            # save the combined results
+            combined_filename = f"combined_{combined_name}_{mode}.csv"
+            combined_df.to_csv(combined_filename, index=False)
+            
+            # print summary info
+            print(f"\nCombined benchmark results for {mode} mode:")
+            print(f"{combined_filename}")
+            print(combined_df)
 
 if __name__ == "__main__":
     main()
