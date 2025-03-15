@@ -197,7 +197,6 @@ def bwd(
     dv = torch.zeros_like(v) if dv is None else dv.zero_()
 
     if dropout_p > 0.0:
-        assert rng_state
         philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
     else:
         philox_seed, philox_offset = None, None
