@@ -18,7 +18,7 @@ from flash_attn import (
     flash_attn_varlen_qkvpacked_fp8_func
 )
 
-from .utils import DEBUG, DEBUG_TRITON, DEBUG_TRITON_DETAIL, input_helper, varlen_input_helper, get_arch, arch_supports_fp8
+from .utils import DEBUG, DEBUG_TRITON, DEBUG_TRITON_DETAIL, input_helper, get_arch, arch_supports_fp8
 from .fwd_ref import attention_forward_pytorch_ref_impl
 from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
@@ -86,7 +86,11 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     alibi_slopes = None
     device = "cuda"
 
-    q, k, v, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=DEBUG_INPUT)
+    q, k, v, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
+    if DEBUG_INPUT:
+        output_triton = torch.zeros_like(q).contiguous()
+    else:
+        output_triton = torch.empty_like(q)
 
     if DEBUG:
         if HQ // HK != 1:

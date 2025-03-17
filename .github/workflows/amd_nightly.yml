@@ -70,7 +70,7 @@ jobs:
 
       - name: Flash Attention Tests
         run: |
-          FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE" pytest -n 16 tests/test_flash_attn_triton_amd.py
+          FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE" pytest -n 8 tests/test_flash_attn_triton_amd.py
   
   Nightly-RDNA-AMD:
       runs-on: ${{ matrix.runner }}
@@ -110,4 +110,4 @@ jobs:
 
         - name: Flash Attention Tests
           run: |
-            FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE" pytest -n 16 tests/test_flash_attn_triton_amd.py::test_flash_attn_output
+            FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE" pytest -n 8 tests/test_flash_attn_triton_amd.py::test_flash_attn_output
