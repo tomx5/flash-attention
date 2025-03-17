@@ -28,16 +28,16 @@ ARGS_TO_TORCH_DTYPE = {
 }
 
 FUNCTIONS = {
-    "flash_attn_func": flash_attn_func,
-    "flash_attn_kvpacked_func": flash_attn_kvpacked_func,
-    "flash_attn_qkvpacked_func": flash_attn_qkvpacked_func,
-    "flash_attn_varlen_func": flash_attn_varlen_func,
-    "flash_attn_varlen_kvpacked_func": flash_attn_varlen_kvpacked_func,
-    "flash_attn_varlen_qkvpacked_func": flash_attn_varlen_qkvpacked_func,
     "flash_attn_with_kvcache": flash_attn_with_kvcache,
+    "flash_attn_func": flash_attn_func,
     "flash_attn_fp8_func": flash_attn_fp8_func,
-    "flash_attn_qkvpacked_fp8_func": flash_attn_qkvpacked_fp8_func,
+    "flash_attn_kvpacked_func": flash_attn_kvpacked_func,
+    "flash_attn_varlen_func": flash_attn_varlen_func,
     "flash_attn_varlen_fp8_func": flash_attn_varlen_fp8_func,
+    "flash_attn_varlen_kvpacked_func": flash_attn_varlen_kvpacked_func,
+    "flash_attn_qkvpacked_func": flash_attn_qkvpacked_func,
+    "flash_attn_qkvpacked_fp8_func": flash_attn_qkvpacked_fp8_func,
+    "flash_attn_varlen_qkvpacked_func": flash_attn_varlen_qkvpacked_func,
     "flash_attn_varlen_qkvpacked_fp8_func": flash_attn_varlen_qkvpacked_fp8_func,
 }
 
@@ -386,9 +386,6 @@ def run_benchmark(args, fn_name, fn, mode):
     assert len(configs) > 0
 
     # print bench fn
-    if fn_name in ["flash_attn_with_kvcache"] and mode == "full":
-        mode = "fwd"
-        print(f"{fn_name} does not have a backward pass.", end=" ")
     print(f"Benchmarking {fn_name} with {len(configs)} configs in {mode} mode ...")
 
     # Setup benchmark configurations
@@ -503,6 +500,11 @@ def main():
         if fn_name not in FUNCTIONS:
             raise ValueError(f"invalid benchmark function specified: {fn_name}")
         for mode in args.mode:
+            if fn_name in ["flash_attn_with_kvcache"] and mode == "full":
+                mode = "fwd"
+                print(f"{fn_name} does not have a backward pass.")
+            
+            # run bench mark
             df = run_benchmark(args, fn_name, FUNCTIONS[fn_name], mode)
             config_cols = [col for col in df.columns if col != "Time (ms)"]
             df = df.rename(columns={"Time (ms)": f"{fn_name}_{mode}_ms"})
@@ -519,10 +521,9 @@ def main():
 
     if len(bench_fn_list) > 1:
         # print and save combined results
-        combined_name = "-".join(bench_fn_list)
         for mode, combined_df in combined_dfs.items():
             # save the combined results
-            combined_filename = f"combined_{combined_name}_{mode}.csv"
+            combined_filename = f"combined_{mode}.csv"
             combined_df.to_csv(combined_filename, index=False)
             
             # print summary info
