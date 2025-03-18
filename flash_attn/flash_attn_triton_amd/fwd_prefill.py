@@ -69,7 +69,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                     OFFS_M: tl.constexpr, OFFS_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, MASK_STEPS: tl.constexpr,
                     ENABLE_DROPOUT: tl.constexpr, PADDED_HEAD: tl.constexpr,
                     ACTUAL_BLOCK_DMODEL: tl.constexpr, SM_SCALE: tl.constexpr, USE_EXP2: tl.constexpr,
-                    RETURN_SCORES: tl.constexpr):
+                    RETURN_SCORES: tl.constexpr, ACCUMULATOR_TYPE):
     if USE_EXP2:
         RCP_LN2: tl.constexpr = 1.4426950408889634
     
@@ -86,7 +86,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         if PRE_LOAD_V:
             # We can use the same offsets as k, just with dims transposed.
             v = load_fn(v_ptrs, k_offs_n, k_offs_k, actual_seqlen_k, ACTUAL_BLOCK_DMODEL)
-        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=ACCUMULATOR_TYPE)
         # We start from end of seqlen_k so only the first iteration would need
         # to be checked for padding if it is not a multiple of block_n
         # TODO: This can be optimized to only be true for the padded block.
@@ -274,7 +274,7 @@ autotune_configs, autotune_keys = get_autotune_configs()
 )
 @triton.jit
 def attn_fwd(Q, K, V, bias,
-             DESCALE_Q, DESCALE_K, DESCALE_V, stride_descale_q_z, stride_descale_k_z, stride_descale_v_z,
+             Descale_Q, Descale_K, Descale_V, Descale_O, stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_o_z,
              SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_qh, stride_qm, stride_qk,
              stride_kz, stride_kh, stride_kn, stride_kk, stride_vz, stride_vh, stride_vk, stride_vn,
              stride_oz, stride_oh, stride_om, stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az, stride_ah,
@@ -284,13 +284,19 @@ def attn_fwd(Q, K, V, bias,
              MAX_SEQLENS_K: tl.constexpr, VARLEN: tl.constexpr, IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr,
              BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, USE_BIAS: tl.constexpr,
              ENABLE_DROPOUT: tl.constexpr, RETURN_SCORES: tl.constexpr, USE_ALIBI: tl.constexpr, USE_EXP2: tl.constexpr, 
-             IS_FP8: tl.constexpr, FP8_MAX: tl.constexpr, FP8_RETURN_DESCALE: tl.constexpr):
+             IS_FP8: tl.constexpr, FP8_MAX: tl.constexpr, FP8_OUTPUT: tl.constexpr):
+    # set params
+    ACCUMULATOR_TYPE = tl.float32
+
+    # compute offsets
     start_m = tl.program_id(0)
     off_h_q = tl.program_id(1)
     off_z = tl.program_id(2)
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, BLOCK_DMODEL)
+
+    # handle varlen
     if VARLEN:
         cu_seqlens_q_start = tl.load(cu_seqlens_q + off_z)
         cu_seqlens_q_end = tl.load(cu_seqlens_q + off_z + 1)
@@ -340,9 +346,9 @@ def attn_fwd(Q, K, V, bias,
             # statically known.
             l_offset = LSE + off_z * stride_lse_z + off_h_q * stride_lse_h + cu_seqlens_q_start * stride_lse_m
             l_ptrs = l_offset + offs_m * stride_lse_m 
-            
-            l = tl.full([BLOCK_M], value=0.0, dtype=tl.float32)
-           
+
+            l = tl.full([BLOCK_M], value=0.0, dtype=ACCUMULATOR_TYPE)
+
             # mask_m_offsets = start_m + tl.arange(0, BLOCK_M)
             # lse_mask = mask_m_offsets < causal_start_idx
             # softmax_lse = tl.where(lse_mask, 0.0, softmax_lse)
@@ -404,9 +410,9 @@ def attn_fwd(Q, K, V, bias,
         dropout_mask_ptrs = None
         philox_ptrs = 0
     # initialize pointer to m and l
-    m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
-    l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
-    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
+    m_i = tl.full([BLOCK_M], float("-inf"), dtype=ACCUMULATOR_TYPE)
+    l_i = tl.full([BLOCK_M], 1.0, dtype=ACCUMULATOR_TYPE)
+    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=ACCUMULATOR_TYPE)
     # Q is loaded once at the beginning and shared by all N blocks.
     q_ptrs_mask = offs_m[:, None] < seqlen_q
     if PADDED_HEAD:
@@ -415,9 +421,9 @@ def attn_fwd(Q, K, V, bias,
 
     # Load scale factors if IS_FP8.
     if IS_FP8:
-        descale_q = tl.load(DESCALE_Q + off_z * stride_descale_q_z + off_h_q)
-        descale_k = tl.load(DESCALE_K + off_z * stride_descale_k_z + off_h_k)
-        descale_v = tl.load(DESCALE_V + off_z * stride_descale_v_z + off_h_k)
+        descale_q = tl.load(Descale_Q + off_z * stride_descale_q_z + off_h_q)
+        descale_k = tl.load(Descale_K + off_z * stride_descale_k_z + off_h_k)
+        descale_v = tl.load(Descale_V + off_z * stride_descale_v_z + off_h_k)
     else:
         descale_q, descale_k, descale_v = 1.0, 1.0, 1.0
 
@@ -451,7 +457,7 @@ def attn_fwd(Q, K, V, bias,
                                         False, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                                         # _, MASK_STEPS, ...
                                         PRE_LOAD_V, False, ENABLE_DROPOUT, PADDED_HEAD,
-                                        ACTUAL_BLOCK_DMODEL, SM_SCALE,  USE_EXP2=USE_EXP2, RETURN_SCORES=RETURN_SCORES)
+                                        ACTUAL_BLOCK_DMODEL, SM_SCALE,  USE_EXP2=USE_EXP2, RETURN_SCORES=RETURN_SCORES, ACCUMULATOR_TYPE=ACCUMULATOR_TYPE)
         block_min = block_max
         block_max = n_blocks * BLOCK_N
 
@@ -478,7 +484,7 @@ def attn_fwd(Q, K, V, bias,
                                         IS_CAUSAL, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                                         # _, MASK_STEPS, ...
                                         PRE_LOAD_V, True, ENABLE_DROPOUT, PADDED_HEAD,
-                                        ACTUAL_BLOCK_DMODEL, SM_SCALE, USE_EXP2=USE_EXP2, RETURN_SCORES=RETURN_SCORES)
+                                        ACTUAL_BLOCK_DMODEL, SM_SCALE, USE_EXP2=USE_EXP2, RETURN_SCORES=RETURN_SCORES, ACCUMULATOR_TYPE=ACCUMULATOR_TYPE)
     # epilogue
     # This helps the compiler do Newton Raphson on l_i vs on acc which is much larger.
     l_recip = 1 / l_i[:, None]
@@ -500,7 +506,7 @@ def attn_fwd(Q, K, V, bias,
             out_ptrs_mask = mask_m_offsets[:, None] >= out_mask_boundary[None, :]
             z = 0.0
             acc = tl.where(out_ptrs_mask, acc, z.to(acc.type.element_ty))
-    
+
     # write back LSE(Log Sum Exponents), the log of the normalization constant
     l_offset = LSE + off_z * stride_lse_z + off_h_q * stride_lse_h + cu_seqlens_q_start * stride_lse_m
     l_ptrs = l_offset + offs_m * stride_lse_m 
@@ -514,7 +520,7 @@ def attn_fwd(Q, K, V, bias,
         softmax_lse *= LN2
     else:
         softmax_lse = m_i + tl.math.log(l_i)
-    
+
     if IS_CAUSAL:
         # zero out nans caused by -infs when doing causal
         lse_mask = (start_m_idx + tl.arange(0, BLOCK_M)) < causal_start_idx
@@ -538,8 +544,13 @@ def attn_fwd(Q, K, V, bias,
         o_ptrs_mask = o_ptrs_mask & (offs_m[:, None] < seqlen_q)
     if PADDED_HEAD:
         o_ptrs_mask = o_ptrs_mask & (offs_d[None, :] < ACTUAL_BLOCK_DMODEL)
-    
-    tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
+
+    if FP8_OUTPUT:
+        scale_acc, descale_acc = compute_fp8_scaling_factors(acc, FP8_MAX)
+        tl.store(Descale_O + off_z * stride_descale_o_z + off_h_q, descale_acc)
+        tl.store(o_ptrs, (acc * scale_acc).to(Out.type.element_ty), mask=o_ptrs_mask)
+    else:
+        tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
 
 
 def attention_prefill_forward_triton_impl(
@@ -565,25 +576,32 @@ def attention_prefill_forward_triton_impl(
                                         return_softmax: bool,
                                         use_exp2: bool,
                                         # fp8
-                                        descale_q: Optional[torch.Tensor] = None,
-                                        descale_k: Optional[torch.Tensor] = None,
-                                        descale_v: Optional[torch.Tensor] = None,
+                                        descale_q: Optional[torch.Tensor],
+                                        descale_k: Optional[torch.Tensor],
+                                        descale_v: Optional[torch.Tensor],
+                                        descale_o: Optional[torch.Tensor],
 ):
     IS_FP8 = is_fp8(q)
-    FP8_RETURN_DESCALE: tl.constexpr = False
     if IS_FP8:
         FP8_MAX: tl.constexpr = torch.finfo(q.dtype).max
 
         assert is_fp8(q) and is_fp8(k) and is_fp8(v), f"Non fp8 type found: q.dtype={q.dtype}, k.dtype={k.dtype}, v.dtype={v.dtype}. All tensors must be fp8."
 
+        if is_fp8(o):
+            FP8_OUTPUT = True
+            assert descale_o is not None, f"descale_o is None. In fp8, you need to pass a tensor for descale_o along with a tensor for the output."
+        else:
+            FP8_OUTPUT = False
+
         # Get strides for the kernel
         stride_descale_q_z = descale_q.stride(0) if descale_q is not None else None
         stride_descale_k_z = descale_k.stride(0) if descale_k is not None else None
         stride_descale_v_z = descale_v.stride(0) if descale_v is not None else None
+        stride_descale_o_z = descale_o.stride(0) if descale_o is not None else None
     else:
-        descale_q = descale_k = descale_v = None
-        stride_descale_q_z = stride_descale_k_z = stride_descale_v_z = None
         FP8_MAX = None
+        descale_q = descale_k = descale_v = descale_o = None
+        stride_descale_q_z = stride_descale_k_z = stride_descale_v_z = stride_descale_o_z = None
 
     # check if varlen
     is_varlen = layout == "thd"
@@ -642,9 +660,8 @@ def attention_prefill_forward_triton_impl(
     else:
         alibi_strides = (0, 0)
 
-
     attn_fwd[grid](q, k, v, bias,
-                    descale_q, descale_k, descale_v, stride_descale_q_z, stride_descale_k_z, stride_descale_v_z,
+                    descale_q, descale_k, descale_v, descale_o, stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_o_z,
                     sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
                     *bias_strides, *alibi_strides, *scores_strides, stride_lse_z, stride_lse_h, stride_lse_m, cu_seqlens_q, cu_seqlens_k,
                     dropout_p=dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset, sd_mask=sd_mask, dropout_mask=dropout_mask, alibi_slopes=alibi_slopes, 
@@ -652,7 +669,6 @@ def attention_prefill_forward_triton_impl(
                     MAX_SEQLENS_K=max_seqlens_k, IS_CAUSAL=causal, VARLEN=is_varlen,
                     BLOCK_DMODEL=padded_d_model, USE_BIAS=False if bias is None else True,
                     USE_ALIBI=False if alibi_slopes is None else True, ENABLE_DROPOUT=dropout_p
-                    > 0.0, USE_EXP2=use_exp2, RETURN_SCORES=return_softmax, IS_FP8=IS_FP8, FP8_MAX=FP8_MAX, FP8_RETURN_DESCALE=FP8_RETURN_DESCALE)
-
+                    > 0.0, USE_EXP2=use_exp2, RETURN_SCORES=return_softmax, IS_FP8=IS_FP8, FP8_MAX=FP8_MAX, FP8_OUTPUT=FP8_OUTPUT)
 
     return softmax_lse, sd_mask if return_softmax else None 

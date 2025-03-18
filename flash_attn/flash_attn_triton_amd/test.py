@@ -127,7 +127,11 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
                                                 metadata.philox_seed, 
                                                 metadata.philox_offset, 
                                                 metadata.return_scores, 
-                                                metadata.use_exp2)
+                                                metadata.use_exp2,
+                                                None,
+                                                None,
+                                                None,
+                                                None)
 
     output_ref, softmax_lse_ref, sd_mask_ref  = attention_forward_pytorch_ref_impl(
         q.clone(), 
@@ -502,7 +506,7 @@ def test_op_prefill_bwd_split_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, 
     # =============================================== Triton ==============================================================
     o = output_ref.clone().contiguous()
     softmax_lse = softmax_lse_ref.clone().contiguous()
-    dq_triton, dk_triton, dv_triton, delta_triton, _, _ = attention_prefill_backward_triton_split_impl(
+    delta_triton = attention_prefill_backward_triton_split_impl(
         do,
         q,
         k,
@@ -524,8 +528,14 @@ def test_op_prefill_bwd_split_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, 
         metadata.philox_seed,
         metadata.philox_offset,
         use_exp2,
-        DEBUG_TRITON=DEBUG_TRITON,
-        DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
 
     # =============================================== Check ==============================================================

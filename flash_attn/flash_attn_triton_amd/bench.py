@@ -3,6 +3,7 @@ import torch
 import triton
 import time
 import pandas as pd
+from logging import warning
 from flash_attn import (
     flash_attn_func,
     flash_attn_qkvpacked_func,
@@ -21,12 +22,6 @@ from flash_attn.flash_attn_triton_amd.utils import input_helper
 from typing import Literal, Optional
 from functools import lru_cache
 
-ARGS_TO_TORCH_DTYPE = {
-    "fp16": torch.float16,
-    "bf16": torch.bfloat16,
-    "fp32": torch.float32,
-}
-
 FUNCTIONS = {
     "flash_attn_with_kvcache": flash_attn_with_kvcache,
     "flash_attn_func": flash_attn_func,
@@ -40,11 +35,6 @@ FUNCTIONS = {
     "flash_attn_varlen_qkvpacked_func": flash_attn_varlen_qkvpacked_func,
     "flash_attn_varlen_qkvpacked_fp8_func": flash_attn_varlen_qkvpacked_fp8_func,
 }
-
-MODES = {
-        "fwd": "for forward pass only", 
-        "full": "for forward and backward pass"
-        }
 
 def estimate_memory(config):
     batch, hq, hk, sq, sk, d_head, causal, dropout = config
@@ -264,7 +254,7 @@ def create_benchmark_fn(
             )
         return flash_attn_with_kvcache_bench_fn
     elif fn_name == "flash_attn_fp8_func":
-        q, k, v, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", device=device)
+        (q, descale_q), (k, descale_k), (v, descale_v), (do, descale_do), metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", device=device)
         def flash_attn_f8_bench_fn():
             out, lse, S_dmask = flash_attn_fp8_func(
                 q,
@@ -277,6 +267,10 @@ def create_benchmark_fn(
                 alibi_slopes=None,
                 deterministic=False,
                 return_attn_probs=True,
+                descale_q=descale_q,
+                descale_k=descale_k,
+                descale_v=descale_v,
+                descale_do=descale_do,
             )
             if mode == "full":
                 dq, dk, dv = torch.autograd.grad(out, (q, k, v), do)
@@ -300,7 +294,7 @@ def create_benchmark_fn(
 
         return flash_attn_qkvpacked_fp8_bench_fn   
     elif fn_name == "flash_attn_varlen_fp8_func":
-        q_unpad, k_unpad, v_unpad, do_unpad, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", device=device)
+        (q_unpad, descale_q), (k_unpad, descale_k), (v_unpad, descale_v), (do_unpad, descale_do), metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", device=device)
         def flash_attn_varlen_fp8_bench_fn():
             out_unpad, lse, S_dmask = flash_attn_varlen_fp8_func(
                 q_unpad,
@@ -354,39 +348,19 @@ def get_packing_type(fn_name: str) -> Optional[Literal["kv", "qkv"]]:
 
     return packing
 
-def run_benchmark(args, fn_name, fn, mode):
+def run_benchmark(fn_name, configs, dtype, mode):
     """
     Runs the benchmark for the provided function based on the provided arguments.
     """
     # start timing the benchmark
     start_time = time.time()
-    
-    # check mode
-    if mode not in MODES:
-        raise ValueError(f"{mode} not in {MODES}")
-
-    # get configs
-    packing = get_packing_type(fn_name)
-    is_varlen = True if "varlen" in fn_name else False
-    is_fp8 = True if "fp8" in fn_name else False
-    dtype =  torch.float32 if is_fp8 else ARGS_TO_TORCH_DTYPE[args.dtype]
-    if args.custom_config:
-        # handle custom config case
-        configs = [(args.b, args.hq, 
-                    args.hq if not args.hk else args.hk, 
-                    args.sq, 
-                    args.sq if not args.sk else args.sk, 
-                    args.d, 
-                    args.causal, 
-                    args.dropout)]
-    else:
-        configs = generate_benchmark_configs(is_varlen, packing)
 
     # check that we have at least one config
     assert len(configs) > 0
 
     # print bench fn
-    print(f"Benchmarking {fn_name} with {len(configs)} configs in {mode} mode ...")
+    mode_text = "forward" if mode == "fwd" else "forward and backward"
+    print(f"\nBenchmarking {fn_name} {mode_text} in {dtype} with {len(configs)} configs...")
 
     # Setup benchmark configurations
     bench_configs = [
@@ -398,7 +372,7 @@ def run_benchmark(args, fn_name, fn, mode):
             line_names=["Time (ms)"],
             styles=[("red", "-")],
             ylabel="ms",
-            plot_name=f"benchmark-{fn_name}-{dtype}-{mode}",
+            plot_name=f"benchmark-{fn_name}-{mode}-{dtype}",
             args={
                 "dtype": dtype,
                 "mode": mode
@@ -436,13 +410,21 @@ def run_benchmark(args, fn_name, fn, mode):
 
     return df
 
-def parse_args():
+def process_args():
     """
     Parses command-line arguments.
     """
+    # create parser
     parser = argparse.ArgumentParser(
         prog="Benchmark FlashAttention",
         allow_abbrev=False,
+    )
+    parser.add_argument(
+        "-benchmark_fn",
+        type=str,
+        nargs="*",
+        choices=FUNCTIONS.keys(),
+        help=f"Function(s) to benchmark",
     )
     parser.add_argument("-b", type=int, default=0, help=f"Batch size")
     parser.add_argument("-hq", type=int, default=0, help=f"Q Number of heads")
@@ -452,23 +434,54 @@ def parse_args():
     parser.add_argument("-d", type=int, default=0, help=f"Head Dimension")
     parser.add_argument("-causal", action="store_true", default=False, help=f"Causal")
     parser.add_argument("-dropout", type=float, default=0.0, help=f"Dropout")
-    parser.add_argument("-dtype", choices=ARGS_TO_TORCH_DTYPE.keys(), default="fp16", help=f"Datatype")
-    parser.add_argument(
-        "-benchmark_fn",
-        type=str,
-        nargs="*",
-        choices=FUNCTIONS.keys(),
-        help=f"Function(s) to benchmark",
-    )
-    parser.add_argument(
-        "-mode",
-        type=str,
-        nargs='*',
-        default= ["full"],
-        choices= MODES.keys(),
-        help=f"Mode(s) to benchmark kernels. ",
-    )
-    return parser.parse_args()
+
+    # parse args
+    args = parser.parse_args()
+
+    # determine the functions to benchmark
+    if args.benchmark_fn is None or len(args.benchmark_fn) == 0:
+        benchmark_fns = FUNCTIONS.keys()
+    else:
+        for fn_name in args.benchmark_fn:
+            if fn_name not in FUNCTIONS:
+                raise ValueError(f"invalid benchmark function specified: {fn_name}")
+        benchmark_fns = args.benchmark_fn
+
+    # get configs
+    configs = {}
+    for fn_name in benchmark_fns:
+        # get info about fn to benchmark
+        packing = get_packing_type(fn_name)
+        is_varlen = True if "varlen" in fn_name else False
+        is_fp8 = True if "fp8" in fn_name else False
+        supports_backward = False if fn_name in ["flash_attn_with_kvcache"] else True
+
+        # get dtype
+        dtype = torch.float8_e4m3fnuz if is_fp8 else torch.float16
+  
+        # check backward pass support
+        if supports_backward:
+            mode = "full"
+        else:
+            mode = "fwd"
+            warning(f"{fn_name} does not have a backward pass so benching forward pass only.")
+
+        if args.b or args.hq or args.hk or args.sq or args.sk or args.d:
+            assert args.b and args.hq and args.sq and args.d, (
+                "if custom config is specified, please provide at least batch, number of Q heads, Q sequence length, and head size."
+            )
+            configs[fn_name] = [(args.b, 
+                        args.hq, 
+                        args.hk if args.hk is not None else args.hq, 
+                        args.sq, 
+                        args.sk if args.sk is not None else args.sq,  
+                        args.d, 
+                        args.causal, 
+                        args.dropout)], dtype, mode
+        else:
+            configs[fn_name] = generate_benchmark_configs(is_varlen, packing), dtype, mode
+
+    return configs
 
 def main():
     """
@@ -476,60 +489,33 @@ def main():
     """
     # start timing the entire benchmarking process
     total_start_time = time.time()
-    
-    args = parse_args()
 
-    # Validate arguments
-    args.custom_config = False
-    if args.b or args.hq or args.hk or args.sq or args.sk or args.d:
-        args.custom_config = True
-        assert args.b and args.hq and args.sq and args.d, (
-            "if custom config is specified, please provide batch, number of Q heads, Q sequence length, and head size."
-        )
-    assert args.dtype in ARGS_TO_TORCH_DTYPE, "only fp16, bf16 and fp32 types currently supported."
-
-    # determine the functions to benchmark
-    if args.benchmark_fn is None or len(args.benchmark_fn) == 0:
-        bench_fn_list = FUNCTIONS.keys()
-    else:
-        bench_fn_list = args.benchmark_fn
+    # process args
+    bench_fn_configs = process_args()
+    has_multiple_fns = True if len(bench_fn_configs) > 1 else False
+    combined_df = None
 
     # run benchmarks
-    combined_dfs = {}
-    for fn_name in bench_fn_list:
-        if fn_name not in FUNCTIONS:
-            raise ValueError(f"invalid benchmark function specified: {fn_name}")
-        for mode in args.mode:
-            if fn_name in ["flash_attn_with_kvcache"] and mode == "full":
-                mode = "fwd"
-                print(f"{fn_name} does not have a backward pass.")
-            
-            # run bench mark
-            df = run_benchmark(args, fn_name, FUNCTIONS[fn_name], mode)
-            config_cols = [col for col in df.columns if col != "Time (ms)"]
-            df = df.rename(columns={"Time (ms)": f"{fn_name}_{mode}_ms"})
+    for fn_name, (configs, dtype, mode) in bench_fn_configs.items():
+        # run bench mark
+        df = run_benchmark(fn_name, configs, dtype, mode)
+        config_cols = [col for col in df.columns if col != "Time (ms)"]
+        df = df.rename(columns={"Time (ms)": f"{fn_name}_{mode}_{dtype}_ms"})
 
-            # add to combined dataframe
-            if mode not in combined_dfs:
-                combined_dfs[mode] = df
-            else:
-                combined_dfs[mode] = combined_dfs[mode].merge(df, on=config_cols, how="outer")
+        # merge into one final dataframe
+        if has_multiple_fns:
+            combined_df = df if combined_df is None else combined_df.merge(df, on=config_cols, how="outer") 
     
     # print total time for all benchmarks
     total_elapsed_time = time.time() - total_start_time
     print(f"\nTotal time for all benchmarks: {total_elapsed_time:.2f} seconds")
 
-    if len(bench_fn_list) > 1:
-        # print and save combined results
-        for mode, combined_df in combined_dfs.items():
-            # save the combined results
-            combined_filename = f"combined_{mode}.csv"
-            combined_df.to_csv(combined_filename, index=False)
-            
-            # print summary info
-            print(f"\nCombined benchmark results for {mode} mode:")
-            print(f"{combined_filename}")
-            print(combined_df)
+    # save combined data
+    if has_multiple_fns:
+        combined_filename = f"combined.csv"
+        combined_df.to_csv(combined_filename, index=False)
+        print(f"\nCombined data saved to {combined_filename}")
+        print(combined_df)
 
 if __name__ == "__main__":
     main()

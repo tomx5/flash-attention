@@ -28,7 +28,8 @@ def fwd(q: torch.Tensor,
         gen_: Optional[torch.Tensor] = None,
         descale_q: Optional[torch.Tensor] = None,
         descale_k: Optional[torch.Tensor] = None,
-        descale_v: Optional[torch.Tensor] = None
+        descale_v: Optional[torch.Tensor] = None,
+        descale_o: Optional[torch.Tensor] = None
     ):
 
     if DEBUG:
@@ -37,7 +38,7 @@ def fwd(q: torch.Tensor,
         print("q:", q, q.shape)
         print("k:", k, k.shape)
         print("v:", v, v.shape)
-        print("out:", out, out.shape if out else None)
+        print("out:", out, out.shape if out is not None else None)
         print("alibi_slopes:", alibi_slopes)
         print("dropout_p:", dropout_p)
         print("softmax_scale:", softmax_scale)
@@ -49,12 +50,12 @@ def fwd(q: torch.Tensor,
         print("descale_q:", descale_q, descale_q.shape if descale_q is not None else None)
         print("descale_k:", descale_k, descale_k.shape if descale_k is not None else None)
         print("descale_v:", descale_v, descale_v.shape if descale_v is not None else None)
+        print("descale_o:", descale_o, descale_o.shape if descale_o is not None else None)
 
     if is_fp8(q):
-        if out is None:
-            out = torch.zeros_like(q, dtype=torch.float32) 
-        else:
-            assert out.dtype == torch.float32, "fp8 output tensor should be fp32 type" # the high level api doesnot provide
+        assert out is not None, "fp8 output tensor should be passed in."
+        assert (descale_q is not None) and (descale_k is not None) and (descale_v is not None), f"For fp8, you need to pass descale factors for q, k and v"
+        assert descale_o is not None, f"descale_o is None. In fp8, you need to pass a tensor for descale_o along with a tensor for the output."
     else:
         out = torch.zeros_like(q) if out is None else out.zero_()
 
@@ -128,13 +129,16 @@ def fwd(q: torch.Tensor,
                                                 metadata.use_exp2,
                                                 descale_q,
                                                 descale_k,
-                                                descale_v)
+                                                descale_v,
+                                                descale_o)
         softmax_lse=softmax_lse_triton
         sd_mask=sd_mask_triton
 
     if DEBUG:
         print("flash_attn_triton_amd.py::fwd outputs")
         print("o:", out, out.shape)
+        if is_fp8(out):
+            print("descale_o:", descale_o, descale_o.shape if descale_o is not None else None)
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
         print("exp_scores:", sd_mask, sd_mask.shape if sd_mask is not None else None )
 
@@ -163,7 +167,11 @@ def bwd(
     descale_q: Optional[torch.Tensor] = None,
     descale_k: Optional[torch.Tensor] = None,
     descale_v: Optional[torch.Tensor] = None,
+    descale_o: Optional[torch.Tensor] = None,
     descale_do: Optional[torch.Tensor] = None,
+    descale_dq: Optional[torch.Tensor] = None,
+    descale_dk: Optional[torch.Tensor] = None,
+    descale_dv: Optional[torch.Tensor] = None,
 ):
     if DEBUG:
         print()
@@ -190,7 +198,11 @@ def bwd(
         print("descale_q:", descale_q, descale_q.shape if descale_q is not None else None)
         print("descale_k:", descale_k, descale_k.shape if descale_k is not None else None)
         print("descale_v:", descale_v, descale_v.shape if descale_v is not None else None)
+        print("descale_o:", descale_o, descale_o.shape if descale_o is not None else None)
         print("descale_do:", descale_do, descale_do.shape if descale_do is not None else None)
+        print("descale_dq:", descale_dq, descale_dq.shape if descale_dq is not None else None)
+        print("descale_dk:", descale_dk, descale_dk.shape if descale_dk is not None else None)
+        print("descale_dv:", descale_dv, descale_dv.shape if descale_dv is not None else None)
 
     dq = torch.zeros_like(q) if dq is None else dq.zero_()
     dk = torch.zeros_like(k) if dk is None else dk.zero_()
@@ -252,20 +264,28 @@ def bwd(
             philox_seed,
             philox_offset,
             False,
-            descale_q = descale_q,
-            descale_k = descale_k,
-            descale_v = descale_v,
-            descale_do = descale_do,
-            DEBUG_TRITON=DEBUG_TRITON,
-            DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
+            descale_q,
+            descale_k,
+            descale_v,
+            descale_o,
+            descale_do,
+            descale_dq,
+            descale_dk,
+            descale_dv,
         )
         delta = delta_triton
 
     if DEBUG:
         print("flash_attn_triton_amd.py::bwd outputs")
         print("dv:", dv, dv.shape)
+        if is_fp8(dv):
+            print("descale_dv:", descale_dv, descale_dv.shape if descale_dv is not None else None)
         print("dk:", dk, dk.shape)
+        if is_fp8(dk):
+            print("descale_dk:", descale_dk, descale_dk.shape if descale_dk is not None else None)
         print("dq:", dq, dq.shape)
+        if is_fp8(dq):
+            print("descale_dq:", descale_dq, descale_dq.shape if descale_dq is not None else None)
     return dq, dk, dv, delta
 
 def varlen_fwd(
@@ -317,10 +337,8 @@ def varlen_fwd(
         print("descale_v:", descale_v, descale_v.shape if descale_v is not None else None)
 
     if is_fp8(q):
-        if out is None:
-            out = torch.zeros_like(q, dtype=torch.float32) 
-        else:
-            assert out.dtype == torch.float32, "fp8 output tensor should be fp32 type" # the high level api doesnot provide
+        assert out is not None, "fp8 output tensor should be passed in."
+        assert (descale_q is not None) and (descale_k is not None) and (descale_v is not None), f"For fp8, you need to pass descale factors for q, k and v"
     else:
         out = torch.zeros_like(q) if out is None else out.zero_()
 
@@ -328,7 +346,7 @@ def varlen_fwd(
     metadata = MetaData(sm_scale=softmax_scale)
     if return_softmax:
         metadata.return_scores = True
-    metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k)  # set layout to "thd" and other metdata
+    metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)  # set layout to "thd" and other metdata
     assert metadata.layout is not None
 
     # get shapes
@@ -394,7 +412,8 @@ def varlen_fwd(
                                                             metadata.use_exp2,
                                                             descale_q,
                                                             descale_k,
-                                                            descale_v)
+                                                            descale_v,
+                                                            None)
         softmax_lse=softmax_lse_triton
         sd_mask=sd_mask_triton
 
@@ -526,12 +545,14 @@ def varlen_bwd(
             philox_seed,
             philox_offset,
             False,
-            descale_q = descale_q,
-            descale_k = descale_k,
-            descale_v = descale_v,
-            descale_do = descale_do,
-            DEBUG_TRITON=DEBUG_TRITON,
-            DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
+            descale_q,
+            descale_k,
+            descale_v,
+            None,
+            descale_do,
+            None,
+            None,
+            None,
         )
         delta = delta_triton
 
