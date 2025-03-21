@@ -600,6 +600,7 @@ def attention_prefill_forward_triton_impl(
         stride_descale_o_z = descale_o.stride(0) if descale_o is not None else None
     else:
         FP8_MAX = None
+        FP8_OUTPUT = False
         descale_q = descale_k = descale_v = descale_o = None
         stride_descale_q_z = stride_descale_k_z = stride_descale_v_z = stride_descale_o_z = None
 

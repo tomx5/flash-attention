@@ -41,11 +41,71 @@ def estimate_memory(config):
     memory_estimate = batch * (hq * sq + hk * sk) * d_head * 4  # bytes
     return memory_estimate
 
-@lru_cache(maxsize=100)
-def generate_benchmark_configs(is_varlen: bool, packing: Optional[Literal["kv", "qkv"]]):
+@lru_cache()
+def get_fn_params(fn_name):
+    # get params for fn
+    packing = get_packing_type(fn_name)
+    is_varlen = True if "varlen" in fn_name else False
+    is_fp8 = True if "fp8" in fn_name else False
+    dtype = torch.float8_e4m3fnuz if is_fp8 else torch.float16
+    supports_backward = False if fn_name in ["flash_attn_with_kvcache"] else True
+    # mode = "full" if supports_backward else "fwd"
+    mode = "fwd"
+    device = "cuda"
+
+    # check backward pass support
+    if not supports_backward:
+        warning(f"{fn_name} does not have a backward pass so benching forward pass only.")
+
+    return is_varlen, is_fp8, packing, dtype, mode, device
+
+def generate_fn_inputs(
+    fn_name: str,
+    BATCH: int,
+    HQ: int,
+    HK: int,
+    N_CTX_Q: int,
+    N_CTX_K: int,
+    D_HEAD: int,
+    causal: bool,
+    dropout_p: float,
+    dtype: torch.dtype,
+    device: Literal["cpu", "cuda"]
+    ):
+    if fn_name == "flash_attn_func":
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", device=device)
+    elif fn_name == "flash_attn_kvpacked_func":
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", packing="kv", device=device)
+    elif fn_name == "flash_attn_qkvpacked_func":
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", packing="qkv", device=device)
+    elif fn_name == "flash_attn_varlen_func":
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", device=device) 
+    elif fn_name == "flash_attn_varlen_kvpacked_func":
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", packing="kv", device=device)
+    elif fn_name == "flash_attn_varlen_qkvpacked_func":
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", packing="qkv", device=device)
+    elif fn_name == "flash_attn_with_kvcache":
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", device=device)
+    elif fn_name == "flash_attn_fp8_func":
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", device=device)
+    elif fn_name == "flash_attn_qkvpacked_fp8_func":
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", packing="qkv", device=device)
+    elif fn_name == "flash_attn_varlen_fp8_func":
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", device=device)
+    elif fn_name == "flash_attn_varlen_qkvpacked_fp8_func":
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", packing="qkv", device=device)
+    else:
+        valid_fn_names = ", ".join(FUNCTIONS.keys())
+        raise ValueError(f"{fn_name} should be one of the following functions. {valid_fn_names}")
+
+@lru_cache()
+def generate_benchmark_configs(fn_name):
     """
     generates a small number of configs that cover the parameter space well
     """
+
+    # get fn params
+    is_varlen, is_fp8, packing, dtype, mode, device =  get_fn_params(fn_name)
 
     # define all parameter options as lists
     batch_sizes = [1, 64]
@@ -65,8 +125,8 @@ def generate_benchmark_configs(is_varlen: bool, packing: Optional[Literal["kv", 
     causal_values = [False]
     dropout_values = [0.0]
     
-    # generate all possible configs
-    configs = []
+    # generate all fn_inputs
+    fn_inputs = {}
     
     # one big loop to generate configs
     for batch in batch_sizes:
@@ -78,10 +138,10 @@ def generate_benchmark_configs(is_varlen: bool, packing: Optional[Literal["kv", 
                             for causal in causal_values:
                                 for dropout in dropout_values:
                                     # filter configs
-                                    config = (batch, hq, hk, sq, sk, d_head, causal, dropout)
+                                    fn_config = (batch, hq, hk, sq, sk, d_head, causal, dropout)
 
                                     # skip if memory usage would be too high
-                                    if estimate_memory(config) > 8 * 1024 * 1024 * 1024:  # 8 GB limit
+                                    if estimate_memory(fn_config) > 8 * 1024 * 1024 * 1024:  # 8 GB limit
                                         continue
 
                                     # we need hq to be a multiple of hk
@@ -91,32 +151,27 @@ def generate_benchmark_configs(is_varlen: bool, packing: Optional[Literal["kv", 
                                     # for qkvpacked functions, q and k must have same dimensions
                                     if packing == "qkv" and (sq != sk or hq != hk):
                                         continue
-                                        
-                                    # add config
-                                    configs.append(config)
+                                    
+                                    # generate fn inputs based on config
+                                    fn_inputs[fn_config] = generate_fn_inputs(fn_name, *fn_config, dtype, device)
     
     # sort by memory usage (smallest to largest) for better visualization
-    configs.sort(key=estimate_memory)
+    # fn_configs.sort(key=estimate_memory) # keep order for now
     
-    return configs
+    return fn_inputs
 
 
 def create_benchmark_fn(
-    fn_name: str,
-    BATCH: int,
-    HQ: int,
-    HK: int,
-    N_CTX_Q: int,
-    N_CTX_K: int,
-    D_HEAD: int,
-    causal: bool,
-    dropout_p: float,
-    dtype: torch.dtype,
-    mode: Literal["fwd", "full"],
-    device: Literal["cpu", "cuda"],
+    fn_name,
+    inputs,
+    causal,
+    dropout_p,
+    mode
 ):
+    
+
     if fn_name == "flash_attn_func":
-        q, k, v, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", device=device)
+        q, k, v, do, metadata = inputs
         def flash_attn_bench_fn():
             out, lse, S_dmask = flash_attn_func(
                 q,
@@ -136,7 +191,7 @@ def create_benchmark_fn(
         return flash_attn_bench_fn
 
     elif fn_name == "flash_attn_kvpacked_func":
-        q, kv, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", packing="kv", device=device)
+        q, kv, do, metadata = inputs
         def flash_attn_kvpacked_bench_fn():
             out, lse, S_dmask = flash_attn_kvpacked_func(
                 q,
@@ -154,7 +209,7 @@ def create_benchmark_fn(
 
         return flash_attn_kvpacked_bench_fn
     elif fn_name == "flash_attn_qkvpacked_func":
-        qkv, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", packing="qkv", device=device)
+        qkv, do, metadata = inputs
         def flash_attn_qkvpacked_bench_fn():
             out, lse, S_dmask = flash_attn_qkvpacked_func(
                 qkv,
@@ -171,7 +226,7 @@ def create_benchmark_fn(
 
         return flash_attn_qkvpacked_bench_fn   
     elif fn_name == "flash_attn_varlen_func":
-        q_unpad, k_unpad, v_unpad, do_unpad, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", device=device)
+        q_unpad, k_unpad, v_unpad, do_unpad, metadata = inputs
         def flash_attn_varlen_bench_fn():
             out_unpad, lse, S_dmask = flash_attn_varlen_func(
                 q_unpad,
@@ -193,7 +248,7 @@ def create_benchmark_fn(
                 dq_unpad, dk_unpad, dv_unpad = torch.autograd.grad(out_unpad, (q_unpad, k_unpad, v_unpad), do_unpad)
         return flash_attn_varlen_bench_fn
     elif fn_name == "flash_attn_varlen_kvpacked_func":
-        q_unpad, kv_unpad, do_unpad, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", packing="kv", device=device)
+        q_unpad, kv_unpad, do_unpad, metadata = inputs
         def flash_attn_varlen_kvpacked_bench_fn():
             out_unpad, lse, S_dmask = flash_attn_varlen_kvpacked_func(
                 q_unpad,
@@ -214,7 +269,7 @@ def create_benchmark_fn(
                 dq_unpad, dkv_unpad = torch.autograd.grad(out_unpad, (q_unpad, kv_unpad), do_unpad)
         return flash_attn_varlen_kvpacked_bench_fn
     elif fn_name == "flash_attn_varlen_qkvpacked_func":
-        qkv_unpad, do_unpad, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", packing="qkv", device=device)
+        qkv_unpad, do_unpad, metadata = inputs
         def flash_attn_varlen_qkvpacked_bench_fn():
             out_unpad, lse, S_dmask = flash_attn_varlen_qkvpacked_func(
                 qkv_unpad,
@@ -232,7 +287,7 @@ def create_benchmark_fn(
                 dqkv_unpad = torch.autograd.grad(out_unpad, (qkv_unpad), do_unpad)
         return flash_attn_varlen_qkvpacked_bench_fn
     elif fn_name == "flash_attn_with_kvcache":
-        q, k_cache, v_cache, _, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", device=device)
+        q, k_cache, v_cache, _, metadata = inputs
         def flash_attn_with_kvcache_bench_fn():
             out = flash_attn_with_kvcache(
                 q,
@@ -254,7 +309,7 @@ def create_benchmark_fn(
             )
         return flash_attn_with_kvcache_bench_fn
     elif fn_name == "flash_attn_fp8_func":
-        (q, descale_q), (k, descale_k), (v, descale_v), (do, descale_do), metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", device=device)
+        (q, descale_q), (k, descale_k), (v, descale_v), (do, descale_do), metadata = inputs
         def flash_attn_f8_bench_fn():
             out, lse, S_dmask = flash_attn_fp8_func(
                 q,
@@ -277,7 +332,7 @@ def create_benchmark_fn(
 
         return flash_attn_f8_bench_fn
     elif fn_name == "flash_attn_qkvpacked_fp8_func":
-        qkv, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", packing="qkv", device=device)
+        qkv, do, metadata = inputs
         def flash_attn_qkvpacked_fp8_bench_fn():
             out, lse, S_dmask = flash_attn_qkvpacked_fp8_func(
                 qkv,
@@ -294,7 +349,7 @@ def create_benchmark_fn(
 
         return flash_attn_qkvpacked_fp8_bench_fn   
     elif fn_name == "flash_attn_varlen_fp8_func":
-        (q_unpad, descale_q), (k_unpad, descale_k), (v_unpad, descale_v), (do_unpad, descale_do), metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", device=device)
+        (q_unpad, descale_q), (k_unpad, descale_k), (v_unpad, descale_v), (do_unpad, descale_do), metadata = inputs
         def flash_attn_varlen_fp8_bench_fn():
             out_unpad, lse, S_dmask = flash_attn_varlen_fp8_func(
                 q_unpad,
@@ -316,7 +371,7 @@ def create_benchmark_fn(
                 dq_unpad, dk_unpad, dv_unpad = torch.autograd.grad(out_unpad, (q_unpad, k_unpad, v_unpad), do_unpad)
         return flash_attn_varlen_fp8_bench_fn
     elif fn_name == "flash_attn_varlen_qkvpacked_fp8_func":
-        qkv_unpad, do_unpad, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", packing="qkv", device=device)
+        qkv_unpad, do_unpad, metadata = inputs
         def flash_attn_varlen_qkvpacked_fp8_bench_fn():
             out_unpad, lse, S_dmask = flash_attn_varlen_qkvpacked_fp8_func(
                 qkv_unpad,
@@ -348,25 +403,27 @@ def get_packing_type(fn_name: str) -> Optional[Literal["kv", "qkv"]]:
 
     return packing
 
-def run_benchmark(fn_name, configs, dtype, mode):
+def run_benchmark(fn_name, fn_inputs, dtype, mode):
     """
     Runs the benchmark for the provided function based on the provided arguments.
     """
     # start timing the benchmark
     start_time = time.time()
 
+    fn_configs = fn_inputs.keys()
+
     # check that we have at least one config
-    assert len(configs) > 0
+    assert len(fn_configs) > 0
 
     # print bench fn
     mode_text = "forward" if mode == "fwd" else "forward and backward"
-    print(f"\nBenchmarking {fn_name} {mode_text} in {dtype} with {len(configs)} configs...")
+    print(f"\nBenchmarking {fn_name} {mode_text} in {dtype} with {len(fn_configs)} configs...")
 
     # Setup benchmark configurations
     bench_configs = [
         triton.testing.Benchmark(
             x_names=["BATCH", "HQ", "HK", "N_CTX_Q", "N_CTX_K", "D_HEAD", "CAUSAL", "DROPOUT"],
-            x_vals=configs,
+            x_vals=fn_configs,
             line_arg="provider",
             line_vals=["triton"],
             line_names=["Time (ms)"],
@@ -384,19 +441,7 @@ def run_benchmark(fn_name, configs, dtype, mode):
     def bench_function(
         BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, CAUSAL, DROPOUT, dtype, mode, provider, device="cuda"
     ):
-        benchmark_fn = create_benchmark_fn(fn_name,
-                                           BATCH, 
-                                           HQ, 
-                                           HK, 
-                                           N_CTX_Q, 
-                                           N_CTX_K, 
-                                           D_HEAD,
-                                           CAUSAL,
-                                           DROPOUT,
-                                           dtype,
-                                           mode,
-                                           device
-                                           )
+        benchmark_fn = create_benchmark_fn(fn_name, fn_inputs[(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, CAUSAL, DROPOUT)], CAUSAL, DROPOUT, mode)
 
         # run the benchmark
         ms = triton.testing.do_bench(benchmark_fn, warmup=25, rep=100)
@@ -450,36 +495,28 @@ def process_args():
     # get configs
     configs = {}
     for fn_name in benchmark_fns:
-        # get info about fn to benchmark
-        packing = get_packing_type(fn_name)
-        is_varlen = True if "varlen" in fn_name else False
-        is_fp8 = True if "fp8" in fn_name else False
-        supports_backward = False if fn_name in ["flash_attn_with_kvcache"] else True
-
-        # get dtype
-        dtype = torch.float8_e4m3fnuz if is_fp8 else torch.float16
-  
-        # check backward pass support
-        if supports_backward:
-            mode = "full"
-        else:
-            mode = "fwd"
-            warning(f"{fn_name} does not have a backward pass so benching forward pass only.")
+        is_varlen, is_fp8, packing, dtype, mode, device =  get_fn_params(fn_name)
 
         if args.b or args.hq or args.hk or args.sq or args.sk or args.d:
             assert args.b and args.hq and args.sq and args.d, (
                 "if custom config is specified, please provide at least batch, number of Q heads, Q sequence length, and head size."
             )
-            configs[fn_name] = [(args.b, 
-                        args.hq, 
-                        args.hk if args.hk is not None else args.hq, 
-                        args.sq, 
-                        args.sk if args.sk is not None else args.sq,  
-                        args.d, 
-                        args.causal, 
-                        args.dropout)], dtype, mode
+            
+            batch = args.b, 
+            hq = args.hq, 
+            hk = args.hk if args.hk is not None else args.hq, 
+            sq = args.sq, 
+            sk = args.sk if args.sk is not None else args.sq,  
+            d_head = args.d, 
+            causal = args.causal, 
+            dropout = args.dropout
+            fn_config = (batch, hq, hk, sq, sk, d_head, causal, dropout)
+            fn_inputs = {}
+            fn_inputs[fn_config] = generate_fn_inputs(fn_name, *fn_config, dropout, dtype, device )
+            configs[fn_name] = fn_inputs, dtype, mode
         else:
-            configs[fn_name] = generate_benchmark_configs(is_varlen, packing), dtype, mode
+            fn_inputs = generate_benchmark_configs(fn_name)
+            configs[fn_name] = fn_inputs, dtype, mode
 
     return configs
 
@@ -495,10 +532,12 @@ def main():
     has_multiple_fns = True if len(bench_fn_configs) > 1 else False
     combined_df = None
 
+    print(len(bench_fn_configs["flash_attn_func"]))
+
     # run benchmarks
-    for fn_name, (configs, dtype, mode) in bench_fn_configs.items():
+    for fn_name, (fn_inputs, dtype, mode) in bench_fn_configs.items():
         # run bench mark
-        df = run_benchmark(fn_name, configs, dtype, mode)
+        df = run_benchmark(fn_name, fn_inputs, dtype, mode)
         config_cols = [col for col in df.columns if col != "Time (ms)"]
         df = df.rename(columns={"Time (ms)": f"{fn_name}_{mode}_{dtype}_ms"})
 
