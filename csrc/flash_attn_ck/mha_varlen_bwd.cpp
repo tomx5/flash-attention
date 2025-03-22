@@ -24,9 +24,9 @@ fmha_bwd_traits get_ck_fmha_varlen_bwd_traits(const mask_info &mask,
                            has_dropout,
                            false, // s_randval
                            deterministic,
-                           false, // uses_ext_asm
-                           head_size != 64, // is_v3_atomic_fp32
-                           2}; // how_v3_bf16_cvt 0:RTNE; 1:RTNA; 2:RTZ
+                           true, // uses_ext_asm
+                           true, // is_v3_atomic_fp32
+                           1}; // how_v3_bf16_cvt 0:RTNE; 1:RTNA; 2:RTZ
 }
 
 fmha_bwd_args get_ck_fmha_varlen_bwd_args(const mask_info &mask,
@@ -108,11 +108,11 @@ fmha_bwd_args get_ck_fmha_varlen_bwd_args(const mask_info &mask,
     ck_tile::index_t stride_dv = dv.stride(0);
     ck_tile::index_t nhead_stride_dv = dv.stride(1);
 
-    // dq_acc: (split, total_q, nheads, hdim)
+    // dq_acc: (split, nheads, total_q, hdim)
     ck_tile::index_t split_stride_dq_acc = dq_acc.stride(0);
     ck_tile::index_t batch_stride_dq_acc = 0;
-    ck_tile::index_t stride_dq_acc = dq_acc.stride(1);
-    ck_tile::index_t nhead_stride_dq_acc = dq_acc.stride(2);
+    ck_tile::index_t nhead_stride_dq_acc = dq_acc.stride(1);
+    ck_tile::index_t stride_dq_acc = dq_acc.stride(2);
 
     float p_undrop = 1.0 - p_dropout;
 
@@ -339,11 +339,11 @@ mha_varlen_bwd(const at::Tensor &dout,                   // total_q x num_heads 
     at::Tensor dq_accum;
 
     if (!deterministic) {
-        dq_accum = torch::zeros({1, total_q, num_heads, head_size}, opts.dtype(at::kFloat));
+        dq_accum = torch::zeros({1, num_heads, total_q, head_size}, opts.dtype(at::kFloat));
     } else {
         const ck_tile::index_t kN0 = head_size <= 128 ? 128 : 64;
         const ck_tile::index_t nsplits = ck_tile::integer_divide_ceil(max_seqlen_k, kN0);
-        dq_accum = torch::zeros({nsplits, total_q, num_heads, head_size}, opts.dtype(at::kFloat));
+        dq_accum = torch::zeros({nsplits, num_heads, total_q, head_size}, opts.dtype(at::kFloat));
     }
 
     at::Tensor dk_expanded, dv_expanded;
