@@ -60,8 +60,26 @@ void print_tensor_info(const char *name, const at::Tensor &tensor) {
   if (!should_print_debug())
     return;
   if (tensor.defined()) {
-    std::cout << name << " ptr: " << tensor.data_ptr()
-              << " size: " << tensor.sizes() << " stride: " << tensor.strides()
+    void* start_addr = tensor.data_ptr();
+    
+    // Calculate element size based on dtype
+    size_t element_size;
+    switch (tensor.scalar_type()) {
+      case at::ScalarType::Float: element_size = sizeof(float); break;
+      case at::ScalarType::Double: element_size = sizeof(double); break;
+      case at::ScalarType::Half: element_size = sizeof(at::Half); break;
+      case at::ScalarType::BFloat16: element_size = sizeof(at::BFloat16); break;
+      case at::ScalarType::Int: element_size = sizeof(int); break;
+      case at::ScalarType::Long: element_size = sizeof(int64_t); break;
+      default: element_size = 1; // Default fallback
+    }
+    
+    size_t total_bytes = tensor.numel() * element_size;
+    void* end_addr = static_cast<char*>(start_addr) + total_bytes;
+    
+    std::cout << name << " ptr: " << start_addr << " to " << end_addr 
+              << " (size: " << total_bytes << " bytes)"
+              << " dims: " << tensor.sizes() << " stride: " << tensor.strides()
               << std::endl;
   } else {
     std::cout << name << ": undefined" << std::endl;
@@ -78,16 +96,16 @@ fmha_bwd_traits get_ck_fmha_bwd_traits(const mask_info &mask,
     return fmha_bwd_traits{head_size,
                            head_size,
                            dtype,
-                           false, // is_group_mode
+                           false,    // is_group_mode
                            mask.type,
                            enable_alibi ? bias_enum::alibi : bias_enum::no_bias,
                            false,    // has_dbias
                            has_dropout,
-                           false, // s_randval
+                           false,    // s_randval
                            deterministic,
                            get_env_var("FMHA_USE_BWD_V3", false),
-                           true, // is_v3_atomic_fp32
-                           get_env_var("FMHA_V3_BF16_CVT", 1)}; // how_v3_bf16_cvt 0:RTNE; 1:RTNA; 2:RTZ
+                           get_env_var("FMHA_V3_ATOMIC_FP32", true),  // is_v3_atomic_fp32
+                           get_env_var("FMHA_V3_BF16_CVT", 1)};       // how_v3_bf16_cvt 0:RTNE; 1:RTNA; 2:RTZ
 }
 
 fmha_bwd_args get_ck_fmha_bwd_args(const mask_info &mask,
