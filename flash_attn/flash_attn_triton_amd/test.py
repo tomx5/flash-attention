@@ -101,11 +101,10 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     # update metadata
     metadata.use_exp2 = use_exp2
     if causal:
-        metadata.need_causal()
+        metadata.need_causal(True)
 
     # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
-    if dropout_p > 0.0:
-        metadata.need_dropout(dropout_p)
+    metadata.need_dropout(dropout_p)
 
 
     # call Triton's forward implementation directly
@@ -236,8 +235,7 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     q, k, v, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=DEBUG_INPUT)
 
     # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
-    if dropout_p > 0.0:
-        metadata.need_dropout(dropout_p)
+    metadata.need_dropout(dropout_p)
 
     # =============================================== Reference ==============================================================
     q_ref = q.clone() 
@@ -439,8 +437,7 @@ def test_op_prefill_bwd_split_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, 
     q, k, v, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=DEBUG_INPUT)
 
     # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
-    if dropout_p > 0.0:
-        metadata.need_dropout(dropout_p)
+    metadata.need_dropout(dropout_p)
 
     # print("from the very beginning")
     # print("q:", q.shape)
@@ -703,7 +700,7 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
     # test apis
     if packing == 'qkv':
         # generate inputs
-        qkv, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, ref_dtype, layout, packing=packing, device=device, DEBUG_INPUT=DEBUG_INPUT)
+        qkv, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, ref_dtype, layout, packing=packing, device=device, DEBUG_INPUT=DEBUG_INPUT)
 
         # ----------------------------------------------------------------
         # --- FP8 ---
@@ -811,7 +808,7 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
 
     else:
         # generate inputs
-        q, k, v, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, ref_dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
+        q, k, v, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, ref_dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
 
         # ----------------------------------------------------------------
         # --- FP8 ---

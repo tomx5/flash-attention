@@ -35,15 +35,15 @@ class MetaData():
     max_seqlens_k = 0
     bias = None
     alibi_slopes = None
-    causal = False
+    causal: bool = False
     num_contexts = 0
-    varlen = False
+    varlen: bool = False
     layout: Optional[Literal["bshd", "bhsd", "thd"]] = None
     cache_seqlens: Optional[Union[(int, torch.Tensor)]] = None
     cache_batch_idx = None
     packing = None
     return_scores= False
-    dropout_p= 0.0
+    dropout_p: float = 0.0
     philox_seed, philox_offset = None, None # if dropout_p > 0.0 seed the RNG so we get reproducible results for testing.
     # NOTE: scale sm_scale by log_2(e) and use 2^x in the loop as we do not have native e^x support in HW.
     use_exp2 = False
@@ -101,8 +101,8 @@ class MetaData():
         assert alibi_slopes.shape[1] == nheads
         self.alibi_slopes = alibi_slopes
 
-    def need_causal(self):
-        self.causal = True
+    def need_causal(self, causal):
+        self.causal = causal
 
     def need_rotary(self, sin, cos, rotary_interleaved, rotary_conjunction=False):
         self.rotary_sin = sin
@@ -110,10 +110,11 @@ class MetaData():
         self.rotary_interleaved = rotary_interleaved
         self.rotary_conjunction = rotary_conjunction
 
-    def need_dropout(self, dropout_p):
-        self.dropout_p = dropout_p
-        self.return_scores = True
-        self.philox_seed, self.philox_offset = 0x1BF58, 0x1D4B49
+    def need_dropout(self, dropout_p, return_scores = True):
+        if dropout_p > 0.0:
+            self.dropout_p = dropout_p
+            self.return_scores = return_scores
+            self.philox_seed, self.philox_offset = 0x1BF58, 0x1D4B49
 
     def check_args(self, q, k, v, o):
         assert q.dim() == k.dim() and q.dim() == v.dim()
@@ -271,6 +272,8 @@ def input_helper(
     N_CTX_Q: int,
     N_CTX_K: int,
     D_HEAD: int,
+    causal: bool,
+    dropout_p: float,
     dtype: torch.dtype,
     layout: Literal["bshd", "bhsd", "thd"],
     packing: Optional[Literal["kv", "qkv"]] = None,
@@ -306,6 +309,8 @@ def input_helper(
             sm_scale = D_HEAD**-0.5
         metadata = MetaData(sm_scale=sm_scale)
         metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
+        metadata.need_causal(causal)
+        metadata.need_dropout(dropout_p)
     elif layout == 'bshd' or layout == "bhsd":
         # gen tensors
         if layout == "bshd":
@@ -340,6 +345,8 @@ def input_helper(
         metadata.max_seqlens_q = N_CTX_Q
         metadata.max_seqlens_k = N_CTX_K
         metadata.layout = layout
+        metadata.need_causal(causal)
+        metadata.need_dropout(dropout_p)
     else:
         raise ValueError(f"Unknown layout: {layout}")
 

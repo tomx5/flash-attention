@@ -70,7 +70,7 @@ def fwd(q: torch.Tensor,
     batch, nheads_q, nheads_k, head_size, _, _ = get_shapes_from_layout(q, k, metadata.layout)
 
     if causal:
-        metadata.need_causal()
+        metadata.need_causal(True)
 
     if alibi_slopes is not None:
         metadata.need_alibi(alibi_slopes, batch, nheads_q)
@@ -353,7 +353,7 @@ def varlen_fwd(
     batch, nheads_q, nheads_k, head_size , seqlen_q, seqlen_k = get_shapes_from_layout(q, k, metadata.layout, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
 
     if causal:
-        metadata.need_causal()
+        metadata.need_causal(True)
 
     if alibi_slopes is not None:
         metadata.need_alibi(alibi_slopes, batch, nheads_q)
@@ -600,7 +600,7 @@ def fwd_kvcache(
     v_new = v
 
     if causal:
-        metadata.need_causal()
+        metadata.need_causal(True)
 
     if alibi_slopes is not None:
         batch, _ , nheads_q, _= q.shape

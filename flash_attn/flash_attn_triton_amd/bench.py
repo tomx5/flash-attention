@@ -73,27 +73,27 @@ def generate_fn_inputs(
     device: Literal["cpu", "cuda"]
     ):
     if fn_name == "flash_attn_func":
-        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", device=device)
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dtype, layout="bshd", device=device)
     elif fn_name == "flash_attn_kvpacked_func":
-        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", packing="kv", device=device)
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dtype, layout="bshd", packing="kv", device=device)
     elif fn_name == "flash_attn_qkvpacked_func":
-        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", packing="qkv", device=device)
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dtype, layout="bshd", packing="qkv", device=device)
     elif fn_name == "flash_attn_varlen_func":
-        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", device=device) 
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dtype, layout="thd", device=device) 
     elif fn_name == "flash_attn_varlen_kvpacked_func":
-        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", packing="kv", device=device)
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dtype, layout="thd", packing="kv", device=device)
     elif fn_name == "flash_attn_varlen_qkvpacked_func":
-        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", packing="qkv", device=device)
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dtype, layout="thd", packing="qkv", device=device)
     elif fn_name == "flash_attn_with_kvcache":
-        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", device=device)
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dtype, layout="bshd", device=device)
     elif fn_name == "flash_attn_fp8_func":
-        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", device=device)
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dtype, layout="bshd", device=device)
     elif fn_name == "flash_attn_qkvpacked_fp8_func":
-        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="bshd", packing="qkv", device=device)
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dtype, layout="bshd", packing="qkv", device=device)
     elif fn_name == "flash_attn_varlen_fp8_func":
-        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", device=device)
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dtype, layout="thd", device=device)
     elif fn_name == "flash_attn_varlen_qkvpacked_fp8_func":
-        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout="thd", packing="qkv", device=device)
+        return input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dtype, layout="thd", packing="qkv", device=device)
     else:
         valid_fn_names = ", ".join(FUNCTIONS.keys())
         raise ValueError(f"{fn_name} should be one of the following functions. {valid_fn_names}")
@@ -163,22 +163,20 @@ def generate_benchmark_configs(fn_name):
 
 def create_benchmark_fn(
     fn_name,
-    inputs,
-    causal,
-    dropout_p,
+    fn_input,
     mode
 ):
     
 
     if fn_name == "flash_attn_func":
-        q, k, v, do, metadata = inputs
+        q, k, v, do, metadata = fn_input
         def flash_attn_bench_fn():
             out, lse, S_dmask = flash_attn_func(
                 q,
                 k,
                 v,
-                dropout_p,
-                causal=causal,
+                metadata.dropout_p,
+                causal=metadata.causal,
                 window_size=(-1, -1),
                 softcap=0.0,
                 alibi_slopes=None,
@@ -191,13 +189,13 @@ def create_benchmark_fn(
         return flash_attn_bench_fn
 
     elif fn_name == "flash_attn_kvpacked_func":
-        q, kv, do, metadata = inputs
+        q, kv, do, metadata = fn_input
         def flash_attn_kvpacked_bench_fn():
             out, lse, S_dmask = flash_attn_kvpacked_func(
                 q,
                 kv,
-                dropout_p,
-                causal=causal,
+                metadata.dropout_p,
+                causal=metadata.causal,
                 window_size=(-1, -1),
                 softcap=0.0,
                 alibi_slopes=None,
@@ -209,12 +207,12 @@ def create_benchmark_fn(
 
         return flash_attn_kvpacked_bench_fn
     elif fn_name == "flash_attn_qkvpacked_func":
-        qkv, do, metadata = inputs
+        qkv, do, metadata = fn_input
         def flash_attn_qkvpacked_bench_fn():
             out, lse, S_dmask = flash_attn_qkvpacked_func(
                 qkv,
-                dropout_p,
-                causal=causal,
+                metadata.dropout_p,
+                causal=metadata.causal,
                 window_size=(-1, -1),
                 softcap=0.0,
                 alibi_slopes=None,
@@ -226,7 +224,7 @@ def create_benchmark_fn(
 
         return flash_attn_qkvpacked_bench_fn   
     elif fn_name == "flash_attn_varlen_func":
-        q_unpad, k_unpad, v_unpad, do_unpad, metadata = inputs
+        q_unpad, k_unpad, v_unpad, do_unpad, metadata = fn_input
         def flash_attn_varlen_bench_fn():
             out_unpad, lse, S_dmask = flash_attn_varlen_func(
                 q_unpad,
@@ -236,8 +234,8 @@ def create_benchmark_fn(
                 metadata.cu_seqlens_k,
                 metadata.max_seqlens_q,
                 metadata.max_seqlens_k,
-                dropout_p,
-                causal=causal,
+                metadata.dropout_p,
+                causal=metadata.causal,
                 window_size=(-1, -1),
                 softcap=0.0 ,
                 alibi_slopes=None,
@@ -248,7 +246,7 @@ def create_benchmark_fn(
                 dq_unpad, dk_unpad, dv_unpad = torch.autograd.grad(out_unpad, (q_unpad, k_unpad, v_unpad), do_unpad)
         return flash_attn_varlen_bench_fn
     elif fn_name == "flash_attn_varlen_kvpacked_func":
-        q_unpad, kv_unpad, do_unpad, metadata = inputs
+        q_unpad, kv_unpad, do_unpad, metadata = fn_input
         def flash_attn_varlen_kvpacked_bench_fn():
             out_unpad, lse, S_dmask = flash_attn_varlen_kvpacked_func(
                 q_unpad,
@@ -257,8 +255,8 @@ def create_benchmark_fn(
                 metadata.cu_seqlens_k,
                 metadata.max_seqlens_q,
                 metadata.max_seqlens_k,
-                dropout_p,
-                causal=causal,
+                metadata.dropout_p,
+                causal=metadata.causal,
                 window_size=(-1, -1),
                 softcap=0.0 ,
                 alibi_slopes=None,
@@ -269,14 +267,14 @@ def create_benchmark_fn(
                 dq_unpad, dkv_unpad = torch.autograd.grad(out_unpad, (q_unpad, kv_unpad), do_unpad)
         return flash_attn_varlen_kvpacked_bench_fn
     elif fn_name == "flash_attn_varlen_qkvpacked_func":
-        qkv_unpad, do_unpad, metadata = inputs
+        qkv_unpad, do_unpad, metadata = fn_input
         def flash_attn_varlen_qkvpacked_bench_fn():
             out_unpad, lse, S_dmask = flash_attn_varlen_qkvpacked_func(
                 qkv_unpad,
                 metadata.cu_seqlens_q,
                 metadata.max_seqlens_q,
-                dropout_p,
-                causal=causal,
+                metadata.dropout_p,
+                causal=metadata.causal,
                 window_size=(-1, -1),
                 softcap=0.0 ,
                 alibi_slopes=None,
@@ -287,7 +285,7 @@ def create_benchmark_fn(
                 dqkv_unpad = torch.autograd.grad(out_unpad, (qkv_unpad), do_unpad)
         return flash_attn_varlen_qkvpacked_bench_fn
     elif fn_name == "flash_attn_with_kvcache":
-        q, k_cache, v_cache, _, metadata = inputs
+        q, k_cache, v_cache, _, metadata = fn_input
         def flash_attn_with_kvcache_bench_fn():
             out = flash_attn_with_kvcache(
                 q,
@@ -301,7 +299,7 @@ def create_benchmark_fn(
                 cache_batch_idx=None,
                 cache_leftpad=None,
                 block_table=None,
-                causal=causal,
+                causal=metadata.causal,
                 window_size=(-1, -1),
                 rotary_interleaved=False,
                 alibi_slopes=None,
@@ -309,14 +307,14 @@ def create_benchmark_fn(
             )
         return flash_attn_with_kvcache_bench_fn
     elif fn_name == "flash_attn_fp8_func":
-        (q, descale_q), (k, descale_k), (v, descale_v), (do, descale_do), metadata = inputs
+        (q, descale_q), (k, descale_k), (v, descale_v), (do, descale_do), metadata = fn_input
         def flash_attn_f8_bench_fn():
             out, lse, S_dmask = flash_attn_fp8_func(
                 q,
                 k,
                 v,
-                dropout_p,
-                causal=causal,
+                metadata.dropout_p,
+                causal=metadata.causal,
                 window_size=(-1, -1),
                 softcap=0.0,
                 alibi_slopes=None,
@@ -332,12 +330,12 @@ def create_benchmark_fn(
 
         return flash_attn_f8_bench_fn
     elif fn_name == "flash_attn_qkvpacked_fp8_func":
-        qkv, do, metadata = inputs
+        qkv, do, metadata = fn_input
         def flash_attn_qkvpacked_fp8_bench_fn():
             out, lse, S_dmask = flash_attn_qkvpacked_fp8_func(
                 qkv,
-                dropout_p,
-                causal=causal,
+                metadata.dropout_p,
+                causal=metadata.causal,
                 window_size=(-1, -1),
                 softcap=0.0,
                 alibi_slopes=None,
@@ -349,7 +347,7 @@ def create_benchmark_fn(
 
         return flash_attn_qkvpacked_fp8_bench_fn   
     elif fn_name == "flash_attn_varlen_fp8_func":
-        (q_unpad, descale_q), (k_unpad, descale_k), (v_unpad, descale_v), (do_unpad, descale_do), metadata = inputs
+        (q_unpad, descale_q), (k_unpad, descale_k), (v_unpad, descale_v), (do_unpad, descale_do), metadata = fn_input
         def flash_attn_varlen_fp8_bench_fn():
             out_unpad, lse, S_dmask = flash_attn_varlen_fp8_func(
                 q_unpad,
@@ -359,8 +357,8 @@ def create_benchmark_fn(
                 metadata.cu_seqlens_k,
                 metadata.max_seqlens_q,
                 metadata.max_seqlens_k,
-                dropout_p,
-                causal=causal,
+                metadata.dropout_p,
+                causal=metadata.causal,
                 window_size=(-1, -1),
                 softcap=0.0 ,
                 alibi_slopes=None,
@@ -371,14 +369,14 @@ def create_benchmark_fn(
                 dq_unpad, dk_unpad, dv_unpad = torch.autograd.grad(out_unpad, (q_unpad, k_unpad, v_unpad), do_unpad)
         return flash_attn_varlen_fp8_bench_fn
     elif fn_name == "flash_attn_varlen_qkvpacked_fp8_func":
-        qkv_unpad, do_unpad, metadata = inputs
+        qkv_unpad, do_unpad, metadata = fn_input
         def flash_attn_varlen_qkvpacked_fp8_bench_fn():
             out_unpad, lse, S_dmask = flash_attn_varlen_qkvpacked_fp8_func(
                 qkv_unpad,
                 metadata.cu_seqlens_q,
                 metadata.max_seqlens_q,
-                dropout_p,
-                causal=causal,
+                metadata.dropout_p,
+                causal=metadata.causal,
                 window_size=(-1, -1),
                 softcap=0.0 ,
                 alibi_slopes=None,
@@ -441,7 +439,8 @@ def run_benchmark(fn_name, fn_inputs, dtype, mode):
     def bench_function(
         BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, CAUSAL, DROPOUT, dtype, mode, provider, device="cuda"
     ):
-        benchmark_fn = create_benchmark_fn(fn_name, fn_inputs[(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, CAUSAL, DROPOUT)], CAUSAL, DROPOUT, mode)
+        fn_input = fn_inputs[(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, CAUSAL, DROPOUT)]
+        benchmark_fn = create_benchmark_fn(fn_name, fn_input, mode)
 
         # run the benchmark
         ms = triton.testing.do_bench(benchmark_fn, warmup=25, rep=100)
@@ -471,14 +470,14 @@ def process_args():
         choices=FUNCTIONS.keys(),
         help=f"Function(s) to benchmark",
     )
-    parser.add_argument("-b", type=int, default=0, help=f"Batch size")
-    parser.add_argument("-hq", type=int, default=0, help=f"Q Number of heads")
-    parser.add_argument("-hk", type=int, default=0, help=f"K and V Number of heads")
-    parser.add_argument("-sq", type=int, default=0, help=f"Q Sequence Length")
-    parser.add_argument("-sk", type=int, default=0, help=f"K and V Sequence Length")
-    parser.add_argument("-d", type=int, default=0, help=f"Head Dimension")
-    parser.add_argument("-causal", action="store_true", default=False, help=f"Causal")
-    parser.add_argument("-dropout", type=float, default=0.0, help=f"Dropout")
+    parser.add_argument("-b", type=int, default=None, help="Batch size")
+    parser.add_argument("-hq", type=int, default=None, help="Q Number of heads")
+    parser.add_argument("-hk", type=int, default=None, help="K and V Number of heads")
+    parser.add_argument("-sq", type=int, default=None, help="Q Sequence Length")
+    parser.add_argument("-sk", type=int, default=None, help="K and V Sequence Length")
+    parser.add_argument("-d", type=int, default=None, help="Head Dimension")
+    parser.add_argument("-causal", action="store_true", default=None, help="Causal")
+    parser.add_argument("-dropout", type=float, default=None, help="Dropout")
 
     # parse args
     args = parser.parse_args()
@@ -508,11 +507,11 @@ def process_args():
             sq = args.sq, 
             sk = args.sk if args.sk is not None else args.sq,  
             d_head = args.d, 
-            causal = args.causal, 
-            dropout = args.dropout
+            causal = args.causal if args.causal is not None else False 
+            dropout = args.dropout if args.dropout is not None else 0.0
             fn_config = (batch, hq, hk, sq, sk, d_head, causal, dropout)
             fn_inputs = {}
-            fn_inputs[fn_config] = generate_fn_inputs(fn_name, *fn_config, dropout, dtype, device )
+            fn_inputs[fn_config] = generate_fn_inputs(fn_name, *fn_config, dtype, device )
             configs[fn_name] = fn_inputs, dtype, mode
         else:
             fn_inputs = generate_benchmark_configs(fn_name)
@@ -531,8 +530,6 @@ def main():
     bench_fn_configs = process_args()
     has_multiple_fns = True if len(bench_fn_configs) > 1 else False
     combined_df = None
-
-    print(len(bench_fn_configs["flash_attn_func"]))
 
     # run benchmarks
     for fn_name, (fn_inputs, dtype, mode) in bench_fn_configs.items():
