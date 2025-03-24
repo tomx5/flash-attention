@@ -48,7 +48,7 @@ SUPPORTED_DTYPES = {
     "flash_attn_qkvpacked_fp8_func": [torch.float8_e4m3fnuz],
     "flash_attn_varlen_qkvpacked_func": [torch.float32, torch.float16],
     "flash_attn_varlen_qkvpacked_fp8_func": [torch.float8_e4m3fnuz],
-    "flash_attn_with_kvcache": [torch.float16],
+    "flash_attn_with_kvcache": [torch.float32, torch.float16],
 }
 
 def estimate_memory(config):
@@ -56,29 +56,13 @@ def estimate_memory(config):
     memory_estimate = batch * (hq * sq + hk * sk) * d_head * 4  # bytes
     return memory_estimate
 
-def get_fn_params(fn_name, dtype=None):
-    """
-    Get parameters for the specified function and data type.
-    
-    Args:
-        fn_name: The name of the function to benchmark
-        dtype: Optional data type to use. If None, will use default for the function.
-    """
+@lru_cache()
+def get_fn_params(fn_name):
     # get params for fn
     packing = get_packing_type(fn_name)
     is_varlen = True if "varlen" in fn_name else False
     is_fp8 = True if "fp8" in fn_name else False
-    
-    # determine dtype
-    if dtype is None:
-        # use default dtype based on function
-        dtype = torch.float8_e4m3fnuz if is_fp8 else torch.float16
-    else:
-        # validate dtype is supported
-        if dtype not in SUPPORTED_DTYPES[fn_name]:
-            valid_dtypes = ", ".join([str(d) for d in SUPPORTED_DTYPES[fn_name]])
-            raise ValueError(f"{fn_name} does not support {dtype}. Supported dtypes: {valid_dtypes}")
-    
+    supported_dtypes = SUPPORTED_DTYPES.get(fn_name, [torch.float16])  # default to float16 if not found
     supports_backward = False if fn_name in ["flash_attn_with_kvcache"] else True
     # mode = "full" if supports_backward else "fwd"
     mode = "fwd"
@@ -88,7 +72,7 @@ def get_fn_params(fn_name, dtype=None):
     if not supports_backward:
         warning(f"{fn_name} does not have a backward pass so benching forward pass only.")
 
-    return is_varlen, is_fp8, packing, dtype, mode, device
+    return is_varlen, is_fp8, packing, supported_dtypes, mode, device
 
 def generate_fn_inputs(
     fn_name: str,
@@ -129,17 +113,14 @@ def generate_fn_inputs(
         valid_fn_names = ", ".join(FUNCTIONS.keys())
         raise ValueError(f"{fn_name} should be one of the following functions. {valid_fn_names}")
 
-def generate_benchmark_configs(fn_name, dtype):
+def generate_benchmark_configs(fn_name):
     """
     generates a small number of configs that cover the parameter space well
-    
-    Args:
-        fn_name: The name of the function to benchmark
-        dtype: The data type to use for the benchmark
     """
-    # get fn params with specific dtype
-    is_varlen, is_fp8, packing, _, mode, device = get_fn_params(fn_name, dtype)
 
+    # get fn params
+    is_varlen, is_fp8, packing, supported_dtypes, mode, device = get_fn_params(fn_name)
+    
     # define all parameter options as lists
     batch_sizes = [1, 64]
     if packing == "qkv":
@@ -158,8 +139,8 @@ def generate_benchmark_configs(fn_name, dtype):
     causal_values = [False]
     dropout_values = [0.0]
     
-    # generate all fn_inputs
-    fn_inputs = {}
+    # generate all fn_configs without inputs
+    fn_configs = []
     
     # one big loop to generate configs
     for batch in batch_sizes:
@@ -185,13 +166,9 @@ def generate_benchmark_configs(fn_name, dtype):
                                     if packing == "qkv" and (sq != sk or hq != hk):
                                         continue
                                     
-                                    # generate fn inputs based on config
-                                    fn_inputs[fn_config] = generate_fn_inputs(fn_name, *fn_config, dtype, device)
+                                    fn_configs.append(fn_config)
     
-    # sort by memory usage (smallest to largest) for better visualization
-    # fn_configs.sort(key=estimate_memory) # keep order for now
-    
-    return fn_inputs
+    return fn_configs
 
 def create_benchmark_fn(
     fn_name,
@@ -502,12 +479,6 @@ def process_args():
         choices=FUNCTIONS.keys(),
         help=f"Function(s) to benchmark",
     )
-    parser.add_argument(
-        "-dtypes", 
-        type=str, 
-        default=None, 
-        help="Data types to use for each function in format: 'fn1:dtype1,dtype2;fn2:dtype3'"
-    )
     parser.add_argument("-b", type=int, default=None, help="Batch size")
     parser.add_argument("-hq", type=int, default=None, help="Q Number of heads")
     parser.add_argument("-hk", type=int, default=None, help="K and V Number of heads")
@@ -529,67 +500,33 @@ def process_args():
                 raise ValueError(f"invalid benchmark function specified: {fn_name}")
         benchmark_fns = args.benchmark_fn
 
-    # parse dtype specifications
-    dtype_map = {}
-    if args.dtypes:
-        fn_dtype_specs = args.dtypes.split(';')
-        for spec in fn_dtype_specs:
-            if ':' not in spec:
-                continue
-            fn_name, dtype_list_str = spec.split(':', 1)
-            if fn_name not in FUNCTIONS:
-                continue
-            
-            dtype_strs = dtype_list_str.split(',')
-            dtypes = []
-            for dtype_str in dtype_strs:
-                dtype_str = dtype_str.strip().lower()
-                if dtype_str == 'fp32' or dtype_str == 'float32':
-                    dtypes.append(torch.float32)
-                elif dtype_str == 'fp16' or dtype_str == 'float16':
-                    dtypes.append(torch.float16)
-                elif dtype_str == 'fp8' or dtype_str == 'float8_e4m3fnuz':
-                    dtypes.append(torch.float8_e4m3fnuz)
-            
-            dtype_map[fn_name] = dtypes
-    
     # get configs
     configs = []
     for fn_name in benchmark_fns:
-        # determine which dtypes to use for this function
-        if fn_name in dtype_map and dtype_map[fn_name]:
-            dtypes = dtype_map[fn_name]
-        else:
-            # use default dtype if not specified
-            is_varlen, is_fp8, packing, dtype, mode, device = get_fn_params(fn_name)
-            dtypes = [dtype]
+        is_varlen, is_fp8, packing, supported_dtypes, mode, device = get_fn_params(fn_name)
         
-        for dtype in dtypes:
-            # validate dtype is supported for this function
-            if dtype not in SUPPORTED_DTYPES[fn_name]:
-                print(f"Warning: {dtype} not supported for {fn_name}, skipping")
-                continue
-                
-            _, _, _, _, mode, device = get_fn_params(fn_name, dtype)
+        if args.b or args.hq or args.hk or args.sq or args.sk or args.d:
+            assert args.b and args.hq and args.sq and args.d, (
+                "if custom config is specified, please provide at least batch, number of Q heads, Q sequence length, and head size."
+            )
             
-            if args.b or args.hq or args.hk or args.sq or args.sk or args.d:
-                assert args.b and args.hq and args.sq and args.d, (
-                    "if custom config is specified, please provide at least batch, number of Q heads, Q sequence length, and head size."
-                )
-                
-                batch = args.b
-                hq = args.hq
-                hk = args.hk if args.hk is not None else args.hq
-                sq = args.sq
-                sk = args.sk if args.sk is not None else args.sq
-                d_head = args.d
-                causal = args.causal if args.causal is not None else False
-                dropout = args.dropout if args.dropout is not None else 0.0
-                fn_config = (batch, hq, hk, sq, sk, d_head, causal, dropout)
-                fn_inputs = {}
+            batch = args.b
+            hq = args.hq
+            hk = args.hk if args.hk is not None else args.hq
+            sq = args.sq
+            sk = args.sk if args.sk is not None else args.sq
+            d_head = args.d
+            causal = args.causal if args.causal is not None else False
+            dropout = args.dropout if args.dropout is not None else 0.0
+            fn_configs = [(batch, hq, hk, sq, sk, d_head, causal, dropout)]
+        else:
+            fn_configs = generate_benchmark_configs(fn_name)
+        
+        # for each supported dtype, create inputs for all configs
+        for dtype in supported_dtypes:
+            fn_inputs = {}
+            for fn_config in fn_configs:
                 fn_inputs[fn_config] = generate_fn_inputs(fn_name, *fn_config, dtype, device)
-            else:
-                fn_inputs = generate_benchmark_configs(fn_name, dtype)
             
             configs.append((fn_name, fn_inputs, dtype, mode))
 
@@ -624,16 +561,14 @@ def main():
 
     # save combined data
     if has_multiple_configs:
-        # save csv
-        combined_filename = f"benchmark_results.csv"
-        combined_df.to_csv(combined_filename, index=False)
-        print(f"\nCombined data saved to {combined_filename}")
-        
-        # save markdown
-        markdown_filename = f"benchmark_results.md"
-        markdown_table = combined_df.to_markdown(index=False, floatfmt=".2f")
-        with open(markdown_filename, 'w') as f:
-            f.write(markdown_table)
+        print(f"\nCombined data:")
+        print(combined_df)
+
+        # save csv & markdown
+        combined_filename = f"benchmark_combined"
+        combined_df.to_csv(f"{combined_filename}.csv", index=False)
+        with open(f"{combined_filename}.md", 'w') as f:
+            f.write(combined_df.to_markdown(index=False, floatfmt=".2f"))
 
 if __name__ == "__main__":
     main()
