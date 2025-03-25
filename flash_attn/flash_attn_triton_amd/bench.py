@@ -1,4 +1,5 @@
 import argparse
+import os
 import torch
 import triton
 import time
@@ -532,10 +533,25 @@ def process_args():
 
     return configs
 
+def check_environment_variables():
+    """
+    check for environment variables that affect backend selection and warn users
+    """
+    FLASH_ATTENTION_TRITON_AMD_ENABLE = os.environ.get("FLASH_ATTENTION_TRITON_AMD_ENABLE", "").upper() == "TRUE"
+    
+    if FLASH_ATTENTION_TRITON_AMD_ENABLE:
+        raise ValueError(f"Running with FLASH_ATTENTION_TRITON_AMD_ENABLE is not recommended for the benching script. Use --help to see how to use this bench script.")
+
+
 def main():
     """
     Main function to run benchmarks.
     """
+    # check environment variables
+    env_config = check_environment_variables()
+
+
+
     # start timing the entire benchmarking process
     total_start_time = time.time()
 

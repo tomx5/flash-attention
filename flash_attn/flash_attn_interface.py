@@ -91,10 +91,7 @@ def _flash_attn_forward(
     window_size_right: int,
     softcap: float,
     alibi_slopes: Optional[torch.Tensor],
-    return_softmax: bool,
-    descale_q: Optional[torch.Tensor] = None,
-    descale_k: Optional[torch.Tensor] = None,
-    descale_v: Optional[torch.Tensor] = None
+    return_softmax: bool
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
     out, softmax_lse, S_dmask, rng_state = flash_attn_gpu.fwd(
@@ -111,9 +108,6 @@ def _flash_attn_forward(
         softcap,
         return_softmax,
         None,
-        descale_q,
-        descale_k,
-        descale_v
     )
     return out, softmax_lse, S_dmask, rng_state
 
@@ -172,9 +166,6 @@ def _flash_attn_varlen_forward(
     leftpad_k: Optional[torch.Tensor] = None,
     seqused_k: Optional[torch.Tensor] = None,
     zero_tensors: bool = False,
-    descale_q: Optional[torch.Tensor] = None,
-    descale_k: Optional[torch.Tensor] = None,
-    descale_v: Optional[torch.Tensor] = None
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
     out, softmax_lse, S_dmask, rng_state = flash_attn_gpu.varlen_fwd(
@@ -199,9 +190,6 @@ def _flash_attn_varlen_forward(
         softcap,
         return_softmax,
         None,
-        descale_q,
-        descale_k,
-        descale_v
     )
     # if out.isnan().any() or softmax_lse.isnan().any():
     #     breakpoint()
@@ -272,10 +260,6 @@ def _flash_attn_backward(
     alibi_slopes: Optional[torch.Tensor],
     deterministic: bool,
     rng_state: Optional[torch.Tensor] = None,
-    descale_q: Optional[torch.Tensor] = None,
-    descale_k: Optional[torch.Tensor] = None,
-    descale_v: Optional[torch.Tensor] = None,
-    descale_do: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     # dq, dk, dv are allocated by us so they should already be contiguous
     dout, q, k, v, out = [maybe_contiguous(x) for x in (dout, q, k, v, out)]
@@ -304,10 +288,6 @@ def _flash_attn_backward(
         deterministic,
         None,
         rng_state,
-        descale_q,
-        descale_k,
-        descale_v,
-        descale_do
     )
     return softmax_d
 
@@ -377,10 +357,6 @@ def _flash_attn_varlen_backward(
     deterministic: bool,
     rng_state: Optional[torch.Tensor] = None,
     zero_tensors: bool = False,
-    descale_q: Optional[torch.Tensor] = None,
-    descale_k: Optional[torch.Tensor] = None,
-    descale_v: Optional[torch.Tensor] = None,
-    descale_do: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     # dq, dk, dv are allocated by us so they should already be contiguous
     dout, q, k, v, out = [maybe_contiguous(x) for x in (dout, q, k, v, out)]
@@ -414,10 +390,6 @@ def _flash_attn_varlen_backward(
         deterministic,
         None,
         rng_state,
-        descale_q,
-        descale_k,
-        descale_v,
-        descale_do
     )
     # if dk.isnan().any() or dk.isnan().any() or dv.isnan().any() or softmax_d.isnan().any():
     #     breakpoint()
