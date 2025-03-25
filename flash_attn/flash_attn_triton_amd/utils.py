@@ -272,8 +272,8 @@ def input_helper(
     N_CTX_Q: int,
     N_CTX_K: int,
     D_HEAD: int,
-    causal: bool,
-    dropout_p: float,
+    CAUSAL: bool,
+    DROPOUT_P: float,
     dtype: torch.dtype,
     layout: Literal["bshd", "bhsd", "thd"],
     packing: Optional[Literal["kv", "qkv"]] = None,
@@ -309,8 +309,8 @@ def input_helper(
             sm_scale = D_HEAD**-0.5
         metadata = MetaData(sm_scale=sm_scale)
         metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
-        metadata.need_causal(causal)
-        metadata.need_dropout(dropout_p)
+        metadata.need_causal(CAUSAL)
+        metadata.need_dropout(DROPOUT_P)
     elif layout == 'bshd' or layout == "bhsd":
         # gen tensors
         if layout == "bshd":
@@ -345,8 +345,8 @@ def input_helper(
         metadata.max_seqlens_q = N_CTX_Q
         metadata.max_seqlens_k = N_CTX_K
         metadata.layout = layout
-        metadata.need_causal(causal)
-        metadata.need_dropout(dropout_p)
+        metadata.need_causal(CAUSAL)
+        metadata.need_dropout(DROPOUT_P)
     else:
         raise ValueError(f"Unknown layout: {layout}")
 
