@@ -4,6 +4,7 @@ dist
 flash_attn.egg-info
 log
 scripts
+training/data
 gpucore*
 bench*.md
 *.pth
