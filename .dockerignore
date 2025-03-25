@@ -1,0 +1,13 @@
+.git
+.eggs
+build
+dist
+flash_attn.egg-info
+log
+scripts
+gpucore*
+bench*.md
+*.pth
+*.html
+*.png
+*.csv
