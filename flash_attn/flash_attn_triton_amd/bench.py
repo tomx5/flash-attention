@@ -39,17 +39,17 @@ FUNCTIONS = {
 
 # mapping of which data types are supported for each function
 SUPPORTED_DTYPES = {
-    "flash_attn_func": [torch.float32, torch.float16],
+    "flash_attn_func": [torch.float16], # [torch.float16, torch.float32],
     "flash_attn_fp8_func": [torch.float8_e4m3fnuz],
-    "flash_attn_kvpacked_func": [torch.float32, torch.float16],
-    "flash_attn_varlen_func": [torch.float32, torch.float16],
+    "flash_attn_kvpacked_func": [torch.float16, torch.float32],
+    "flash_attn_varlen_func": [torch.float16, torch.float32],
     "flash_attn_varlen_fp8_func": [torch.float8_e4m3fnuz],
-    "flash_attn_varlen_kvpacked_func": [torch.float32, torch.float16],
-    "flash_attn_qkvpacked_func": [torch.float32, torch.float16],
-    "flash_attn_qkvpacked_fp8_func": [torch.float8_e4m3fnuz],
-    "flash_attn_varlen_qkvpacked_func": [torch.float32, torch.float16],
-    "flash_attn_varlen_qkvpacked_fp8_func": [torch.float8_e4m3fnuz],
-    "flash_attn_with_kvcache": [torch.float32, torch.float16],
+    "flash_attn_varlen_kvpacked_func": [torch.float16, torch.float32],
+    "flash_attn_qkvpacked_func": [torch.float16, torch.float32],
+    "flash_attn_qkvpacked_fp8_func": [torch.float16, torch.float32],
+    "flash_attn_varlen_qkvpacked_func": [torch.float16, torch.float32],
+    "flash_attn_varlen_qkvpacked_fp8_func": [torch.float16, torch.float32],
+    "flash_attn_with_kvcache": [torch.float16, torch.float32],
 }
 
 def estimate_memory(config):
