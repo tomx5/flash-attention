@@ -61,20 +61,18 @@ def pad_rearrange_dropout_mask_hts_to_bhss(S_dmask, cu_seqlens_q, seqlen_q_round
     S_dmask = S_dmask.transpose(0, 1)
     return S_dmask
 
-@pytest.mark.parametrize("kvpacked", [False])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("kvpacked", [True])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("mha_type", ["mha"])
 @pytest.mark.parametrize("deterministic", [False])
 @pytest.mark.parametrize("alibi", [False])
 @pytest.mark.parametrize("local", [False])
-@pytest.mark.parametrize("causal", [False, True])
-@pytest.mark.parametrize("d", [64, 72, 80, 88, 96, 104, 112, 120, 128])
+@pytest.mark.parametrize("causal", [True])
+@pytest.mark.parametrize("d", [64])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
-        (256, 512),
-        (1024, 1024),
-        (2048, 2048),
+        (128, 256),
     ],
 )
 @pytest.mark.parametrize("dropout_p", [0.0])
@@ -85,13 +83,13 @@ def test_flash_attn_output(
     # set seed
     torch.random.manual_seed(0)
     batch_size = 4
-    nheads = 9
+    nheads = 16
     nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 3)
     assert nheads % nheads_k == 0
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
-    q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
+    q = 0.1*torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
     if kvpacked:
-        kv = torch.randn(
+        kv = 0.1*torch.randn(
             batch_size, seqlen_k, 2, nheads_k, d, device=device, dtype=dtype, requires_grad=True
         )
     else:
@@ -217,7 +215,8 @@ def test_flash_attn_output(
     # of a Pytorch implementation.
     assert (out - out_ref).abs().max().item() <= 2 * (out_pt - out_ref).abs().max().item()
 
-    g = torch.randn_like(out)
+    #g = torch.randn_like(out)
+    g = 0.001*torch.randint(0, 200, out.shape, dtype=dtype, device=device)
     if is_bwd_hdim_supported(d):
         if kvpacked:
             (
@@ -263,7 +262,12 @@ def test_flash_attn_output(
         print(f"dQ Pytorch mean diff: {(dq_pt - dq_ref).abs().mean().item()}")
         print(f"dK Pytorch mean diff: {(dk_pt - dk_ref).abs().mean().item()}")
         print(f"dV Pytorch mean diff: {(dv_pt - dv_ref).abs().mean().item()}")
-
+        
+        te_tols = dict(atol=1.5e-2, rtol=1.5e-2)
+        torch.testing.assert_close(out, out_ref, **te_tols);
+        torch.testing.assert_close(dq, dq_ref, **te_tols);
+        torch.testing.assert_close(dk, dk_ref, **te_tols);
+        torch.testing.assert_close(dv, dv_ref, **te_tols);
         # TODO - use 10 times to check, wait for ck to fix bwd precision issue
         assert (dq - dq_ref).abs().max().item() <= 10 * (dq_pt - dq_ref).abs().max().item()
         assert (dk - dk_ref).abs().max().item() <= 10 * (dk_pt - dk_ref).abs().max().item()

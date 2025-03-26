@@ -205,7 +205,7 @@ def construct_local_mask(
         else rearrange(query_padding_mask.sum(-1), "b -> b 1 1 1")
     )
     if window_size[0] < 0:
-        return col_idx > row_idx + sk - sq + window_size[1]
+        return col_idx > row_idx + window_size[1]
     else:
         sk = torch.full_like(col_idx, seqlen_k) if key_padding_mask is None else sk
         return torch.logical_or(
