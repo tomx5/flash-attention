@@ -10,6 +10,8 @@ from flash_attn.flash_attn_triton_amd.utils import input_helper
 from typing import Dict, List, Literal, Optional, Tuple
 from functools import lru_cache
 
+ENV_FLAGS = ["FLASH_ATTENTION_TRITON_AMD_ENABLE", "FLASH_ATTENTION_TRITON_AMD_AUTOTUNE", "FLASH_ATTENTION_TRITON_AMD_DEBUG"]
+
 SUPPORTED_DTYPES = {
     "flash_attn_func": [torch.float16], # [torch.float16, torch.float32],
     "flash_attn_fp8_func": [torch.float8_e4m3fnuz],
@@ -24,8 +26,6 @@ SUPPORTED_DTYPES = {
     "flash_attn_with_kvcache": [torch.float16, torch.float32],
 }
 
-FUNCTIONS = SUPPORTED_DTYPES.keys()
-
 SUPPORTED_BACKENDS = {
     "flash_attn_func": ["ck", "triton"],
     "flash_attn_fp8_func": ["triton"],
@@ -39,6 +39,8 @@ SUPPORTED_BACKENDS = {
     "flash_attn_varlen_qkvpacked_fp8_func": ["triton"],
     "flash_attn_with_kvcache": ["ck", "triton"],
 }
+
+FUNCTIONS = SUPPORTED_DTYPES.keys()
 
 @lru_cache()
 def get_fn_params(fn_name):
@@ -282,7 +284,7 @@ def create_benchmark_fn(
     elif fn_name == "flash_attn_with_kvcache":
         q, k_cache, v_cache, _, metadata = fn_input
         def flash_attn_with_kvcache_bench_fn():
-            out = flash_attn_with_kvcache(
+            out = flash_attn.flash_attn_with_kvcache(
                 q,
                 k_cache,
                 v_cache,
@@ -402,7 +404,7 @@ def load_flash_attn_module(backend: Literal["triton", "ck"]):
     """
 
     # remove any existing env variables first
-    for key in ["FLASH_ATTENTION_TRITON_AMD_ENABLE", "FLASH_ATTENTION_TRITON_AMD_AUTOTUNE"]:
+    for key in ENV_FLAGS:
         if key in os.environ:
             del os.environ[key]
 
@@ -559,9 +561,9 @@ def process_args():
     return configs
 
 def check_environment_variables():
-    if "FLASH_ATTENTION_TRITON_AMD_ENABLE" in os.environ:
-        raise ValueError(f"Running with FLASH_ATTENTION_TRITON_AMD_ENABLE environment variable is not recommended for the benching script. Use --help to see how to use this bench script.")
-
+    for key in ENV_FLAGS:
+        if key in os.environ:
+            raise ValueError(f"Running with {key} environment variable is not recommended for the benching script. Use --help to see how to use the benching script.")
 
 def main():
     """
@@ -569,8 +571,6 @@ def main():
     """
     # check environment variables
     check_environment_variables()
-
-
 
     # start timing the entire benchmarking process
     total_start_time = time.time()
