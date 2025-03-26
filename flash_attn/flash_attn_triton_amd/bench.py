@@ -13,17 +13,17 @@ from functools import lru_cache
 ENV_FLAGS = ["FLASH_ATTENTION_TRITON_AMD_ENABLE", "FLASH_ATTENTION_TRITON_AMD_AUTOTUNE", "FLASH_ATTENTION_TRITON_AMD_DEBUG"]
 
 SUPPORTED_DTYPES = {
-    "flash_attn_func": [torch.float16], # [torch.float16, torch.float32],
+    "flash_attn_func": [torch.float16],
     "flash_attn_fp8_func": [torch.float8_e4m3fnuz],
-    "flash_attn_kvpacked_func": [torch.float16, torch.float32],
-    "flash_attn_varlen_func": [torch.float16, torch.float32],
+    "flash_attn_kvpacked_func": [torch.float16],
+    "flash_attn_varlen_func": [torch.float16],
     "flash_attn_varlen_fp8_func": [torch.float8_e4m3fnuz],
-    "flash_attn_varlen_kvpacked_func": [torch.float16, torch.float32],
-    "flash_attn_qkvpacked_func": [torch.float16, torch.float32],
-    "flash_attn_qkvpacked_fp8_func": [torch.float16, torch.float32],
-    "flash_attn_varlen_qkvpacked_func": [torch.float16, torch.float32],
-    "flash_attn_varlen_qkvpacked_fp8_func": [torch.float16, torch.float32],
-    "flash_attn_with_kvcache": [torch.float16, torch.float32],
+    "flash_attn_varlen_kvpacked_func": [torch.float16],
+    "flash_attn_qkvpacked_func": [torch.float16],
+    "flash_attn_qkvpacked_fp8_func": [torch.float16],
+    "flash_attn_varlen_qkvpacked_func": [torch.float16],
+    "flash_attn_varlen_qkvpacked_fp8_func": [torch.float16],
+    "flash_attn_with_kvcache": [torch.float16],
 }
 
 SUPPORTED_BACKENDS = {
@@ -116,12 +116,14 @@ def generate_benchmark_configs(is_varlen, packing):
         hq_values = hk_values = [2, 8]
         sq_values = sk_values = [256, 8192]
     else:
-        hq_values = [64, 128] # test mqa/gqa
-        hk_values = [16, 64]
         if is_varlen: # make sure the seqlen is greater than the batchsize so that subsequences are greater than 0
+            hq_values = [16, 32] # test mqa/gqa
+            hk_values = [8, 16]
             sq_values = [128, 512]
             sk_values = [512, 2024]
         else:
+            hq_values = [64, 128] # test mqa/gqa
+            hk_values = [16, 64]
             sq_values = [4, 4096]
             sk_values = [4096, 16384] # test large k values for inference perf
     d_head_values = [64, 128]
@@ -407,6 +409,8 @@ def load_flash_attn_module(backend: Literal["triton", "ck"]):
     for key in ENV_FLAGS:
         if key in os.environ:
             del os.environ[key]
+
+    # os.environ["FLASH_ATTENTION_TRITON_AMD_DEBUG"] = "0"
 
     # set environment variable for the desired backend
     if backend == "triton":

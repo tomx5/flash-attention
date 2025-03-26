@@ -166,6 +166,11 @@ def generate_varlen_tensor(
     dtype: torch.dtype = torch.float32,
     DEBUG_INPUT: bool = False
 ):
+    if DEBUG:
+        print("total_seqlen", total_seqlen)
+        print("num_heads", num_heads)
+        print("head_size", head_size)
+
     # save fp8 type
     is_fp8_dtype = is_dtype_fp8(dtype)
     if is_fp8_dtype:
