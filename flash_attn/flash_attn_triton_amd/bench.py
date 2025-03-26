@@ -400,9 +400,16 @@ def load_flash_attn_module(backend: Literal["triton", "ck"]):
     """
     Load the flash_attn module with the specified backend configuration
     """
-    # Set environment variable for the desired backend
+
+    # remove any existing env variables first
+    for key in ["FLASH_ATTENTION_TRITON_AMD_ENABLE", "FLASH_ATTENTION_TRITON_AMD_AUTOTUNE"]:
+        if key in os.environ:
+            del os.environ[key]
+
+    # set environment variable for the desired backend
     if backend == "triton":
         os.environ["FLASH_ATTENTION_TRITON_AMD_ENABLE"] = "TRUE"
+        os.environ["FLASH_ATTENTION_TRITON_AMD_AUTOTUNE"] = "1"
     elif backend == "ck":
         os.environ["FLASH_ATTENTION_TRITON_AMD_ENABLE"] = "FALSE"
     else:
@@ -552,13 +559,8 @@ def process_args():
     return configs
 
 def check_environment_variables():
-    """
-    check for environment variables that affect backend selection and warn users
-    """
-    FLASH_ATTENTION_TRITON_AMD_ENABLE = os.environ.get("FLASH_ATTENTION_TRITON_AMD_ENABLE", "").upper() == "TRUE"
-    
-    if FLASH_ATTENTION_TRITON_AMD_ENABLE:
-        raise ValueError(f"Running with FLASH_ATTENTION_TRITON_AMD_ENABLE is not recommended for the benching script. Use --help to see how to use this bench script.")
+    if "FLASH_ATTENTION_TRITON_AMD_ENABLE" in os.environ:
+        raise ValueError(f"Running with FLASH_ATTENTION_TRITON_AMD_ENABLE environment variable is not recommended for the benching script. Use --help to see how to use this bench script.")
 
 
 def main():
