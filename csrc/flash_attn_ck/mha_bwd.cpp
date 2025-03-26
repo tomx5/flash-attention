@@ -77,7 +77,7 @@ void print_tensor_info(const char *name, const at::Tensor &tensor) {
     size_t total_bytes = tensor.numel() * element_size;
     void* end_addr = static_cast<char*>(start_addr) + total_bytes;
     
-    std::cout << name << " ptr: " << start_addr << " to " << end_addr 
+    std::cout << name << " memory: " << start_addr << " to " << end_addr 
               << " (size: " << total_bytes << " bytes)"
               << " dims: " << tensor.sizes() << " stride: " << tensor.strides()
               << std::endl;
@@ -103,7 +103,7 @@ fmha_bwd_traits get_ck_fmha_bwd_traits(const mask_info &mask,
                            has_dropout,
                            false,    // s_randval
                            deterministic,
-                           get_env_var("FMHA_USE_BWD_V3", false),
+                           get_env_var("FMHA_USE_BWD_V3", true),
                            get_env_var("FMHA_V3_ATOMIC_FP32", true),  // is_v3_atomic_fp32
                            get_env_var("FMHA_V3_BF16_CVT", 1)};       // how_v3_bf16_cvt 0:RTNE; 1:RTNA; 2:RTZ
 }
