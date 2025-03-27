@@ -410,12 +410,11 @@ def load_flash_attn_module(backend: Literal["triton", "ck"]):
         if key in os.environ:
             del os.environ[key]
 
-    # os.environ["FLASH_ATTENTION_TRITON_AMD_DEBUG"] = "0"
-
     # set environment variable for the desired backend
     if backend == "triton":
         os.environ["FLASH_ATTENTION_TRITON_AMD_ENABLE"] = "TRUE"
-        os.environ["FLASH_ATTENTION_TRITON_AMD_AUTOTUNE"] = "1"
+        os.environ["FLASH_ATTENTION_TRITON_AMD_AUTOTUNE"] = "1" # affect fwd prefill only
+        os.environ["FLASH_ATTENTION_TRITON_AMD_DEBUG"] = "1"
     elif backend == "ck":
         os.environ["FLASH_ATTENTION_TRITON_AMD_ENABLE"] = "FALSE"
     else:
