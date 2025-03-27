@@ -630,9 +630,13 @@ def main():
             # Ensure we're joining on input configuration columns
             combined_df = combined_df.merge(df, on=input_config_cols, how="outer")
     
+
+    # print new line to seperate the combined data information from the benchmark specific information
+    print()
+
     # print total time for all benchmarks
     total_elapsed_time = time.time() - total_start_time
-    print(f"\nTotal time for all benchmarks: {total_elapsed_time:.2f} seconds")
+    print(f"Total time for all benchmarks: {total_elapsed_time:.2f} seconds")
 
     # save combined data and make comparisons if we have multiple function configs
     if has_multiple_func_configs:
@@ -645,18 +649,20 @@ def main():
             col1 = func1.column_name()
             col2 = func2.column_name()
             
-            # check if both columns exist in the dataframe
+            # show relative diff
             if col1 in combined_df.columns and col2 in combined_df.columns:
-                # add percentage column (NaN handling is automatic)
+                # new percentage column shows how much faster/slower func1 is compared to func2
                 pct_col = f"{func1}_vs_{func2}_percent"
-                combined_df[pct_col] = (combined_df[col1] / combined_df[col2]) * 100
+                
+                # calculate the relative difference as a percentage
+                # positive: func1 is faster, negative: func2 is faster
+                combined_df[pct_col] = (combined_df[col2] - combined_df[col1]) / combined_df[col2] * 100
                 
                 # print an explanation of the percentage values
                 print(f"\nComparison Results ({func1} vs {func2}):")
-                print(f"Values below 100% mean {func1} is faster than {func2}")
-                print(f"Values above 100% mean {func1} is slower than {func2}")
+                print(f"Percentage values show relative performance: positive means {func1} is faster by that percentage, negative means slower")
         
-        print(f"\nCombined data:")
+        print(f"Combined data:")
         print(combined_df)
 
         # save csv & markdown
