@@ -127,7 +127,7 @@ def generate_benchmark_configs(is_varlen, packing):
             sq_values = [4, 4096]
             sk_values = [4096, 16384] # test large k values for inference perf
     d_head_values = [64, 128]
-    causal_values = [False]
+    causal_values = [True] # most models usual causal True
     dropout_values = [0.0]
     
     # generate all fn_configs without inputs
@@ -436,12 +436,18 @@ def load_flash_attn_module(backend: Literal["triton", "ck"]):
     
     return flash_attn
 
-
-
-def run_benchmark(fn_name, fn_inputs, mode, dtype, backend: Literal["triton", "ck"]):
+def run_benchmark(func_config, input_configs):
     """
-    Runs the benchmark for the provided function based on the provided arguments.
+    Runs the benchmark for the provided function configuration with the given input configurations.
     """
+    # print new line to seperate benchmark runs
+    print()
+
+    # extract function configuration parameters
+    fn_name = func_config.fn_name
+    mode = func_config.mode
+    dtype = func_config.dtype
+    backend = func_config.backend
 
     # load flash attention module
     flash_attn_module = load_flash_attn_module(backend)
@@ -449,20 +455,15 @@ def run_benchmark(fn_name, fn_inputs, mode, dtype, backend: Literal["triton", "c
     # start timing the benchmark
     start_time = time.time()
 
-    fn_configs = fn_inputs.keys()
-
-    # check that we have at least one config
-    assert len(fn_configs) > 0
-
     # print bench fn
     mode_text = "forward" if mode == "fwd" else "forward and backward"
-    print(f"\nBenchmarking {fn_name} {mode_text} with {len(fn_configs)} configs in {dtype} on the {backend} backend ...")
+    print(f"Benchmarking {fn_name} {mode_text} with {len(input_configs)} configs in {dtype} on the {backend} backend ...")
 
     # Setup benchmark configurations
     bench_configs = [
         triton.testing.Benchmark(
             x_names=["BATCH", "HQ", "HK", "N_CTX_Q", "N_CTX_K", "D_HEAD", "CAUSAL", "DROPOUT"],
-            x_vals=fn_configs,
+            x_vals=list(input_configs.keys()),
             line_arg="provider",
             line_vals=["triton"],
             line_names=["Time (ms)"],
@@ -479,7 +480,7 @@ def run_benchmark(fn_name, fn_inputs, mode, dtype, backend: Literal["triton", "c
     def bench_function(
         BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, CAUSAL, DROPOUT, mode, provider, device="cuda"
     ):
-        fn_input = fn_inputs[(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, CAUSAL, DROPOUT)]
+        fn_input = input_configs[(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, CAUSAL, DROPOUT)]
         benchmark_fn = create_benchmark_fn(flash_attn_module, fn_name, fn_input, mode)
 
         # run the benchmark
@@ -488,21 +489,40 @@ def run_benchmark(fn_name, fn_inputs, mode, dtype, backend: Literal["triton", "c
 
     df = bench_function.run(save_path=".", print_data=True, return_df=True)[0]
     
+    # set the column name to reflect the function configuration
+    df = df.rename(columns={"Time (ms)": func_config.column_name()})
+    
     # calculate and print elapsed time
     elapsed_time = time.time() - start_time
     print(f"Total time for benchmarking {fn_name} in {mode} mode with {dtype}: {elapsed_time:.2f} seconds")
 
     return df
 
+# First, let's create a clear structure for the function configuration
+class FunctionConfig:
+    def __init__(self, fn_name, mode, dtype, backend):
+        self.fn_name = fn_name
+        self.mode = mode
+        self.dtype = dtype
+        self.backend = backend
+    
+    def __str__(self):
+        return f"{self.fn_name}_{self.mode}_{self.dtype}_{self.backend}"
+    
+    def column_name(self):
+        return f"{self}__ms"
+
+# Modify process_args() to create separate function configs and input configs
 def process_args():
     """
-    Parses command-line arguments.
+    Parses command-line arguments and returns function configs and input configs.
     """
     # create parser
     parser = argparse.ArgumentParser(
         prog="Benchmark FlashAttention",
         allow_abbrev=False,
     )
+    # functions
     parser.add_argument(
         "-benchmark_fn",
         type=str,
@@ -510,6 +530,7 @@ def process_args():
         choices=FUNCTIONS,
         help=f"Function(s) to benchmark",
     )
+    # config
     parser.add_argument("-b", type=int, default=None, help="Batch size")
     parser.add_argument("-hq", type=int, default=None, help="Q Number of heads")
     parser.add_argument("-hk", type=int, default=None, help="K and V Number of heads")
@@ -531,11 +552,14 @@ def process_args():
                 raise ValueError(f"invalid benchmark function specified: {fn_name}")
         benchmark_fns = args.benchmark_fn
 
-    # get configs
-    configs = []
+    # fenerate function configurations and input configurations separately
+    function_configs = []
+    all_input_configs = {}  # Maps function config -> input configs
+    
     for fn_name in benchmark_fns:
         is_varlen, is_fp8, packing, supported_dtypes, supported_backends, mode, device = get_fn_params(fn_name)
         
+        # Generate or use custom input configurations
         if args.b or args.hq or args.hk or args.sq or args.sk or args.d:
             assert args.b and args.hq and args.sq and args.d, (
                 "if custom config is specified, please provide at least batch, number of Q heads, Q sequence length, and head size."
@@ -549,20 +573,24 @@ def process_args():
             d_head = args.d
             causal = args.causal if args.causal is not None else False
             dropout = args.dropout if args.dropout is not None else 0.0
-            fn_configs = [(batch, hq, hk, sq, sk, d_head, causal, dropout)]
+            input_configs = [(batch, hq, hk, sq, sk, d_head, causal, dropout)]
         else:
-            fn_configs = generate_benchmark_configs(is_varlen, packing)
+            input_configs = generate_benchmark_configs(is_varlen, packing)
         
-        # for each backend and supported dtype, create inputs for all configs
+        # Create a function config for each backend and dtype combination
         for backend in supported_backends:
             for dtype in supported_dtypes:
-                fn_inputs = {}
-                for fn_config in fn_configs:
-                    fn_inputs[fn_config] = generate_fn_inputs(fn_name, *fn_config, dtype, device)
+                func_config = FunctionConfig(fn_name, mode, dtype, backend)
+                function_configs.append(func_config)
                 
-                configs.append((fn_name, fn_inputs, mode, dtype, backend))
+                # Generate inputs for this function configuration
+                fn_inputs = {}
+                for input_config in input_configs:
+                    fn_inputs[input_config] = generate_fn_inputs(fn_name, *input_config, dtype, device)
+                
+                all_input_configs[func_config] = fn_inputs
 
-    return configs
+    return function_configs, all_input_configs
 
 def check_environment_variables():
     for key in ENV_FLAGS:
@@ -579,28 +607,55 @@ def main():
     # start timing the entire benchmarking process
     total_start_time = time.time()
 
-    # process args
-    bench_configs = process_args()
-    has_multiple_configs = True if len(bench_configs) > 1 else False
+    # process args to get function configs and input configs
+    function_configs, all_input_configs = process_args()
+    
+    # Check if we have multiple function configurations
+    has_multiple_func_configs = len(function_configs) > 1
     combined_df = None
 
-    # run benchmarks
-    for fn_name, fn_inputs, mode, dtype, backend in bench_configs:
-        # run benchmark
-        df = run_benchmark(fn_name, fn_inputs, mode, dtype, backend)
-        config_cols = [col for col in df.columns if col != "Time (ms)"]
-        df = df.rename(columns={"Time (ms)": f"{fn_name}_{mode}_{dtype}_{backend}_ms"})
-
+    # run benchmarks for each function configuration
+    for func_config in function_configs:
+        # run benchmark with the input configs for this function config
+        input_configs = all_input_configs[func_config]
+        df = run_benchmark(func_config, input_configs)
+        
+        # Define the columns that represent input configurations
+        input_config_cols = ["BATCH", "HQ", "HK", "N_CTX_Q", "N_CTX_K", "D_HEAD", "CAUSAL", "DROPOUT"]
+        
         # merge into one final dataframe
-        if has_multiple_configs:
-            combined_df = df if combined_df is None else combined_df.merge(df, on=config_cols, how="outer") 
+        if combined_df is None:
+            combined_df = df
+        else:
+            # Ensure we're joining on input configuration columns
+            combined_df = combined_df.merge(df, on=input_config_cols, how="outer")
     
     # print total time for all benchmarks
     total_elapsed_time = time.time() - total_start_time
     print(f"\nTotal time for all benchmarks: {total_elapsed_time:.2f} seconds")
 
-    # save combined data
-    if has_multiple_configs:
+    # save combined data and make comparisons if we have multiple function configs
+    if has_multiple_func_configs:
+        # Check if we have exactly two function configurations to compare
+        if len(function_configs) == 2:
+            func1 = function_configs[0]
+            func2 = function_configs[1]
+            
+            # construct column names for the timing results
+            col1 = func1.column_name()
+            col2 = func2.column_name()
+            
+            # check if both columns exist in the dataframe
+            if col1 in combined_df.columns and col2 in combined_df.columns:
+                # add percentage column (NaN handling is automatic)
+                pct_col = f"{func1}_vs_{func2}_percent"
+                combined_df[pct_col] = (combined_df[col1] / combined_df[col2]) * 100
+                
+                # print an explanation of the percentage values
+                print(f"\nComparison Results ({func1} vs {func2}):")
+                print(f"Values below 100% mean {func1} is faster than {func2}")
+                print(f"Values above 100% mean {func1} is slower than {func2}")
+        
         print(f"\nCombined data:")
         print(combined_df)
 
