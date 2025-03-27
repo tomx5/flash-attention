@@ -640,7 +640,6 @@ def main():
 
     # save combined data and make comparisons if we have multiple function configs
     if has_multiple_func_configs:
-        # Check if we have exactly two function configurations to compare
         if len(function_configs) == 2:
             func1 = function_configs[0]
             func2 = function_configs[1]
@@ -649,19 +648,40 @@ def main():
             col1 = func1.column_name()
             col2 = func2.column_name()
             
-            # show relative diff
-            if col1 in combined_df.columns and col2 in combined_df.columns:
-                # new percentage column shows how much faster/slower func1 is compared to func2
+            # Check if we're comparing triton vs ck (in either order)
+            is_triton_vs_ck = (
+                (func1.backend == "triton" and func2.backend == "ck") or
+                (func1.backend == "ck" and func2.backend == "triton")
+            )
+            
+            if is_triton_vs_ck:
+                # For triton vs ck comparisons, always make triton the baseline and ensure positive means triton is faster
+                if func1.backend == "triton" and func2.backend == "ck":
+                    triton_col = col1
+                    ck_col = col2
+                    pct_col = f"triton_vs_ck_percent"
+                else:
+                    triton_col = col2
+                    ck_col = col1
+                    pct_col = f"triton_vs_ck_percent"
+                    
+                # Calculate percentage: positive means triton faster, negative means ck faster
+                combined_df[pct_col] = (combined_df[ck_col] - combined_df[triton_col]) / combined_df[triton_col] * 100
+                
+                # print explanation
+                print(f"Comparison Results (triton vs ck):")
+                print(f"Percentage values: positive means triton is faster by that percentage, negative means ck is faster")
+            else:
+                # For other comparisons, use the standard approach
                 pct_col = f"{func1}_vs_{func2}_percent"
                 
-                # calculate the relative difference as a percentage
-                # positive: func1 is faster, negative: func2 is faster
-                combined_df[pct_col] = (combined_df[col2] - combined_df[col1]) / combined_df[col2] * 100
+                # Calculate the relative difference as a percentage
+                combined_df[pct_col] = (combined_df[col2] - combined_df[col1]) / combined_df[col1] * 100
                 
-                # print an explanation of the percentage values
-                print(f"\nComparison Results ({func1} vs {func2}):")
-                print(f"Percentage values show relative performance: positive means {func1} is faster by that percentage, negative means slower")
-        
+                # print explanation
+                print(f"Comparison Results ({func1} vs {func2}):")
+                print(f"Percentage values: positive means {func1} is faster than {func2}, negative means slower")
+       
         print(f"Combined data:")
         print(combined_df)
 
