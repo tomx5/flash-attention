@@ -705,7 +705,8 @@ def fwd_kvcache(
             metadata.cache_batch_idx,
         )
         softmax_lse = softmax_lse_triton
+    
     if DEBUG:
-        print("out:", out)
-        print("softmax_lse:", softmax_lse)
+        print("out:", out, out.shape)
+        print("softmax_lse:", softmax_lse, softmax_lse.shape)
     return out, softmax_lse

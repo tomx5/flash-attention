@@ -16,7 +16,7 @@ from flash_attn import (
 from flash_attn.bert_padding import pad_input, unpad_input
 from flash_attn.flash_attn_interface import _get_block_size_n
 from flash_attn.layers.rotary import apply_rotary_emb
-from flash_attn.flash_attn_triton_amd.utils import USE_TRITON_ROCM, is_rdna
+from flash_attn.flash_attn_triton_amd.utils import USE_TRITON_ROCM, generate_bshd_tensor, is_rdna
 
 MAX_HEADDIM_SM8x = 192
 
@@ -1908,17 +1908,17 @@ def test_flash_attn_splitkv(
     "seqlen_q,seqlen_k",
     [
         (2, 2),
-        # (1, 128),
-        # (1, 339),
-        # (3, 1024),
-        # (64, 800),
-        # (64, 256),
-        # (3, 799),
-        # (64, 2048),
-        # (16, 20000),
-        # (1, 128 * 1024),
-        # (16, 128 * 1024),
-        # (128, 128),
+        (1, 128),
+        (1, 339),
+        (3, 1024),
+        (64, 800),
+        (64, 256),
+        (3, 799),
+        (64, 2048),
+        (16, 20000),
+        (1, 128 * 1024),
+        (16, 128 * 1024),
+        (128, 128),
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
@@ -1951,24 +1951,30 @@ def test_flash_attn_kvcache(
     device = "cuda"
     # set seed
     torch.random.manual_seed(0)
-    batch_size = 2
+    DEBUG_INPUT = False
+    batch_size = 1 # 2
     batch_size_cache = batch_size if not has_batch_idx else batch_size * 2
-    nheads = 6
+    nheads = 1 # 6
     # rotary_dim must be a multiple of 16, and must be <= d
     rotary_dim = math.floor(int(rotary_fraction * d) / 16) * 16
     nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 3)
     assert nheads % nheads_k == 0
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
-    q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype)
+    # q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype)
+    q = generate_bshd_tensor(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, DEBUG_INPUT=DEBUG_INPUT)
     seqlen_new = seqlen_q if seqlen_new_eq_seqlen_q else torch.randint(1, seqlen_q + 1, (1,)).item()
     if new_kv:
-        k = torch.randn(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
-        v = torch.randn(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
+        # k = torch.randn(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
+        k = generate_bshd_tensor(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype, DEBUG_INPUT=DEBUG_INPUT)
+        # v = torch.randn(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
+        v = generate_bshd_tensor(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype, DEBUG_INPUT=DEBUG_INPUT)
     else:
         k, v = None, None
     if paged_kv_block_size is None:
-        k_cache = torch.randn(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
-        v_cache = torch.randn(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
+        # k_cache = torch.randn(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
+        k_cache = generate_bshd_tensor(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype, DEBUG_INPUT=DEBUG_INPUT)
+        # v_cache = torch.randn(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
+        v_cache = generate_bshd_tensor(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype, DEBUG_INPUT=DEBUG_INPUT)
         block_table = None
     else:
         (
