@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from typing import Literal, Optional, Union
-from .utils import get_padded_headsize, get_shape_and_strides_from_layout
+from .utils import DEBUG, get_padded_headsize, get_shape_and_strides_from_layout
 
 @triton.jit
 def _fwd_kernel_splitK(
@@ -616,6 +616,7 @@ def attention_decode_forward_triton_impl_old(
     out_splitk = torch.empty([batch_size * n_group_q * heads_per_group_q, split_k, seqlen_q_ceil, dim_padded], dtype=torch.float32, device=q.device)
     metadata = torch.empty([batch_size * n_group_q * heads_per_group_q, 2, split_k, seqlen_q_ceil], dtype=torch.float32, device=q.device)
     lse = torch.empty((batch_size * n_group_q * heads_per_group_q, seqlen_q), device=q.device, dtype=torch.float32)
+    out = torch.empty((batch_size, seqlen_q, n_group_q, heads_per_group_q, dim_padded), device=q.device, dtype=q.dtype)
     grid = (triton.cdiv(seqlen_q, BLOCK_M), batch_size * n_group_q * heads_per_group_q, split_k)
 
     num_warps = 1
@@ -624,8 +625,8 @@ def attention_decode_forward_triton_impl_old(
 
     # strides for split_k
     stride_qz, stride_qm, stride_qg, stride_qh, stride_qd  = q.stride()
-    stride_kz, stride_kn, stride_kg, stride_kh, stride_kd  = k_cache.stride()
-    stride_vz, stride_vn, stride_vg, stride_vh, stride_vd  = v_cache.stride()
+    stride_kc_z, stride_kc_n, stride_kc_g, stride_kc_h, stride_kc_d  = k_cache.stride()
+    stride_vc_z, stride_vc_n, stride_vc_g, stride_vc_h, stride_vc_d  = v_cache.stride()
     stride_osk_zhg, stride_osk_s, stride_osk_m, stride_osk_d  = out_splitk.stride()
     stride_mzhg, stride_m2, stride_ms, stride_mm = metadata.stride()
     if is_new_kv:
@@ -638,7 +639,18 @@ def attention_decode_forward_triton_impl_old(
         stride_az, stride_ah  = alibi_slopes.stride()
     else:
         stride_az, stride_ah  = (None, None)
+    stride_osk_zhg, stride_osk_s, stride_osk_m, stride_osk_d = out_splitk.stride()
+    stride_oz, stride_om, stride_og, stride_oh, stride_od  = out.stride()
+    stride_lse_zhg, stride_lse_m = lse.stride()
 
+    if DEBUG:
+        print("dim_padded:", dim_padded)
+        print("stride_qz, stride_qm, stride_qg, stride_qh, stride_qd", (stride_qz, stride_qm, stride_qg, stride_qh, stride_qd))
+        print("stride_kz, stride_kn, stride_kg, stride_kh, stride_kd", (stride_kc_z, stride_kc_n, stride_kc_g, stride_kc_h, stride_kc_d))
+        print("stride_vz, stride_vn, stride_vg, stride_vh, stride_vd", (stride_vc_z, stride_vc_n, stride_vc_g, stride_vc_h, stride_vc_d))
+        print("stride_osk_zhg, stride_osk_s, stride_osk_m, stride_osk_d", (stride_osk_zhg, stride_osk_s, stride_osk_m, stride_osk_d))
+        print("stride_mzhg, stride_m2, stride_ms, stride_mm", (stride_mzhg, stride_m2, stride_ms, stride_mm))
+        print("stride_lse_zhg, stride_lse_m", (stride_lse_zhg, stride_lse_m))
 
     # TODO: enable quantization
     _fwd_kernel_splitK[grid](
@@ -660,17 +672,17 @@ def attention_decode_forward_triton_impl_old(
         stride_qh=stride_qh,
         stride_qd=stride_qd,
         # k strides
-        stride_kz=stride_kz,
-        stride_kn=stride_kn,
-        stride_kg=stride_kg,
-        stride_kh=stride_kh,
-        stride_kd=stride_kd,
+        stride_kz=stride_kc_z,
+        stride_kn=stride_kc_n,
+        stride_kg=stride_kc_g,
+        stride_kh=stride_kc_h,
+        stride_kd=stride_kc_d,
         # v strides
-        stride_vz=stride_vz,
-        stride_vn=stride_vn,
-        stride_vg=stride_vg,
-        stride_vh=stride_vh,
-        stride_vd=stride_vd,
+        stride_vz=stride_vc_z,
+        stride_vn=stride_vc_n,
+        stride_vg=stride_vc_g,
+        stride_vh=stride_vc_h,
+        stride_vd=stride_vc_d,
         # out_splitk strides
         stride_osk_zhg=stride_osk_zhg,
         stride_osk_s=stride_osk_s,
@@ -719,7 +731,6 @@ def attention_decode_forward_triton_impl_old(
         num_stages=1,
     )
 
-    out = torch.empty((batch_size, seqlen_q, n_group_q, heads_per_group_q, dim_padded), device=q.device, dtype=q.dtype)
 
     # Merge together
     splitK_pow2 = triton.next_power_of_2(split_k)
@@ -731,11 +742,6 @@ def attention_decode_forward_triton_impl_old(
     assert dim_padded % k_block_num == 0
     k_block_size = dim_padded // k_block_num
     grid = (batch_size * n_group_q * heads_per_group_q, seqlen_q, k_block_num)
-
-    # strides for reduce
-    stride_osk_zhg, stride_osk_s, stride_osk_m, stride_osk_d = out_splitk.stride()
-    stride_oz, stride_om, stride_og, stride_oh, stride_od  = out.stride()
-    stride_lse_zhg, stride_lse_m = lse.stride()
 
     _splitK_reduce[grid](
         out_splitk, 
@@ -819,43 +825,43 @@ def attention_decode_forward_triton_impl(
     NUM_QUANT_GROUPS = 1
 
     # get shapes and strides
-    (batch_size, seqlen_q, nheads_q, dim_q), (stride_qz, stride_qm, stride_qh, stride_qd) = get_shape_and_strides_from_layout(q, layout)
-    (_, seqlen_k, nheads_k, dim_k), (stride_kz, stride_kn, stride_kh, stride_kd) = get_shape_and_strides_from_layout(k_cache, layout)
-    (_, seqlen_v, nheads_v, dim_v), (stride_vz, stride_vn, stride_vh, stride_vd) = get_shape_and_strides_from_layout(v_cache, layout)
+    (batch_size, seqlen_q, nheads_q, dim_q), (stride_qz, stride_qh, stride_qm, stride_qd) = get_shape_and_strides_from_layout(q, layout)
+    (_, seqlen_kc, nheads_kc, dim_kc), (stride_kc_z, stride_kc_h, stride_kc_n, stride_kc_d) = get_shape_and_strides_from_layout(k_cache, layout)
+    (_, seqlen_vc, nheads_vc, dim_vc), (stride_vc_z, stride_vc_h, stride_vc_n, stride_vc_d) = get_shape_and_strides_from_layout(v_cache, layout)
     if is_new_kv:
-        ( _, seqlen_kn, nheads_kn, dim_kn), (stride_kn_z, stride_kn_n, stride_kn_h, stride_kn_d) = get_shape_and_strides_from_layout(k_new, layout)
-        (_, seqlen_vn, nheads_vn, dim_vn), (stride_vn_z, stride_vn_n, stride_vn_h, stride_vn_d) = get_shape_and_strides_from_layout(v_new, layout)
+        ( _, seqlen_kn, nheads_kn, dim_kn), (stride_kn_z, stride_kn_h, stride_kn_n, stride_kn_d) = get_shape_and_strides_from_layout(k_new, layout)
+        (_, seqlen_vn, nheads_vn, dim_vn), (stride_vn_z, stride_vn_h, stride_vn_n, stride_vn_d) = get_shape_and_strides_from_layout(v_new, layout)
     else:
-        ( _, seqlen_kn, nheads_kn, dim_kn), (stride_kn_z, stride_kn_n, stride_kn_h, stride_kn_d) = (None, None, None, None), (None, None, None, None)
-        (_, seqlen_vn, nheads_vn, dim_vn), (stride_vn_z, stride_vn_n, stride_vn_h, stride_vn_d) = (None, None, None, None), (None, None, None, None)
-    (_, seqlen_o, nheads_o, dim_o), (stride_oz, stride_om, stride_oh, stride_od) = get_shape_and_strides_from_layout(q, layout)
+        ( _, seqlen_kn, nheads_kn, dim_kn), (stride_kn_z, stride_kn_h, stride_kn_n, stride_kn_d) = (None, None, None, None), (None, None, None, None)
+        (_, seqlen_vn, nheads_vn, dim_vn), (stride_vn_z, stride_vn_h, stride_vn_n, stride_vn_d) = (None, None, None, None), (None, None, None, None)
+    (_, seqlen_o, nheads_o, dim_o), (stride_oz, stride_oh, stride_om, stride_od) = get_shape_and_strides_from_layout(out, layout)
     if alibi_slopes:
         stride_az, stride_ah = alibi_slopes.stride()
     else:
         stride_az, stride_ah = (None, None)
 
-    assert dim_q == dim_k == dim_v, f"Dimensions must match: {dim_q}, {dim_k}, {dim_v}"
+    assert dim_q == dim_kc == dim_vc, f"Dimensions must match: {dim_q}, {dim_kc}, {dim_vc}"
 
     # add extra information needed by the kernels
     if layout == "bshd":
-        (n_group_q, heads_per_group_q), stride_qg = (1, nheads_q), 0
-        (n_group_k, heads_per_group_k), stride_kg = (1, nheads_k), 0
-        (n_group_v, heads_per_group_v), stride_vg = (1, nheads_v), 0
+        (n_group_q, heads_per_group_q), stride_qg = (1, nheads_q), stride_qm
+        (n_group_k, heads_per_group_k), stride_kc_g = (1, nheads_kc), stride_kc_n
+        (n_group_v, heads_per_group_v), stride_vc_g = (1, nheads_vc), stride_vc_n
         if is_new_kv:
-            (n_group_kn, heads_per_group_kn), stride_kn_g = (1, nheads_kn), 0
-            (n_group_vn, heads_per_group_vn), stride_vn_g = (1, nheads_vn), 0
+            (n_group_kn, heads_per_group_kn), stride_kn_g = (1, nheads_kn), stride_kn_n
+            (n_group_vn, heads_per_group_vn), stride_vn_g = (1, nheads_vn), stride_vn_n
         else:
             (n_group_kn, heads_per_group_kn), stride_kn_g = (None, None), None
             (n_group_vn, heads_per_group_vn), stride_vn_g = (None, None), None
-        (n_group_o, heads_per_group_o), stride_og = (1, nheads_o), 0
+        (n_group_o, heads_per_group_o), stride_og = (1, nheads_o), stride_om
     else:
         raise ValueError(f"{layout} layout is not supported")
 
     # get padded size
-    dim_padded  = get_padded_headsize(dim_k)
+    dim_padded  = get_padded_headsize(dim_kc)
 
     # Handle MQA/GQA case
-    group_size = nheads_q // nheads_k
+    group_size = nheads_q // nheads_kc
     if group_size > 1:
         is_gqa = True
     else:
@@ -865,8 +871,8 @@ def attention_decode_forward_triton_impl(
         split_k = SPLIT_K
     else:
         # Use heuristics
-        split_k = get_split_k(batch_size, n_group_q, heads_per_group_q, seqlen_k) # NOTE: should the split think about seqlens?
-    split_size = (seqlen_k + split_k - 1) // split_k
+        split_k = get_split_k(batch_size, n_group_q, heads_per_group_q, seqlen_kc) # NOTE: should the split think about seqlens?
+    split_size = (seqlen_kc + split_k - 1) // split_k
 
     # setup grid
     seqlen_q_ceil = (seqlen_q + BLOCK_M - 1) // BLOCK_M * BLOCK_M
@@ -881,6 +887,15 @@ def attention_decode_forward_triton_impl(
     stride_osk_zhg, stride_osk_s, stride_osk_m, stride_osk_d = out_splitk.stride()
     stride_mzhg, stride_m2, stride_ms, stride_mm = metadata.stride()
     stride_lse_zhg, stride_lse_m = lse.stride()
+
+    if DEBUG:
+        print("dim_padded:", dim_padded)
+        print("stride_qz, stride_qm, stride_qg, stride_qh, stride_qd", (stride_qz, stride_qm, stride_qg, stride_qh, stride_qd))
+        print("stride_kz, stride_kn, stride_kg, stride_kh, stride_kd", (stride_kc_z, stride_kc_n, stride_kc_g, stride_kc_h, stride_kc_d))
+        print("stride_vz, stride_vn, stride_vg, stride_vh, stride_vd", (stride_vc_z, stride_vc_n, stride_vc_g, stride_vc_h, stride_vc_d))
+        print("stride_osk_zhg, stride_osk_s, stride_osk_m, stride_osk_d", (stride_osk_zhg, stride_osk_s, stride_osk_m, stride_osk_d))
+        print("stride_mzhg, stride_m2, stride_ms, stride_mm", (stride_mzhg, stride_m2, stride_ms, stride_mm))
+        print("stride_lse_zhg, stride_lse_m", (stride_lse_zhg, stride_lse_m))
 
     # TODO: enable quantization
     _fwd_kernel_splitK[grid](
@@ -902,17 +917,17 @@ def attention_decode_forward_triton_impl(
         stride_qh=stride_qh,
         stride_qd=stride_qd,
         # k strides
-        stride_kz=stride_kz,
-        stride_kn=stride_kn,
-        stride_kg=stride_kg,
-        stride_kh=stride_kh,
-        stride_kd=stride_kd,
+        stride_kz=stride_kc_z,
+        stride_kn=stride_kc_n,
+        stride_kg=stride_kc_g,
+        stride_kh=stride_kc_h,
+        stride_kd=stride_kc_d,
         # v strides
-        stride_vz=stride_vz,
-        stride_vn=stride_vn,
-        stride_vg=stride_vg,
-        stride_vh=stride_vh,
-        stride_vd=stride_vd,
+        stride_vz=stride_vc_z,
+        stride_vn=stride_vc_n,
+        stride_vg=stride_vc_g,
+        stride_vh=stride_vc_h,
+        stride_vd=stride_vc_d,
         # out_splitk strides
         stride_osk_zhg=stride_osk_zhg,
         stride_osk_s=stride_osk_s,
@@ -943,13 +958,13 @@ def attention_decode_forward_triton_impl(
         H_kv=heads_per_group_k,
         G_q=n_group_q,
         N_CTX_Q=seqlen_q,
-        N_CTX_K=seqlen_k,
+        N_CTX_K=seqlen_kc,
         N_CTX_NEW=seqlen_kn,
         BLOCK_N_PER_SPLIT=split_size,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_DMODEL=dim_padded,
-        ACTUAL_BLOCK_DMODEL=dim_k,
+        ACTUAL_BLOCK_DMODEL=dim_kc,
         BOUNDS_CHECKS_N=(split_size % BLOCK_N) > 0 or use_cache_seqlens,
         USE_CACHE_SEQLENs=use_cache_seqlens,
         USE_CACHE_BATCH_IDX=cache_batch_idx is not None,
