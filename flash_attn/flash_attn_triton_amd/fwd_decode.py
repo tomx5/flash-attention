@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from typing import Literal, Optional, Union
-from .utils import _strides, get_padded_headsize, get_shape_and_strides_from_layout
+from .utils import get_padded_headsize, get_shape_and_strides_from_layout
 
 @triton.jit
 def _fwd_kernel_splitK(
@@ -401,7 +401,7 @@ def _splitK_reduce(
     stride_oh,
     stride_og,
     stride_om,
-    stride_od,
+    stride_ok,
     stride_lse_zhg,
     stride_lse_m,
     M_ceil: tl.constexpr,
@@ -622,6 +622,24 @@ def attention_decode_forward_triton_impl_old(
     split_size = (seqlen_k + split_k - 1) // split_k
     use_cache_seqlens = cache_seqlens is not None
 
+    # strides for split_k
+    stride_qz, stride_qm, stride_qg, stride_qh, stride_qd  = q.stride()
+    stride_kz, stride_kn, stride_kg, stride_kh, stride_kd  = k_cache.stride()
+    stride_vz, stride_vn, stride_vg, stride_vh, stride_vd  = v_cache.stride()
+    stride_osk_zhg, stride_osk_s, stride_osk_m, stride_osk_d  = out_splitk.stride()
+    stride_mzhg, stride_m2, stride_ms, stride_mm = metadata.stride()
+    if is_new_kv:
+        stride_kn_z, stride_kn_n, stride_kn_g, stride_kn_h, stride_kn_d  = k_new.stride()
+        stride_vn_z, stride_vn_n, stride_vn_g, stride_vn_h, stride_vn_d  = v_new.stride()
+    else:
+        stride_kn_z, stride_kn_n, stride_kn_g, stride_kn_h, stride_kn_d  = (None, None, None, None, None)
+        stride_vn_z, stride_vn_n, stride_vn_g, stride_vn_h, stride_vn_d  = (None, None, None, None, None)
+    if alibi_slopes:
+        stride_az, stride_ah  = alibi_slopes.stride()
+    else:
+        stride_az, stride_ah  = (None, None)
+
+
     # TODO: enable quantization
     _fwd_kernel_splitK[grid](
         Q=q,
@@ -635,14 +653,49 @@ def attention_decode_forward_triton_impl_old(
         Cache_seqlens=cache_seqlens,
         Cache_batch_idx=cache_batch_idx,
         Alibi_slopes=alibi_slopes,
-        **_strides(q, "qz", "qm", "qg", "qh", "qd"),
-        **_strides(k_cache, "kz", "kn", "kg", "kh", "kd"),
-        **_strides(v_cache, "vz", "vn", "vg", "vh", "vd"),
-        **_strides(out_splitk, "osk_zhg", "osk_s", "osk_m", "osk_d"),
-        **_strides(metadata, "mzhg", "m2", "ms", "mm"),
-        **_strides(k_new, "kn_z", "kn_n", "kn_g", "kn_h", "kn_d"),
-        **_strides(v_new, "vn_z", "vn_n", "vn_g", "vn_h", "vn_d"),
-        **_strides(alibi_slopes, "az", "ah"),
+        # q strides
+        stride_qz=stride_qz,
+        stride_qm=stride_qm,
+        stride_qg=stride_qg,
+        stride_qh=stride_qh,
+        stride_qd=stride_qd,
+        # k strides
+        stride_kz=stride_kz,
+        stride_kn=stride_kn,
+        stride_kg=stride_kg,
+        stride_kh=stride_kh,
+        stride_kd=stride_kd,
+        # v strides
+        stride_vz=stride_vz,
+        stride_vn=stride_vn,
+        stride_vg=stride_vg,
+        stride_vh=stride_vh,
+        stride_vd=stride_vd,
+        # out_splitk strides
+        stride_osk_zhg=stride_osk_zhg,
+        stride_osk_s=stride_osk_s,
+        stride_osk_m=stride_osk_m,
+        stride_osk_d=stride_osk_d,
+        # metadata strides
+        stride_mzhg=stride_mzhg,
+        stride_m2=stride_m2,
+        stride_ms=stride_ms,
+        stride_mm=stride_mm,
+        # k_new strides
+        stride_kn_z=stride_kn_z,
+        stride_kn_n=stride_kn_n,
+        stride_kn_g=stride_kn_g,
+        stride_kn_h=stride_kn_h,
+        stride_kn_d=stride_kn_d,
+        # v_new strides
+        stride_vn_z=stride_vn_z,
+        stride_vn_n=stride_vn_n,
+        stride_vn_g=stride_vn_g,
+        stride_vn_h=stride_vn_h,
+        stride_vn_d=stride_vn_d,
+        # alibi strides
+        stride_az=stride_az,
+        stride_ah=stride_ah,
         Z=batch_size,
         H_q=heads_per_group_q,
         H_kv=heads_per_group_k,
@@ -679,15 +732,35 @@ def attention_decode_forward_triton_impl_old(
     k_block_size = dim_padded // k_block_num
     grid = (batch_size * n_group_q * heads_per_group_q, seqlen_q, k_block_num)
 
+    # strides for reduce
+    stride_osk_zhg, stride_osk_s, stride_osk_m, stride_osk_d = out_splitk.stride()
+    stride_oz, stride_om, stride_og, stride_oh, stride_od  = out.stride()
+    stride_lse_zhg, stride_lse_m = lse.stride()
+
     _splitK_reduce[grid](
         out_splitk, 
         metadata, 
         out, 
         lse, 
-        **_strides(out_splitk, "osk_zhg", "osk_s", "osk_m", "osk_k"),
-        **_strides(metadata, "mzhg", "m2", "ms", "mm"), 
-        **_strides(out, "oz", "om", "og", "oh", "od"),
-        **_strides(lse, "lse_zhg", "lse_m"), 
+        # Split-K output strides
+        stride_osk_zhg=stride_osk_zhg,
+        stride_osk_s=stride_osk_s,
+        stride_osk_m=stride_osk_m,
+        stride_osk_k=stride_osk_d,
+        # Metadata strides
+        stride_mzhg=stride_mzhg,
+        stride_m2=stride_m2,
+        stride_ms=stride_ms,
+        stride_mm=stride_mm,
+        # Output tensor strides
+        stride_oz=stride_oz,
+        stride_oh=stride_oh,
+        stride_og=stride_og,
+        stride_om=stride_om,
+        stride_ok=stride_od,
+        # LSE strides
+        stride_lse_zhg=stride_lse_zhg,
+        stride_lse_m=stride_lse_m,
         M_ceil=seqlen_q_ceil, 
         BLOCK_SIZE=k_block_size, 
         G=n_group_q, 
@@ -822,39 +895,47 @@ def attention_decode_forward_triton_impl(
         Cache_seqlens=cache_seqlens,
         Cache_batch_idx=cache_batch_idx,
         Alibi_slopes=alibi_slopes,
+        # q strides
         stride_qz=stride_qz,
         stride_qm=stride_qm,
         stride_qg=stride_qg,
         stride_qh=stride_qh,
         stride_qd=stride_qd,
+        # k strides
         stride_kz=stride_kz,
         stride_kn=stride_kn,
         stride_kg=stride_kg,
         stride_kh=stride_kh,
         stride_kd=stride_kd,
+        # v strides
         stride_vz=stride_vz,
         stride_vn=stride_vn,
         stride_vg=stride_vg,
         stride_vh=stride_vh,
         stride_vd=stride_vd,
+        # out_splitk strides
         stride_osk_zhg=stride_osk_zhg,
         stride_osk_s=stride_osk_s,
         stride_osk_m=stride_osk_m,
         stride_osk_d=stride_osk_d,
+        # metadata strides
         stride_mzhg=stride_mzhg,
         stride_m2=stride_m2,
         stride_ms=stride_ms,
         stride_mm=stride_mm,
+        # k_new strides
         stride_kn_z=stride_kn_z,
         stride_kn_n=stride_kn_n,
         stride_kn_g=stride_kn_g,
         stride_kn_h=stride_kn_h,
         stride_kn_d=stride_kn_d,
+        # v_new strides
         stride_vn_z=stride_vn_z,
         stride_vn_n=stride_vn_n,
         stride_vn_g=stride_vn_g,
         stride_vn_h=stride_vn_h,
         stride_vn_d=stride_vn_d,
+        # alibi strides
         stride_az=stride_az,
         stride_ah=stride_ah,
         Z=batch_size,
@@ -900,7 +981,7 @@ def attention_decode_forward_triton_impl(
         stride_osk_zhg=stride_osk_zhg,
         stride_osk_s=stride_osk_s,
         stride_osk_m=stride_osk_m,
-        stride_osk_k=out_splitk.stride(3),  # For accessing individual elements
+        stride_osk_k=stride_osk_d,
         # Metadata strides
         stride_mzhg=stride_mzhg,
         stride_m2=stride_m2,
@@ -911,7 +992,7 @@ def attention_decode_forward_triton_impl(
         stride_oh=stride_oh,
         stride_og=stride_og,
         stride_om=stride_om,
-        stride_od=stride_od,
+        stride_ok=stride_od,
         # LSE strides
         stride_lse_zhg=stride_lse_zhg,
         stride_lse_m=stride_lse_m,

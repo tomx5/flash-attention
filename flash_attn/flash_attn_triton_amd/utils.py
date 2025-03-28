@@ -657,18 +657,6 @@ def compute_alibi_tensor_ref(alibi_slopes, seqlen_q, seqlen_k):
     relative_pos = torch.abs(q_idx + seqlen_k - seqlen_q - k_idx)  # (N_CTX_Q, N_CTX_K)
     return -1 * alibi_slopes.unsqueeze(-1).unsqueeze(-1) * relative_pos  # (Z, H, N_CTX_Q, N_CTX_K)
 
-def _strides(x: torch.Tensor, *stride_names: str):
-    if x is None:
-        return {f"stride_{s}": 0 for i, s in enumerate(stride_names)}
-
-    assert x.ndim == len(stride_names)
-    return {f"stride_{s}": x.stride(i) for i, s in enumerate(stride_names)}
-
-def get_input_shapes():
-    cases = [(max(1, 2**(16 - i)), 1, 2**i, 16, 1, 128)
-             for i in range(8, 18)] + [(max(1, 2**(16 - i)), 1, 2**i, 16, 2, 128) for i in range(8, 18)]
-    return cases
-
 # -------------------------------
 # Dropouts
 # -------------------------------
