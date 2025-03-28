@@ -3,7 +3,7 @@ import os
 from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
 from .bwd_prefill_split import attention_prefill_backward_triton_split_impl
-from .fwd_decode import attention_decode_forward_triton_impl
+from .fwd_decode import attention_decode_forward_triton_impl, attention_decode_forward_triton_impl_old
 from .fwd_ref import attention_forward_pytorch_ref_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
 from .utils import DEBUG_TRITON, DEBUG_TRITON_DETAIL, MetaData, get_shapes_from_layout, DEBUG, is_fp8
@@ -588,6 +588,33 @@ def fwd_kvcache(
         num_splits: int
     ):
 
+    if DEBUG:
+        print()
+        print("flash_attn_triton_amd.py::fwd_kvcache inputs")
+        print("q:", q, q.shape)
+        print("k_cache:", k_cache, k_cache.shape)
+        print("v_cache:", v_cache, v_cache.shape)
+        print("k:", k, k.shape if k is not None else None)
+        print("v:", v, v.shape if v is not None else None)
+        print("cache_seqlens:", cache_seqlens )
+        print("rotary_cos:",rotary_cos )
+        print("rotary_sin:",rotary_sin)
+        print("cache_batch_idx:", cache_batch_idx)
+        print("cache_leftpad:", cache_leftpad)
+        print("block_table:", block_table)
+        print("alibi_slopes:", alibi_slopes)
+        print("out:", out)
+        print("softmax_scale:", softmax_scale)
+        print("causal:", causal)
+        print("window_size_left:", window_size_left)
+        print("window_size_right:", window_size_right)
+        print("softcap:", softcap)
+        print("rotary_interleaved:", rotary_interleaved)
+        print("num_splits:", num_splits)
+        
+    # output
+    out = torch.zeros_like(q) if out is None else out.zero_()
+
     # fill metadata
     metadata = MetaData(sm_scale=softmax_scale)
     metadata.layout = "bshd"
@@ -645,21 +672,40 @@ def fwd_kvcache(
 
     # launch kernel
     # TODO: pass output as an arg. Maybe we are copying output which is causing slow down
-    output_triton, softmax_lse_triton = attention_decode_forward_triton_impl(
-        q,
-        k_cache,
-        v_cache,
-        k_new,
-        v_new,
-        metadata.sm_scale,
-        metadata.causal,
-        metadata.alibi_slopes,
-        metadata.layout,
-        metadata.cache_seqlens,
-        metadata.cache_batch_idx,
-    )
-    out = output_triton
-    softmax_lse = softmax_lse_triton
-
-
+    OLD_DECODE = os.environ.get('OLD_DECODE', '0').lower() in ('1', 'true', 'yes')
+    if OLD_DECODE:
+        output_triton, softmax_lse_triton = attention_decode_forward_triton_impl_old(
+            q,
+            k_cache,
+            v_cache,
+            k_new,
+            v_new,
+            metadata.sm_scale,
+            metadata.causal,
+            metadata.alibi_slopes,
+            metadata.layout,
+            metadata.cache_seqlens,
+            metadata.cache_batch_idx,
+        )
+        out = output_triton
+        softmax_lse = softmax_lse_triton
+    else:
+        softmax_lse_triton = attention_decode_forward_triton_impl(
+            q,
+            k_cache,
+            v_cache,
+            k_new,
+            v_new,
+            out,
+            metadata.sm_scale,
+            metadata.causal,
+            metadata.alibi_slopes,
+            metadata.layout,
+            metadata.cache_seqlens,
+            metadata.cache_batch_idx,
+        )
+        softmax_lse = softmax_lse_triton
+    if DEBUG:
+        print("out:", out)
+        print("softmax_lse:", softmax_lse)
     return out, softmax_lse

@@ -590,7 +590,7 @@ def cast_to_fp8(
 # -------------------------------
 def get_shape_from_layout(
     x: torch.Tensor,
-    layout: Literal["bshd", "thd"],
+    layout: Literal["bshd", "bhsd", "thd"],
     cu_seqlens: Optional[torch.Tensor] = None,
     max_seqlen: Optional[int] = None,
 ) -> tuple[int, int, int, int]:
@@ -622,7 +622,7 @@ def get_shapes_from_layout(q, k, layout, cu_seqlens_q = None, cu_seqlens_k = Non
 
     return batch_q, nheads_q, nheads_k, head_size_q, seqlen_q, seqlen_k
 
-def get_stride_from_layout(x, layout):
+def get_stride_from_layout(x: torch.Tensor, layout:Literal["bshd", "bhsd", "thd"]):
     if layout == 'thd':
         strides = (0, x.stride(1), x.stride(0), x.stride(2))  
     elif layout == 'bhsd':
@@ -632,6 +632,9 @@ def get_stride_from_layout(x, layout):
     else:
         assert False, 'Got unsupported layout.'
     return strides
+
+def get_shape_and_strides_from_layout(x: torch.Tensor, layout: Literal["bshd", "bhsd", "thd"], cu_seqlens: Optional[torch.Tensor] = None, max_seqlen: Optional[int] = None):
+    return get_shape_from_layout(x, layout, cu_seqlens, max_seqlen), get_stride_from_layout(x, layout)
 
 def get_strides_from_layout(q, k, v, o, layout):
     q_strides = get_stride_from_layout(q, layout)

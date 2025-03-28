@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from typing import Literal, Optional, Union
-from .utils import _strides, get_padded_headsize
+from .utils import _strides, get_padded_headsize, get_shape_and_strides_from_layout
 
 @triton.jit
 def _fwd_kernel_splitK(
@@ -401,7 +401,7 @@ def _splitK_reduce(
     stride_oh,
     stride_og,
     stride_om,
-    stride_ok,
+    stride_od,
     stride_lse_zhg,
     stride_lse_m,
     M_ceil: tl.constexpr,
@@ -541,7 +541,7 @@ def get_split_k(B: int, G: int, H: int, Mk: int) -> int:
     split_k = max(split_k, 1)
     return split_k
 
-def attention_decode_forward_triton_impl(
+def attention_decode_forward_triton_impl_old(
         q: torch.Tensor, 
         k_cache: torch.Tensor, 
         v_cache: torch.Tensor,
@@ -686,7 +686,7 @@ def attention_decode_forward_triton_impl(
         lse, 
         **_strides(out_splitk, "osk_zhg", "osk_s", "osk_m", "osk_k"),
         **_strides(metadata, "mzhg", "m2", "ms", "mm"), 
-        **_strides(out, "oz", "om", "og", "oh", "ok"),
+        **_strides(out, "oz", "om", "og", "oh", "od"),
         **_strides(lse, "lse_zhg", "lse_m"), 
         M_ceil=seqlen_q_ceil, 
         BLOCK_SIZE=k_block_size, 
@@ -716,3 +716,214 @@ def attention_decode_forward_triton_impl(
         out = out.reshape(batch_size, seqlen_q, -1, dim_padded)
 
     return out.narrow(-1, 0, dim_k), lse
+
+
+def attention_decode_forward_triton_impl(
+        q: torch.Tensor, 
+        k_cache: torch.Tensor, 
+        v_cache: torch.Tensor,
+        k_new: Optional[torch.Tensor],
+        v_new: Optional[torch.Tensor],
+        out: torch.Tensor,
+        sm_scale: float, 
+        causal: bool, 
+        alibi_slopes: Optional[torch.Tensor], 
+        layout: Literal["bshd"], 
+        cache_seqlens: Optional[Union[(int, torch.Tensor)]], 
+        cache_batch_idx: Optional[torch.Tensor],
+    ):
+    # triton configs
+    BLOCK_M = 16
+    BLOCK_N = 64
+    num_warps = 1
+    num_stages = 1
+    num_warps_split_k = 4
+        
+    # kernel_configs
+    is_new_kv = True if k_new is not None and v_new is not None else False
+    use_cache_seqlens = cache_seqlens is not None
+    SPLIT_K = None
+    NUM_QUANT_GROUPS = 1
+
+    # get shapes and strides
+    (batch_size, seqlen_q, nheads_q, dim_q), (stride_qz, stride_qm, stride_qh, stride_qd) = get_shape_and_strides_from_layout(q, layout)
+    (_, seqlen_k, nheads_k, dim_k), (stride_kz, stride_kn, stride_kh, stride_kd) = get_shape_and_strides_from_layout(k_cache, layout)
+    (_, seqlen_v, nheads_v, dim_v), (stride_vz, stride_vn, stride_vh, stride_vd) = get_shape_and_strides_from_layout(v_cache, layout)
+    if is_new_kv:
+        ( _, seqlen_kn, nheads_kn, dim_kn), (stride_kn_z, stride_kn_n, stride_kn_h, stride_kn_d) = get_shape_and_strides_from_layout(k_new, layout)
+        (_, seqlen_vn, nheads_vn, dim_vn), (stride_vn_z, stride_vn_n, stride_vn_h, stride_vn_d) = get_shape_and_strides_from_layout(v_new, layout)
+    else:
+        ( _, seqlen_kn, nheads_kn, dim_kn), (stride_kn_z, stride_kn_n, stride_kn_h, stride_kn_d) = (None, None, None, None), (None, None, None, None)
+        (_, seqlen_vn, nheads_vn, dim_vn), (stride_vn_z, stride_vn_n, stride_vn_h, stride_vn_d) = (None, None, None, None), (None, None, None, None)
+    (_, seqlen_o, nheads_o, dim_o), (stride_oz, stride_om, stride_oh, stride_od) = get_shape_and_strides_from_layout(q, layout)
+    if alibi_slopes:
+        stride_az, stride_ah = alibi_slopes.stride()
+    else:
+        stride_az, stride_ah = (None, None)
+
+    assert dim_q == dim_k == dim_v, f"Dimensions must match: {dim_q}, {dim_k}, {dim_v}"
+
+    # add extra information needed by the kernels
+    if layout == "bshd":
+        (n_group_q, heads_per_group_q), stride_qg = (1, nheads_q), 0
+        (n_group_k, heads_per_group_k), stride_kg = (1, nheads_k), 0
+        (n_group_v, heads_per_group_v), stride_vg = (1, nheads_v), 0
+        if is_new_kv:
+            (n_group_kn, heads_per_group_kn), stride_kn_g = (1, nheads_kn), 0
+            (n_group_vn, heads_per_group_vn), stride_vn_g = (1, nheads_vn), 0
+        else:
+            (n_group_kn, heads_per_group_kn), stride_kn_g = (None, None), None
+            (n_group_vn, heads_per_group_vn), stride_vn_g = (None, None), None
+        (n_group_o, heads_per_group_o), stride_og = (1, nheads_o), 0
+    else:
+        raise ValueError(f"{layout} layout is not supported")
+
+    # get padded size
+    dim_padded  = get_padded_headsize(dim_k)
+
+    # Handle MQA/GQA case
+    group_size = nheads_q // nheads_k
+    if group_size > 1:
+        is_gqa = True
+    else:
+        is_gqa = False
+
+    if SPLIT_K is not None:
+        split_k = SPLIT_K
+    else:
+        # Use heuristics
+        split_k = get_split_k(batch_size, n_group_q, heads_per_group_q, seqlen_k) # NOTE: should the split think about seqlens?
+    split_size = (seqlen_k + split_k - 1) // split_k
+
+    # setup grid
+    seqlen_q_ceil = (seqlen_q + BLOCK_M - 1) // BLOCK_M * BLOCK_M
+    grid = (triton.cdiv(seqlen_q, BLOCK_M), batch_size * n_group_q * heads_per_group_q, split_k)
+    
+    # create intermediate tensors
+    out_splitk = torch.empty([batch_size * n_group_q * heads_per_group_q, split_k, seqlen_q_ceil, dim_padded], dtype=torch.float32, device=q.device)
+    metadata = torch.empty([batch_size * n_group_q * heads_per_group_q, 2, split_k, seqlen_q_ceil], dtype=torch.float32, device=q.device)
+    lse = torch.empty((batch_size * n_group_q * heads_per_group_q, seqlen_q), device=q.device, dtype=torch.float32)
+    
+    # get intermediate tensor strides
+    stride_osk_zhg, stride_osk_s, stride_osk_m, stride_osk_d = out_splitk.stride()
+    stride_mzhg, stride_m2, stride_ms, stride_mm = metadata.stride()
+    stride_lse_zhg, stride_lse_m = lse.stride()
+
+    # TODO: enable quantization
+    _fwd_kernel_splitK[grid](
+        Q=q,
+        K=k_cache,
+        V=v_cache,
+        sm_scale=sm_scale,
+        Out_splitK=out_splitk,
+        Metadata=metadata,
+        K_new = k_new,
+        V_new = v_new,
+        Cache_seqlens=cache_seqlens,
+        Cache_batch_idx=cache_batch_idx,
+        Alibi_slopes=alibi_slopes,
+        stride_qz=stride_qz,
+        stride_qm=stride_qm,
+        stride_qg=stride_qg,
+        stride_qh=stride_qh,
+        stride_qd=stride_qd,
+        stride_kz=stride_kz,
+        stride_kn=stride_kn,
+        stride_kg=stride_kg,
+        stride_kh=stride_kh,
+        stride_kd=stride_kd,
+        stride_vz=stride_vz,
+        stride_vn=stride_vn,
+        stride_vg=stride_vg,
+        stride_vh=stride_vh,
+        stride_vd=stride_vd,
+        stride_osk_zhg=stride_osk_zhg,
+        stride_osk_s=stride_osk_s,
+        stride_osk_m=stride_osk_m,
+        stride_osk_d=stride_osk_d,
+        stride_mzhg=stride_mzhg,
+        stride_m2=stride_m2,
+        stride_ms=stride_ms,
+        stride_mm=stride_mm,
+        stride_kn_z=stride_kn_z,
+        stride_kn_n=stride_kn_n,
+        stride_kn_g=stride_kn_g,
+        stride_kn_h=stride_kn_h,
+        stride_kn_d=stride_kn_d,
+        stride_vn_z=stride_vn_z,
+        stride_vn_n=stride_vn_n,
+        stride_vn_g=stride_vn_g,
+        stride_vn_h=stride_vn_h,
+        stride_vn_d=stride_vn_d,
+        stride_az=stride_az,
+        stride_ah=stride_ah,
+        Z=batch_size,
+        H_q=heads_per_group_q,
+        H_kv=heads_per_group_k,
+        G_q=n_group_q,
+        N_CTX_Q=seqlen_q,
+        N_CTX_K=seqlen_k,
+        N_CTX_NEW=seqlen_kn,
+        BLOCK_N_PER_SPLIT=split_size,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_DMODEL=dim_padded,
+        ACTUAL_BLOCK_DMODEL=dim_k,
+        BOUNDS_CHECKS_N=(split_size % BLOCK_N) > 0 or use_cache_seqlens,
+        USE_CACHE_SEQLENs=use_cache_seqlens,
+        USE_CACHE_BATCH_IDX=cache_batch_idx is not None,
+        NEW_KV=is_new_kv,
+        IS_GQA=is_gqa,
+        IS_CAUSAL=causal,
+        USE_ALIBI=False if alibi_slopes is None else True,
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )
+
+    # Merge together
+    splitK_pow2 = triton.next_power_of_2(split_k)
+    use_mask = splitK_pow2 > split_k
+    if batch_size * n_group_q * heads_per_group_q * seqlen_q >= 512:
+        k_block_num = 1
+    else:
+        k_block_num = 2
+    assert dim_padded % k_block_num == 0
+    k_block_size = dim_padded // k_block_num
+    grid = (batch_size * n_group_q * heads_per_group_q, seqlen_q, k_block_num)
+
+    _splitK_reduce[grid](
+        out_splitk, 
+        metadata, 
+        out, 
+        lse, 
+        # Split-K output strides
+        stride_osk_zhg=stride_osk_zhg,
+        stride_osk_s=stride_osk_s,
+        stride_osk_m=stride_osk_m,
+        stride_osk_k=out_splitk.stride(3),  # For accessing individual elements
+        # Metadata strides
+        stride_mzhg=stride_mzhg,
+        stride_m2=stride_m2,
+        stride_ms=stride_ms,
+        stride_mm=stride_mm,
+        # Output tensor strides
+        stride_oz=stride_oz,
+        stride_oh=stride_oh,
+        stride_og=stride_og,
+        stride_om=stride_om,
+        stride_od=stride_od,
+        # LSE strides
+        stride_lse_zhg=stride_lse_zhg,
+        stride_lse_m=stride_lse_m,
+        M_ceil=seqlen_q_ceil, 
+        BLOCK_SIZE=k_block_size, 
+        G=n_group_q, 
+        H=heads_per_group_q,
+        # TODO: Tune num_warps
+        split_k=split_k, 
+        splitK_pow2=splitK_pow2, 
+        use_mask=use_mask,
+        IS_CAUSAL=causal,
+        num_warps=num_warps_split_k)
+
+    return lse
