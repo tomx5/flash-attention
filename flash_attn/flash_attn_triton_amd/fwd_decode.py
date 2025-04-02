@@ -613,10 +613,10 @@ def attention_decode_forward_triton_impl_old(
         split_k = get_split_k(batch_size, n_group_q, heads_per_group_q, seqlen_kc) # NOTE: should the split think about seqlens?
 
     seqlen_q_ceil = (seqlen_q + BLOCK_M - 1) // BLOCK_M * BLOCK_M
+    out = torch.empty((batch_size, seqlen_q, n_group_q, heads_per_group_q, dim_padded), device=q.device, dtype=q.dtype)
     out_splitk = torch.empty([batch_size * n_group_q * heads_per_group_q, split_k, seqlen_q_ceil, dim_padded], dtype=torch.float32, device=q.device)
     metadata = torch.empty([batch_size * n_group_q * heads_per_group_q, 2, split_k, seqlen_q_ceil], dtype=torch.float32, device=q.device)
     lse = torch.empty((batch_size * n_group_q * heads_per_group_q, seqlen_q), device=q.device, dtype=torch.float32)
-    out = torch.empty((batch_size, seqlen_q, n_group_q, heads_per_group_q, dim_padded), device=q.device, dtype=q.dtype)
     grid = (triton.cdiv(seqlen_q, BLOCK_M), batch_size * n_group_q * heads_per_group_q, split_k)
 
     num_warps = 1
@@ -647,11 +647,14 @@ def attention_decode_forward_triton_impl_old(
         print("dim_kc:", dim_kc)
         print("dim_padded:", dim_padded)
         print("stride_qz, stride_qm, stride_qg, stride_qh, stride_qd", (stride_qz, stride_qm, stride_qg, stride_qh, stride_qd))
-        print("stride_kz, stride_kn, stride_kg, stride_kh, stride_kd", (stride_kc_z, stride_kc_n, stride_kc_g, stride_kc_h, stride_kc_d))
-        print("stride_vz, stride_vn, stride_vg, stride_vh, stride_vd", (stride_vc_z, stride_vc_n, stride_vc_g, stride_vc_h, stride_vc_d))
+        print("stride_kc_z, stride_kc_n, stride_kc_g, stride_kc_h, stride_kc_d", (stride_kc_z, stride_kc_n, stride_kc_g, stride_kc_h, stride_kc_d))
+        print("stride_vc_z, stride_vc_n, stride_vc_g, stride_vc_h, stride_vc_d", (stride_vc_z, stride_vc_n, stride_vc_g, stride_vc_h, stride_vc_d))
+        if is_new_kv:
+            print("stride_kn_z, stride_kn_n, stride_kn_g, stride_kn_h, stride_kn_d", (stride_kn_z, stride_kn_n, stride_kn_g, stride_kn_h, stride_kn_d))
+            print("stride_vn_z, stride_vn_n, stride_vn_g, stride_vn_h, stride_vn_d", (stride_vn_z, stride_vn_n, stride_vn_g, stride_vn_h, stride_vn_d))
+        print("stride_oz, stride_om, stride_og, stride_oh, stride_od", (stride_oz, stride_om, stride_og, stride_oh, stride_od))
         print("stride_osk_zhg, stride_osk_s, stride_osk_m, stride_osk_d", (stride_osk_zhg, stride_osk_s, stride_osk_m, stride_osk_d))
         print("stride_mzhg, stride_m2, stride_ms, stride_mm", (stride_mzhg, stride_m2, stride_ms, stride_mm))
-        print("stride_oz, stride_om, stride_og, stride_oh, stride_od", (stride_oz, stride_om, stride_og, stride_oh, stride_od))
         print("stride_lse_zhg, stride_lse_m", (stride_lse_zhg, stride_lse_m))
 
     # TODO: enable quantization
@@ -894,11 +897,14 @@ def attention_decode_forward_triton_impl(
         print("dim_kc:", dim_kc)
         print("dim_padded:", dim_padded)
         print("stride_qz, stride_qm, stride_qg, stride_qh, stride_qd", (stride_qz, stride_qm, stride_qg, stride_qh, stride_qd))
-        print("stride_kz, stride_kn, stride_kg, stride_kh, stride_kd", (stride_kc_z, stride_kc_n, stride_kc_g, stride_kc_h, stride_kc_d))
-        print("stride_vz, stride_vn, stride_vg, stride_vh, stride_vd", (stride_vc_z, stride_vc_n, stride_vc_g, stride_vc_h, stride_vc_d))
+        print("stride_kc_z, stride_kc_n, stride_kc_g, stride_kc_h, stride_kc_d", (stride_kc_z, stride_kc_n, stride_kc_g, stride_kc_h, stride_kc_d))
+        print("stride_vc_z, stride_vc_n, stride_vc_g, stride_vc_h, stride_vc_d", (stride_vc_z, stride_vc_n, stride_vc_g, stride_vc_h, stride_vc_d))
+        if is_new_kv:
+            print("stride_kn_z, stride_kn_n, stride_kn_g, stride_kn_h, stride_kn_d", (stride_kn_z, stride_kn_n, stride_kn_g, stride_kn_h, stride_kn_d))
+            print("stride_vn_z, stride_vn_n, stride_vn_g, stride_vn_h, stride_vn_d", (stride_vn_z, stride_vn_n, stride_vn_g, stride_vn_h, stride_vn_d))
+        print("stride_oz, stride_om, stride_og, stride_oh, stride_od", (stride_oz, stride_om, stride_og, stride_oh, stride_od))
         print("stride_osk_zhg, stride_osk_s, stride_osk_m, stride_osk_d", (stride_osk_zhg, stride_osk_s, stride_osk_m, stride_osk_d))
         print("stride_mzhg, stride_m2, stride_ms, stride_mm", (stride_mzhg, stride_m2, stride_ms, stride_mm))
-        print("stride_oz, stride_om, stride_og, stride_oh, stride_od", (stride_oz, stride_om, stride_og, stride_oh, stride_od))
         print("stride_lse_zhg, stride_lse_m", (stride_lse_zhg, stride_lse_m))
 
     # TODO: enable quantization
@@ -909,8 +915,8 @@ def attention_decode_forward_triton_impl(
         sm_scale=sm_scale,
         Out_splitK=out_splitk,
         Metadata=metadata,
-        K_new = k_new,
-        V_new = v_new,
+        K_new=k_new,
+        V_new=v_new,
         Cache_seqlens=cache_seqlens,
         Cache_batch_idx=cache_batch_idx,
         Alibi_slopes=alibi_slopes,
