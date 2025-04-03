@@ -1903,7 +1903,7 @@ def test_flash_attn_splitkv(
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
 # @pytest.mark.parametrize("d", [128])
-# @pytest.mark.parametrize("d", [32])
+# @pytest.mark.parametrize("d", [59])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
@@ -1953,9 +1953,14 @@ def test_flash_attn_kvcache(
     # set seed
     torch.random.manual_seed(0)
     DEBUG_INPUT = False
-    batch_size = 2
-    batch_size_cache = batch_size if not has_batch_idx else batch_size * 2
-    nheads = 6
+    if DEBUG_INPUT:
+        batch_size = 1
+        batch_size_cache = batch_size if not has_batch_idx else batch_size * 2
+        nheads = 2
+    else:
+        batch_size = 2
+        batch_size_cache = batch_size if not has_batch_idx else batch_size * 2
+        nheads = 6
     # rotary_dim must be a multiple of 16, and must be <= d
     rotary_dim = math.floor(int(rotary_fraction * d) / 16) * 16
     nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 3)

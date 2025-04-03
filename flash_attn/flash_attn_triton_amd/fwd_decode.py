@@ -79,6 +79,49 @@ def _fwd_kernel_splitK(
     off_g_q = off_zhg % G_q
     splitk_idx = tl.program_id(2)
 
+    # figure out seqlens
+    lo = splitk_idx * BLOCK_N_PER_SPLIT
+    if USE_CACHE_SEQLENs:
+        cache_seqlen_last_idx = tl.load(Cache_seqlens + off_z)
+        if NEW_KV:
+            N_CTX_K_FINAL = cache_seqlen_last_idx + N_CTX_NEW
+        else:
+            N_CTX_K_FINAL = cache_seqlen_last_idx
+    else:
+        N_CTX_K_FINAL = N_CTX_K
+    hi = tl.minimum((splitk_idx + 1) * BLOCK_N_PER_SPLIT, N_CTX_K_FINAL)
+
+    # compute offsets
+    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = tl.arange(0, BLOCK_N)
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+
+    # compute ptrs
+    q_offset = Q + off_h_q * stride_qh + off_z * stride_qz + off_g_q * stride_qg
+    q_ptrs = q_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qd
+
+    # compute masks
+    PADDED_HEAD: tl.constexpr = (ACTUAL_BLOCK_DMODEL != BLOCK_DMODEL)
+    if PADDED_HEAD:
+        q_mask = (offs_m < N_CTX_Q)[:, None] & (offs_d < ACTUAL_BLOCK_DMODEL)[None, :]
+        kT_mask = (offs_d < ACTUAL_BLOCK_DMODEL)[:, None] & (offs_n < N_CTX_K_FINAL)[None, :]
+        v_mask = (offs_n < N_CTX_K_FINAL)[:, None] & (offs_d < ACTUAL_BLOCK_DMODEL)[None, :]
+        osk_mask = (offs_m < N_CTX_Q)[:, None] & (offs_d < ACTUAL_BLOCK_DMODEL)[None, :]
+    else:
+        q_mask = (offs_m < N_CTX_Q)[:, None]
+        kT_mask = (offs_n < N_CTX_K_FINAL)[None, :]
+        v_mask = (offs_n < N_CTX_K_FINAL)[:, None]
+        osk_mask = (offs_m < N_CTX_Q)[:, None]
+
+    # scale sm_scale by log_2(e) and use
+    # 2^x instead of exp in the loop because CSE and LICM
+    # don't work as expected with `exp` in the loop
+    qk_scale = sm_scale * 1.44269504
+    
+    # load q: it will stay in SRAM throughout
+    q = tl.load(q_ptrs, mask=q_mask, other=0.0)
+    q = (q * qk_scale).to(q.dtype)
+
     # pick batch index
     if USE_CACHE_BATCH_IDX:
         cache_batch_idx = tl.load(Cache_batch_idx + off_z)
@@ -91,17 +134,6 @@ def _fwd_kernel_splitK(
         alibi_slope = tl.load(Alibi_slopes + a_offset)
     else:
         alibi_slope = None
-
-    lo = splitk_idx * BLOCK_N_PER_SPLIT
-    if USE_CACHE_SEQLENs:
-        cache_seqlen_last_idx = tl.load(Cache_seqlens + off_z)
-        if NEW_KV:
-            kv_len = cache_seqlen_last_idx + N_CTX_NEW
-        else:
-            kv_len = cache_seqlen_last_idx
-    else:
-        kv_len = N_CTX_K
-    hi = tl.minimum((splitk_idx + 1) * BLOCK_N_PER_SPLIT, kv_len)
 
     HEAD_RATIO: tl.constexpr = H_q // H_kv
     if IS_GQA:
@@ -177,36 +209,6 @@ def _fwd_kernel_splitK(
 
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)  # noqa: F821
 
-    # compute offsets
-    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_n = tl.arange(0, BLOCK_N)
-    offs_d = tl.arange(0, BLOCK_DMODEL)
-
-    # compute ptrs
-    q_offset = Q + off_h_q * stride_qh + off_z * stride_qz + off_g_q * stride_qg
-    q_ptrs = q_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qd
-
-    # compute masks
-    PADDED_HEAD: tl.constexpr = (ACTUAL_BLOCK_DMODEL != BLOCK_DMODEL)
-    if PADDED_HEAD:
-        q_mask = (offs_m < N_CTX_Q)[:, None] & (offs_d < ACTUAL_BLOCK_DMODEL)[None, :]
-        kT_mask = (offs_d < ACTUAL_BLOCK_DMODEL)[:, None] & (offs_n < kv_len)[None, :]
-        v_mask = (offs_n < kv_len)[:, None] & (offs_d < ACTUAL_BLOCK_DMODEL)[None, :]
-        osk_mask = (offs_m < N_CTX_Q)[:, None] & (offs_d < ACTUAL_BLOCK_DMODEL)[None, :]
-    else:
-        q_mask = (offs_m < N_CTX_Q)[:, None]
-        kT_mask = (offs_n < kv_len)[None, :]
-        v_mask = (offs_n < kv_len)[:, None]
-        osk_mask = (offs_m < N_CTX_Q)[:, None]
-
-    # scale sm_scale by log_2(e) and use
-    # 2^x instead of exp in the loop because CSE and LICM
-    # don't work as expected with `exp` in the loop
-    qk_scale = sm_scale * 1.44269504
-    
-    # load q: it will stay in SRAM throughout
-    q = tl.load(q_ptrs, mask=q_mask, other=0.0)
-    q = (q * qk_scale).to(q.dtype)
 
     # loop over k, v and update accumulator
     for start_n in range(lo, hi, BLOCK_N):
@@ -216,10 +218,6 @@ def _fwd_kernel_splitK(
         # load k
         kT = tl.load(kT_ptrs, mask=kT_mask, other=0.0)
         v = tl.load(V_ptrs, mask=v_mask, other=0.0)
-        
-        if PADDED_HEAD:
-            d_mask_old = (offs_d < ACTUAL_BLOCK_DMODEL)
-            v = tl.where(d_mask_old[None, :], v, 0.0)
 
         # -- compute qk ---
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
@@ -230,7 +228,7 @@ def _fwd_kernel_splitK(
             col_idx = start_n + tl.arange(0, BLOCK_N)
             
             # Compute relative positions
-            relative_pos = row_idx[:, None] + kv_len - (N_CTX_Q + col_idx[None, :])
+            relative_pos = row_idx[:, None] + N_CTX_K_FINAL - (N_CTX_Q + col_idx[None, :])
             relative_pos = tl.abs(relative_pos)
             
             # Compute ALiBi bias
@@ -243,7 +241,7 @@ def _fwd_kernel_splitK(
             col_idx = start_n + tl.arange(0, BLOCK_N)
             
             # create a N_CTX_Q x kv_len causal mask
-            col_offset = N_CTX_Q - kv_len
+            col_offset = N_CTX_Q - N_CTX_K_FINAL
             causal_mask = row_idx[:, None] >= (col_offset + col_idx[None, :])
 
             # Apply the mask
@@ -287,45 +285,10 @@ def _fwd_kernel_splitK(
     )
 
     # write metadata for split-K reduction
-    metadata_ptr = (Metadata + off_zhg * stride_mzhg + splitk_idx * stride_ms + start_m * BLOCK_M +
-                    tl.arange(0, BLOCK_M))
+    metadata_offset = Metadata + off_zhg * stride_mzhg + splitk_idx * stride_ms
+    metadata_ptr = metadata_offset + offs_m
     tl.store(metadata_ptr, m_i)
     tl.store(metadata_ptr + stride_m2, l_i)
-
-@triton.jit
-def cast_uint32_to_half2(scale_shift):
-    # Extract two float16 packed into one int32
-    scale = scale_shift & 0xFFFF
-    shift = scale_shift >> 16
-    scale = scale.to(tl.uint16).to(tl.float16, bitcast=True)
-    shift = shift.to(tl.uint16).to(tl.float16, bitcast=True)
-    return scale, shift
-
-@triton.jit
-def dequantize(
-    x_,
-    scale,
-    shift,
-    PACKED_PER_VAL: tl.constexpr = 8,
-):
-    # PACKED_PER_VAL is the number of values packed into
-    # each element x_. For example, for int4 quantization
-    #and x_ of type int32, PACKED_PER_VAL is 8.
-
-    BLOCK_N: tl.constexpr = x_.shape[0]
-    BLOCK_DMODEL_PACKED: tl.constexpr = x_.shape[1]
-    offsets = tl.arange(0, PACKED_PER_VAL) * 4
-    quant_offset = (x_[:, None, :] >> offsets[None, :, None])  # (BLOCK_N, PACKED_PER_VAL, D // PACKED_PER_VAL)
-
-    quant_offset = tl.view(quant_offset, (BLOCK_N, BLOCK_DMODEL_PACKED * PACKED_PER_VAL))
-    # Trick - instead of converting int4 to float16 we view it as float16
-    # and then multiply by 32768 * 512 == 2**24
-    quant_offset = (quant_offset & 0xF).to(tl.uint16).to(tl.float16, bitcast=True)
-    quant_offset = (quant_offset * 32768.0).to(tl.float16)
-    scale_512 = scale * 512
-
-    dequant = quant_offset * scale_512 + shift
-    return dequant
 
 
 @triton.jit
@@ -351,6 +314,8 @@ def _splitK_reduce(
     stride_lse_m,
     M_ceil: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    ACTUAL_BLOCK_DMODEL: tl.constexpr,
     H: tl.constexpr,
     G: tl.constexpr,
     split_k: tl.constexpr,
@@ -418,6 +383,41 @@ def _splitK_reduce(
     else:
         tl.store(l_ptrs, (g_m + tl.math.log2(g_sum)) / 1.44269504)
 
+
+@triton.jit
+def cast_uint32_to_half2(scale_shift):
+    # Extract two float16 packed into one int32
+    scale = scale_shift & 0xFFFF
+    shift = scale_shift >> 16
+    scale = scale.to(tl.uint16).to(tl.float16, bitcast=True)
+    shift = shift.to(tl.uint16).to(tl.float16, bitcast=True)
+    return scale, shift
+
+@triton.jit
+def dequantize(
+    x_,
+    scale,
+    shift,
+    PACKED_PER_VAL: tl.constexpr = 8,
+):
+    # PACKED_PER_VAL is the number of values packed into
+    # each element x_. For example, for int4 quantization
+    #and x_ of type int32, PACKED_PER_VAL is 8.
+
+    BLOCK_N: tl.constexpr = x_.shape[0]
+    BLOCK_DMODEL_PACKED: tl.constexpr = x_.shape[1]
+    offsets = tl.arange(0, PACKED_PER_VAL) * 4
+    quant_offset = (x_[:, None, :] >> offsets[None, :, None])  # (BLOCK_N, PACKED_PER_VAL, D // PACKED_PER_VAL)
+
+    quant_offset = tl.view(quant_offset, (BLOCK_N, BLOCK_DMODEL_PACKED * PACKED_PER_VAL))
+    # Trick - instead of converting int4 to float16 we view it as float16
+    # and then multiply by 32768 * 512 == 2**24
+    quant_offset = (quant_offset & 0xF).to(tl.uint16).to(tl.float16, bitcast=True)
+    quant_offset = (quant_offset * 32768.0).to(tl.float16)
+    scale_512 = scale * 512
+
+    dequant = quant_offset * scale_512 + shift
+    return dequant
 
 def quantize_kv_int4(k: torch.Tensor, num_groups: int = 1) -> torch.Tensor:
     # Scale and shift are such that quantization linearly maps
@@ -533,9 +533,10 @@ def attention_decode_forward_triton_impl_old(
     assert layout == "bsghd"
 
     # get dims
-    batch_size, seqlen_q, n_group_q, heads_per_group_q, dim_q = q.shape
-    _, seqlen_kc, n_group_kc, heads_per_group_kc, dim_kc = k_cache.shape
-    _, seqlen_vc, n_group_vc, heads_per_group_vc, dim_vc = v_cache.shape
+    batch_size, seqlen_q, n_group_q, nheads_q, dim_q = q.shape
+    _, seqlen_kc, n_group_kc, nheads_kc, dim_kc = k_cache.shape
+    _, seqlen_vc, n_group_vc, nheads_vc, dim_vc = v_cache.shape
+    seqlen_kn = k_new.shape[1] if is_new_kv else None
 
     assert dim_q == dim_kc == dim_vc, f"Dimensions must match: {dim_q}, {dim_kc}, {dim_vc}"
 
@@ -543,9 +544,9 @@ def attention_decode_forward_triton_impl_old(
     dim_padded  = get_padded_headsize(dim_kc)
 
     # Handle MQA/GQA case
-    if heads_per_group_q > heads_per_group_kc:
+    if nheads_q > nheads_kc:
         is_gqa = True
-    elif heads_per_group_q < heads_per_group_kc:
+    elif nheads_q < nheads_kc:
         raise ValueError("heads_per_group_q < heads_per_group_k")
     else:
         is_gqa = False
@@ -556,14 +557,14 @@ def attention_decode_forward_triton_impl_old(
         split_k = SPLIT_K
     else:
         # Use heuristics
-        split_k = get_split_k(batch_size, n_group_q, heads_per_group_q, seqlen_kc) # NOTE: should the split think about seqlens?
+        split_k = get_split_k(batch_size, n_group_q, nheads_q, seqlen_kc) # NOTE: should the split think about seqlens?
 
     seqlen_q_ceil = (seqlen_q + BLOCK_M - 1) // BLOCK_M * BLOCK_M
-    out = torch.empty((batch_size, seqlen_q, n_group_q, heads_per_group_q, dim_padded), device=q.device, dtype=q.dtype)
-    out_splitk = torch.empty([batch_size * n_group_q * heads_per_group_q, split_k, seqlen_q_ceil, dim_padded], dtype=torch.float32, device=q.device)
-    metadata = torch.empty([batch_size * n_group_q * heads_per_group_q, 2, split_k, seqlen_q_ceil], dtype=torch.float32, device=q.device)
-    lse = torch.empty((batch_size * n_group_q * heads_per_group_q, seqlen_q), device=q.device, dtype=torch.float32)
-    grid = (triton.cdiv(seqlen_q, BLOCK_M), batch_size * n_group_q * heads_per_group_q, split_k)
+    out = torch.zeros((batch_size, seqlen_q, n_group_q, nheads_q, dim_padded), device=q.device, dtype=q.dtype)
+    out_splitk = torch.empty([batch_size * n_group_q * nheads_q, split_k, seqlen_q_ceil, dim_padded], dtype=torch.float32, device=q.device)
+    metadata = torch.empty([batch_size * n_group_q * nheads_q, 2, split_k, seqlen_q_ceil], dtype=torch.float32, device=q.device)
+    lse = torch.empty((batch_size * n_group_q * nheads_q, seqlen_q), device=q.device, dtype=torch.float32)
+    grid = (triton.cdiv(seqlen_q, BLOCK_M), batch_size * n_group_q * nheads_q, split_k)
 
     num_warps = 1
     split_size = (seqlen_kc + split_k - 1) // split_k
@@ -590,7 +591,8 @@ def attention_decode_forward_triton_impl_old(
     stride_lse_zhg, stride_lse_m = lse.stride()
 
     if DEBUG:
-        print("dim_kc:", dim_kc)
+        print("batch_size, seqlen_q, nheads_q, dim_q", (batch_size, seqlen_q, nheads_q, dim_q))
+        print("_, seqlen_kc, nheads_kc, dim_kc", (_, seqlen_kc, nheads_kc, dim_kc))
         print("dim_padded:", dim_padded)
         print("stride_qz, stride_qm, stride_qg, stride_qh, stride_qd", (stride_qz, stride_qm, stride_qg, stride_qh, stride_qd))
         print("stride_kc_z, stride_kc_n, stride_kc_g, stride_kc_h, stride_kc_d", (stride_kc_z, stride_kc_n, stride_kc_g, stride_kc_h, stride_kc_d))
@@ -660,12 +662,12 @@ def attention_decode_forward_triton_impl_old(
         stride_az=stride_az,
         stride_ah=stride_ah,
         Z=batch_size,
-        H_q=heads_per_group_q,
-        H_kv=heads_per_group_kc,
+        H_q=nheads_q,
+        H_kv=nheads_kc,
         G_q=n_group_q,
         N_CTX_Q=seqlen_q,
         N_CTX_K=seqlen_kc,
-        N_CTX_NEW=k_new.shape[1] if is_new_kv else None,
+        N_CTX_NEW=seqlen_kn,
         BLOCK_N_PER_SPLIT=split_size,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
@@ -682,17 +684,29 @@ def attention_decode_forward_triton_impl_old(
         num_stages=1,
     )
 
+    if DEBUG:
+        print("Out_splitK:", out_splitk, out_splitk.shape)
+        print("metadata:", metadata, metadata.shape)
+        print("lse:", lse, lse.shape)
+        print("Out:", out, out.shape)
+
 
     # Merge together
     splitK_pow2 = triton.next_power_of_2(split_k)
     use_mask = splitK_pow2 > split_k
-    if batch_size * n_group_q * heads_per_group_q * seqlen_q >= 512:
+    if batch_size * n_group_q * nheads_q * seqlen_q >= 512:
         k_block_num = 1
     else:
         k_block_num = 2
     assert dim_padded % k_block_num == 0
     k_block_size = dim_padded // k_block_num
-    grid = (batch_size * n_group_q * heads_per_group_q, seqlen_q, k_block_num)
+    grid = (batch_size * n_group_q * nheads_q, seqlen_q, k_block_num)
+
+    if DEBUG:
+        print("splitK_pow2:", splitK_pow2)
+        print("k_block_num:", k_block_num)
+        print("k_block_size:", k_block_size)
+        print("grid:", grid)
 
     _splitK_reduce[grid](
         out_splitk, 
@@ -719,9 +733,11 @@ def attention_decode_forward_triton_impl_old(
         stride_lse_zhg=stride_lse_zhg,
         stride_lse_m=stride_lse_m,
         M_ceil=seqlen_q_ceil, 
-        BLOCK_SIZE=k_block_size, 
+        BLOCK_SIZE=k_block_size,
+        BLOCK_DMODEL=dim_padded,
+        ACTUAL_BLOCK_DMODEL=dim_kc,
         G=n_group_q, 
-        H=heads_per_group_q,
+        H=nheads_q,
         # TODO: Tune num_warps
         split_k=split_k, 
         splitK_pow2=splitK_pow2, 
@@ -729,7 +745,7 @@ def attention_decode_forward_triton_impl_old(
         IS_CAUSAL=causal,
         num_warps=4)
 
-    lse = lse.reshape([batch_size, n_group_q, heads_per_group_q, seqlen_q])
+    lse = lse.reshape([batch_size, n_group_q, nheads_q, seqlen_q])
     if q.ndim == 4:
         # BMGHK -> BMHK
         assert n_group_q == 1
@@ -737,7 +753,7 @@ def attention_decode_forward_triton_impl_old(
         lse = lse[:, 0]
     if seqlen_kc == 0:
         out.zero_()
-    out = out.reshape(batch_size, heads_per_group_q * n_group_q, -1, dim_padded).contiguous()
+    out = out.reshape(batch_size, nheads_q * n_group_q, -1, dim_padded).contiguous()
 
     # output is batch_size, heads_per_group_q * group_q, seqlen_q, dim_q
     if original_layout == "bshd":
@@ -841,7 +857,8 @@ def attention_decode_forward_triton_impl(
     stride_lse_zhg, stride_lse_m = lse.stride()
 
     if DEBUG:
-        print("dim_kc:", dim_kc)
+        print("batch_size, seqlen_q, nheads_q, dim_q", (batch_size, seqlen_q, nheads_q, dim_q))
+        print("_, seqlen_kc, nheads_kc, dim_kc", (_, seqlen_kc, nheads_kc, dim_kc))
         print("dim_padded:", dim_padded)
         print("stride_qz, stride_qm, stride_qg, stride_qh, stride_qd", (stride_qz, stride_qm, stride_qg, stride_qh, stride_qd))
         print("stride_kc_z, stride_kc_n, stride_kc_g, stride_kc_h, stride_kc_d", (stride_kc_z, stride_kc_n, stride_kc_g, stride_kc_h, stride_kc_d))
@@ -933,6 +950,12 @@ def attention_decode_forward_triton_impl(
         num_stages=num_stages,
     )
 
+    if DEBUG:
+        print("Out_splitK:", out_splitk, out_splitk.shape)
+        print("metadata:", metadata, metadata.shape)
+        print("lse:", lse, lse.shape)
+        print("Out:", out, out.shape)
+
     # Merge together
     splitK_pow2 = triton.next_power_of_2(split_k)
     use_mask = splitK_pow2 > split_k
@@ -943,6 +966,13 @@ def attention_decode_forward_triton_impl(
     assert dim_padded % k_block_num == 0
     k_block_size = dim_padded // k_block_num
     grid = (batch_size * n_group_q * heads_per_group_q, seqlen_q, k_block_num)
+
+
+    if DEBUG:
+        print("splitK_pow2:", splitK_pow2)
+        print("k_block_num:", k_block_num)
+        print("k_block_size:", k_block_size)
+        print("grid:", grid)
 
     _splitK_reduce[grid](
         out_splitk, 
@@ -969,7 +999,9 @@ def attention_decode_forward_triton_impl(
         stride_lse_zhg=stride_lse_zhg,
         stride_lse_m=stride_lse_m,
         M_ceil=seqlen_q_ceil, 
-        BLOCK_SIZE=k_block_size, 
+        BLOCK_SIZE=k_block_size,
+        BLOCK_DMODEL=dim_padded,
+        ACTUAL_BLOCK_DMODEL=dim_kc,
         G=n_group_q, 
         H=heads_per_group_q,
         # TODO: Tune num_warps
