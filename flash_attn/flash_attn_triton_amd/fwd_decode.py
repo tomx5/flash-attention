@@ -170,21 +170,12 @@ def _fwd_kernel_splitK(
                      (tl.arange(0, BLOCK_DMODEL)[None, :] < ACTUAL_BLOCK_DMODEL),
             )
 
-    V_block_ptr = tl.make_block_ptr(
-        base=v_offset,
-        shape=(hi, ACTUAL_BLOCK_DMODEL),
-        strides=(stride_vn, stride_vd),
-        offsets=(lo, 0),
-        block_shape=(BLOCK_N, BLOCK_DMODEL),
-        order=(1, 0),
-    )
 
     # initialize pointer to m and l
     m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
 
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)  # noqa: F821
-
 
     # compute offsets
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -200,9 +191,11 @@ def _fwd_kernel_splitK(
     if PADDED_HEAD:
         q_mask = (offs_m < N_CTX_Q)[:, None] & (offs_d < ACTUAL_BLOCK_DMODEL)[None, :]
         kT_mask = (offs_d < ACTUAL_BLOCK_DMODEL)[:, None] & (offs_n < kv_len)[None, :]
+        v_mask = (offs_n < kv_len)[:, None] & (offs_d < ACTUAL_BLOCK_DMODEL)[None, :]
     else:
         q_mask = (offs_m < N_CTX_Q)[:, None]
         kT_mask = (offs_n < kv_len)[None, :]
+        v_mask = (offs_n < kv_len)[:, None]
 
     # scale sm_scale by log_2(e) and use
     # 2^x instead of exp in the loop because CSE and LICM
@@ -216,16 +209,11 @@ def _fwd_kernel_splitK(
     # loop over k, v and update accumulator
     for start_n in range(lo, hi, BLOCK_N):
         kT_ptrs = k_offset + offs_d[:, None] * stride_kd + (start_n + offs_n)[None, :] * stride_kn
+        V_ptrs = v_offset + (start_n + offs_n)[:, None] * stride_vn + offs_d[None, :] * stride_vd
 
         # load k
         kT = tl.load(kT_ptrs, mask=kT_mask, other=0.0)
-        
-        #Load K/V for a given block
-        group_id = 0
-        # advance to the current quantization group
-        V_block_ptr = tl.advance(V_block_ptr, (0, ACTUAL_BLOCK_DMODEL * group_id))
-        # -- load v --
-        v = tl.load(V_block_ptr, boundary_check=(0, ) if BOUNDS_CHECKS_N else ())
+        v = tl.load(V_ptrs, mask=v_mask, other=0.0)
         
         if PADDED_HEAD:
             d_mask_old = (offs_d < ACTUAL_BLOCK_DMODEL)
@@ -286,9 +274,6 @@ def _fwd_kernel_splitK(
         # -- scale and update acc --
         acc *= alpha[:, None]
         acc += tl.dot(p.to(v.dtype), v)
-        
-        # update pointers
-        V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
 
     # write back O
     O_block_ptr = tl.make_block_ptr(
