@@ -72,11 +72,6 @@ def _fwd_kernel_splitK(
     IS_CAUSAL: tl.constexpr,
     USE_ALIBI: tl.constexpr,
 ):
-    # Padding
-    PADDED_HEAD: tl.constexpr = (ACTUAL_BLOCK_DMODEL != BLOCK_DMODEL)
-    if PADDED_HEAD:
-        d_mask = tl.arange(0, BLOCK_DMODEL) < ACTUAL_BLOCK_DMODEL
-
     start_m = tl.program_id(0)
     off_zhg = tl.program_id(1)
     off_z = off_zhg // (H_q * G_q)
@@ -175,14 +170,6 @@ def _fwd_kernel_splitK(
                      (tl.arange(0, BLOCK_DMODEL)[None, :] < ACTUAL_BLOCK_DMODEL),
             )
 
-    Q_block_ptr = tl.make_block_ptr(
-        base=Q + off_h_q * stride_qh + off_z * stride_qz + off_g_q * stride_qg,
-        shape=(N_CTX_Q, ACTUAL_BLOCK_DMODEL),
-        strides=(stride_qm, stride_qd),
-        offsets=(start_m * BLOCK_M, 0),
-        block_shape=(BLOCK_M, BLOCK_DMODEL),
-        order=(1, 0),
-    )
 
     K_block_ptr = tl.make_block_ptr(
         base=k_base,
@@ -210,16 +197,29 @@ def _fwd_kernel_splitK(
 
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)  # noqa: F821
 
+
+    # compute offsets
+    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+
+    # compute ptrs
+    q_offset = Q + off_h_q * stride_qh + off_z * stride_qz + off_g_q * stride_qg
+    q_ptrs = q_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qd
+
+    # compute masks
+    q_mask = (offs_m < N_CTX_Q)[:, None]
+    PADDED_HEAD: tl.constexpr = (ACTUAL_BLOCK_DMODEL != BLOCK_DMODEL)
+    if PADDED_HEAD:
+        d_mask = (offs_d < ACTUAL_BLOCK_DMODEL)[None, :]
+        q_mask = q_mask & d_mask
+
     # scale sm_scale by log_2(e) and use
     # 2^x instead of exp in the loop because CSE and LICM
     # don't work as expected with `exp` in the loop
     qk_scale = sm_scale * 1.44269504
     # load q: it will stay in SRAM throughout
-    q = tl.load(  # noqa: F821
-        tl.advance(Q_block_ptr, (0, 0)), boundary_check=(0, ))
+    q = tl.load(q_ptrs, mask=q_mask, other=0.0)
     q = (q * qk_scale).to(q.dtype)
-    if PADDED_HEAD:
-        q = tl.where(d_mask[None, :], q, 0.0)
 
     # loop over k, v and update accumulator
     for start_n in range(lo, hi, BLOCK_N):
@@ -236,8 +236,9 @@ def _fwd_kernel_splitK(
             0,
         )
         if PADDED_HEAD:
-            k = tl.where(d_mask[:, None], k, 0.0)
-            v = tl.where(d_mask[None, :], v, 0.0)
+            d_mask_old = (offs_d < ACTUAL_BLOCK_DMODEL)
+            k = tl.where(d_mask_old[:, None], k, 0.0)
+            v = tl.where(d_mask_old[None, :], v, 0.0)
 
         # -- compute qk ---
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
