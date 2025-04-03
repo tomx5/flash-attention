@@ -112,8 +112,8 @@ def _fwd_kernel_splitK(
         v_head_idx = off_h_q
 
     # calculate base offset
-    k_base = K + k_head_idx * stride_kh + cache_batch_idx * stride_kz + off_g_q * stride_kg
-    v_base = V + v_head_idx * stride_vh + cache_batch_idx * stride_vz + off_g_q * stride_vg
+    k_offset = K + k_head_idx * stride_kh + cache_batch_idx * stride_kz + off_g_q * stride_kg
+    v_offset = V + v_head_idx * stride_vh + cache_batch_idx * stride_vz + off_g_q * stride_vg
 
     # Copy new Keys and Values into Cache
     if NEW_KV:
@@ -139,7 +139,7 @@ def _fwd_kernel_splitK(
             
             # Store to K
             tl.store(
-                k_base +
+                k_offset +
                 tl.arange(0, BLOCK_DMODEL)[:, None] * stride_kd +
                 (tl.arange(0, BLOCK_N) + i + start_idx)[None, :] * stride_kn,
                 k_new_block,
@@ -162,7 +162,7 @@ def _fwd_kernel_splitK(
             
             # Store to V
             tl.store(
-                v_base + 
+                v_offset + 
                 (tl.arange(0, BLOCK_N) + i + start_idx)[:, None] * stride_vn +
                 tl.arange(0, BLOCK_DMODEL)[None, :] * stride_vd,
                 v_new_block,
@@ -170,26 +170,14 @@ def _fwd_kernel_splitK(
                      (tl.arange(0, BLOCK_DMODEL)[None, :] < ACTUAL_BLOCK_DMODEL),
             )
 
-
-    K_block_ptr = tl.make_block_ptr(
-        base=k_base,
-        shape=(ACTUAL_BLOCK_DMODEL, hi),
-        strides=(stride_kd, stride_kn),
-        offsets=(0, lo),
-        block_shape=(BLOCK_DMODEL, BLOCK_N),
-        order=(0, 1),
-    )
     V_block_ptr = tl.make_block_ptr(
-        base=v_base,
+        base=v_offset,
         shape=(hi, ACTUAL_BLOCK_DMODEL),
         strides=(stride_vn, stride_vd),
         offsets=(lo, 0),
         block_shape=(BLOCK_N, BLOCK_DMODEL),
         order=(1, 0),
     )
-
-    K_scale_shift_block_ptr = None
-    V_scale_shift_block_ptr = None
 
     # initialize pointer to m and l
     m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
@@ -200,6 +188,7 @@ def _fwd_kernel_splitK(
 
     # compute offsets
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, BLOCK_DMODEL)
 
     # compute ptrs
@@ -207,42 +196,44 @@ def _fwd_kernel_splitK(
     q_ptrs = q_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qd
 
     # compute masks
-    q_mask = (offs_m < N_CTX_Q)[:, None]
     PADDED_HEAD: tl.constexpr = (ACTUAL_BLOCK_DMODEL != BLOCK_DMODEL)
     if PADDED_HEAD:
-        d_mask = (offs_d < ACTUAL_BLOCK_DMODEL)[None, :]
-        q_mask = q_mask & d_mask
+        q_mask = (offs_m < N_CTX_Q)[:, None] & (offs_d < ACTUAL_BLOCK_DMODEL)[None, :]
+        kT_mask = (offs_d < ACTUAL_BLOCK_DMODEL)[:, None] & (offs_n < kv_len)[None, :]
+    else:
+        q_mask = (offs_m < N_CTX_Q)[:, None]
+        kT_mask = (offs_n < kv_len)[None, :]
 
     # scale sm_scale by log_2(e) and use
     # 2^x instead of exp in the loop because CSE and LICM
     # don't work as expected with `exp` in the loop
     qk_scale = sm_scale * 1.44269504
+    
     # load q: it will stay in SRAM throughout
     q = tl.load(q_ptrs, mask=q_mask, other=0.0)
     q = (q * qk_scale).to(q.dtype)
 
     # loop over k, v and update accumulator
     for start_n in range(lo, hi, BLOCK_N):
-        k, v = load_k_v_group(
-            K_block_ptr,
-            V_block_ptr,
-            K_scale_shift_block_ptr,
-            V_scale_shift_block_ptr,
-            BOUNDS_CHECKS_N,
-            1,
-            BLOCK_DMODEL,
-            ACTUAL_BLOCK_DMODEL,
-            Q.dtype.element_ty,
-            0,
-        )
+        kT_ptrs = k_offset + offs_d[:, None] * stride_kd + (start_n + offs_n)[None, :] * stride_kn
+
+        # load k
+        kT = tl.load(kT_ptrs, mask=kT_mask, other=0.0)
+        
+        #Load K/V for a given block
+        group_id = 0
+        # advance to the current quantization group
+        V_block_ptr = tl.advance(V_block_ptr, (0, ACTUAL_BLOCK_DMODEL * group_id))
+        # -- load v --
+        v = tl.load(V_block_ptr, boundary_check=(0, ) if BOUNDS_CHECKS_N else ())
+        
         if PADDED_HEAD:
             d_mask_old = (offs_d < ACTUAL_BLOCK_DMODEL)
-            k = tl.where(d_mask_old[:, None], k, 0.0)
             v = tl.where(d_mask_old[None, :], v, 0.0)
 
         # -- compute qk ---
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        qk += tl.dot(q, k)  # noqa: F821
+        qk += tl.dot(q, kT)  # noqa: F821
 
         if USE_ALIBI:
             row_idx = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -297,7 +288,6 @@ def _fwd_kernel_splitK(
         acc += tl.dot(p.to(v.dtype), v)
         
         # update pointers
-        K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
         V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
 
     # write back O
@@ -320,33 +310,6 @@ def _fwd_kernel_splitK(
     tl.store(Metadata_ptr, m_i)
     tl.store(Metadata_ptr + stride_m2, l_i)
 
-
-@triton.jit
-def load_k_v_group(
-    K_block_ptr,
-    V_block_ptr,
-    K_scale_shift_block_ptr,
-    V_scale_shift_block_ptr,
-    BOUNDS_CHECKS_N: tl.constexpr,
-    PACKED_PER_VAL: tl.constexpr,
-    BLOCK_DMODEL: tl.constexpr,
-    ACTUAL_BLOCK_DMODEL: tl.constexpr,
-    dtype: tl.constexpr,
-    group_id: tl.constexpr,
-):
-    #Load K/V for a given block
-
-    # Advance to the current quantization group
-    K_block_ptr = tl.advance(K_block_ptr, (ACTUAL_BLOCK_DMODEL * group_id, 0))
-    V_block_ptr = tl.advance(V_block_ptr, (0, ACTUAL_BLOCK_DMODEL * group_id))
-
-    # -- load k, v --
-    k = tl.load(K_block_ptr, boundary_check=(1, ) if BOUNDS_CHECKS_N else ())
-    v = tl.load(V_block_ptr, boundary_check=(0, ) if BOUNDS_CHECKS_N else ())
-
-    return k, v
-
-
 @triton.jit
 def cast_uint32_to_half2(scale_shift):
     # Extract two float16 packed into one int32
@@ -355,7 +318,6 @@ def cast_uint32_to_half2(scale_shift):
     scale = scale.to(tl.uint16).to(tl.float16, bitcast=True)
     shift = shift.to(tl.uint16).to(tl.float16, bitcast=True)
     return scale, shift
-
 
 @triton.jit
 def dequantize(
