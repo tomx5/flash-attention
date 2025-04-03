@@ -71,6 +71,8 @@ def _fwd_kernel_splitK(
     IS_GQA: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     USE_ALIBI: tl.constexpr,
+    PADDED_HEAD: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
 ):
     # get program ids
     pid_m = tl.program_id(0)
@@ -104,7 +106,6 @@ def _fwd_kernel_splitK(
     q_ptrs = q_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qd
 
     # compute masks
-    PADDED_HEAD: tl.constexpr = (ACTUAL_BLOCK_DMODEL != BLOCK_DMODEL)
     if PADDED_HEAD:
         q_mask = (offs_m < N_CTX_Q)[:, None] & (offs_d < ACTUAL_BLOCK_DMODEL)[None, :]
         kT_mask = (offs_d < ACTUAL_BLOCK_DMODEL)[:, None] & (offs_n < N_CTX_K_FINAL)[None, :]
@@ -138,9 +139,9 @@ def _fwd_kernel_splitK(
     else:
         alibi_slope = None
 
-    HEAD_RATIO: tl.constexpr = H_q // H_kv
+    # is gqa
     if IS_GQA:
-        hk_id = hq_id // HEAD_RATIO
+        hk_id = hq_id // GROUP_SIZE
         hv_id = hk_id
     else:
         hk_id = hq_id
@@ -321,10 +322,12 @@ def _splitK_reduce(
     ACTUAL_BLOCK_DMODEL: tl.constexpr,
     H: tl.constexpr,
     G: tl.constexpr,
+    N_CTX_Q: tl.constexpr,
     split_k: tl.constexpr,
     splitK_pow2: tl.constexpr,
-    use_mask: tl.constexpr,
+    MASK_SPLITK: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
+    PADDED_HEAD: tl.constexpr,
 ):
     # get pids
     pid_zhg = tl.program_id(0)
@@ -335,6 +338,13 @@ def _splitK_reduce(
     offs_splitK = tl.arange(0, splitK_pow2)
     offs_k = pid_k * K_BLOCK_SIZE + tl.arange(0, K_BLOCK_SIZE)
 
+
+    # compute masks
+    if PADDED_HEAD:
+        o_mask = (pid_m < N_CTX_Q)[:, None] & (offs_k < ACTUAL_BLOCK_DMODEL)[None, :]
+    else:
+        o_mask = None
+
     # compute ptrs
     metadata_offset = Metadata + pid_zhg * stride_mzhg
     metadata_ptr = metadata_offset + offs_splitK * stride_ms + pid_m * stride_mm
@@ -343,7 +353,7 @@ def _splitK_reduce(
     osk_ptr = osk_offset + offs_splitK[:, None] * stride_osk_s + offs_k[None, :] * stride_osk_k
 
     # read max values of each splitK
-    if use_mask:
+    if MASK_SPLITK:
         splitK_mask = offs_splitK < split_k
         l_m = tl.load(metadata_ptr, mask=splitK_mask, other=float("-inf"))
         l_sum = tl.load(metadata_ptr + stride_m2, mask=splitK_mask, other=0.0)
@@ -548,12 +558,12 @@ def attention_decode_forward_triton_impl_old(
 
     # get padded size
     dim_padded  = get_padded_headsize(dim_kc)
+    is_padded_head = dim_padded != dim_kc
 
     # Handle MQA/GQA case
-    if nheads_q > nheads_kc:
+    group_size = nheads_q // nheads_kc
+    if group_size > 1:
         is_gqa = True
-    elif nheads_q < nheads_kc:
-        raise ValueError("heads_per_group_q < heads_per_group_k")
     else:
         is_gqa = False
 
@@ -686,6 +696,8 @@ def attention_decode_forward_triton_impl_old(
         IS_GQA=is_gqa,
         IS_CAUSAL=causal,
         USE_ALIBI=use_alibi,
+        PADDED_HEAD=is_padded_head,
+        GROUP_SIZE=group_size,
         num_warps=num_warps,
         num_stages=1,
     )
@@ -699,7 +711,7 @@ def attention_decode_forward_triton_impl_old(
 
     # Merge together
     splitK_pow2 = triton.next_power_of_2(split_k)
-    use_mask = splitK_pow2 > split_k
+    mask_split_k = splitK_pow2 > split_k
     if batch_size * n_group_q * nheads_q * seqlen_q >= 512:
         k_block_num = 1
     else:
@@ -744,11 +756,13 @@ def attention_decode_forward_triton_impl_old(
         ACTUAL_BLOCK_DMODEL=dim_kc,
         G=n_group_q, 
         H=nheads_q,
+        N_CTX_Q=seqlen_q,
         # TODO: Tune num_warps
         split_k=split_k, 
         splitK_pow2=splitK_pow2, 
-        use_mask=use_mask,
+        MASK_SPLITK=mask_split_k,
         IS_CAUSAL=causal,
+        PADDED_HEAD=is_padded_head,
         num_warps=4)
 
     lse = lse.reshape([batch_size, n_group_q, nheads_q, seqlen_q])
@@ -783,7 +797,7 @@ def attention_decode_forward_triton_impl(
         layout: Literal["bshd"], 
         cache_seqlens: Optional[Union[(int, torch.Tensor)]], 
         cache_batch_idx: Optional[torch.Tensor],
-    ):
+):
     # triton configs
     BLOCK_M = 16
     BLOCK_N = 64
@@ -833,6 +847,7 @@ def attention_decode_forward_triton_impl(
 
     # get padded size
     dim_padded  = get_padded_headsize(dim_kc)
+    is_padded_head = dim_padded != dim_kc
 
     # Handle MQA/GQA case
     group_size = nheads_q // nheads_kc
@@ -952,6 +967,8 @@ def attention_decode_forward_triton_impl(
         IS_GQA=is_gqa,
         IS_CAUSAL=causal,
         USE_ALIBI=use_alibi,
+        PADDED_HEAD=is_padded_head,
+        GROUP_SIZE=group_size,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -964,7 +981,7 @@ def attention_decode_forward_triton_impl(
 
     # Merge together
     splitK_pow2 = triton.next_power_of_2(split_k)
-    use_mask = splitK_pow2 > split_k
+    mask_split_k = splitK_pow2 > split_k
     if batch_size * n_group_q * heads_per_group_q * seqlen_q >= 512:
         k_block_num = 1
     else:
@@ -1010,11 +1027,13 @@ def attention_decode_forward_triton_impl(
         ACTUAL_BLOCK_DMODEL=dim_kc,
         G=n_group_q, 
         H=heads_per_group_q,
+        N_CTX_Q=seqlen_q,
         # TODO: Tune num_warps
         split_k=split_k, 
         splitK_pow2=splitK_pow2, 
-        use_mask=use_mask,
+        MASK_SPLITK=mask_split_k,
         IS_CAUSAL=causal,
+        PADDED_HEAD=is_padded_head,
         num_warps=num_warps_split_k)
 
     return lse
