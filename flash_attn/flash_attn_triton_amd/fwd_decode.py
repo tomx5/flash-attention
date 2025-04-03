@@ -192,10 +192,12 @@ def _fwd_kernel_splitK(
         q_mask = (offs_m < N_CTX_Q)[:, None] & (offs_d < ACTUAL_BLOCK_DMODEL)[None, :]
         kT_mask = (offs_d < ACTUAL_BLOCK_DMODEL)[:, None] & (offs_n < kv_len)[None, :]
         v_mask = (offs_n < kv_len)[:, None] & (offs_d < ACTUAL_BLOCK_DMODEL)[None, :]
+        osk_mask = (offs_m < N_CTX_Q)[:, None] & (offs_d < ACTUAL_BLOCK_DMODEL)[None, :]
     else:
         q_mask = (offs_m < N_CTX_Q)[:, None]
         kT_mask = (offs_n < kv_len)[None, :]
         v_mask = (offs_n < kv_len)[:, None]
+        osk_mask = (offs_m < N_CTX_Q)[:, None]
 
     # scale sm_scale by log_2(e) and use
     # 2^x instead of exp in the loop because CSE and LICM
@@ -276,24 +278,19 @@ def _fwd_kernel_splitK(
         acc += tl.dot(p.to(v.dtype), v)
 
     # write back O
-    O_block_ptr = tl.make_block_ptr(
-        base=Out_splitK + off_zhg * stride_osk_zhg + splitk_idx * stride_osk_s,
-        shape=(N_CTX_Q, BLOCK_DMODEL),
-        strides=(stride_osk_m, 1),
-        offsets=(start_m * BLOCK_M, 0),
-        block_shape=(BLOCK_M, BLOCK_DMODEL),
-        order=(1, 0),
-    )
+    osk_offset = Out_splitK + off_zhg * stride_osk_zhg + splitk_idx * stride_osk_s
+    osk_ptrs = osk_offset + offs_m[:, None] * stride_osk_m + offs_d[None, :] * stride_osk_d 
     tl.store(
-        tl.advance(O_block_ptr, (0, 0)),
+        osk_ptrs,
         acc,
-        boundary_check=(0, ),
+        mask=osk_mask,
     )
-    # Write metadata for split-K reduction
-    Metadata_ptr = (Metadata + off_zhg * stride_mzhg + splitk_idx * stride_ms + start_m * BLOCK_M +
+
+    # write metadata for split-K reduction
+    metadata_ptr = (Metadata + off_zhg * stride_mzhg + splitk_idx * stride_ms + start_m * BLOCK_M +
                     tl.arange(0, BLOCK_M))
-    tl.store(Metadata_ptr, m_i)
-    tl.store(Metadata_ptr + stride_m2, l_i)
+    tl.store(metadata_ptr, m_i)
+    tl.store(metadata_ptr + stride_m2, l_i)
 
 @triton.jit
 def cast_uint32_to_half2(scale_shift):
