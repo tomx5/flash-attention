@@ -341,7 +341,7 @@ def _splitK_reduce(
 
     # compute masks
     if PADDED_HEAD:
-        o_mask = (pid_m < N_CTX_Q)[:, None] & (offs_k < ACTUAL_BLOCK_DMODEL)[None, :]
+        o_mask = offs_k < ACTUAL_BLOCK_DMODEL
     else:
         o_mask = None
 
@@ -389,7 +389,7 @@ def _splitK_reduce(
     g_id = pid_zhg % G
     out_offset = Out + z_id * stride_oz + h_id * stride_oh  + g_id * stride_og
     out_ptr = out_offset + pid_m * stride_om + offs_k
-    tl.store(out_ptr, acc_out) # needs a mask
+    tl.store(out_ptr, acc_out, mask=o_mask)
 
     # Store lse
     l_ptrs = LSE + pid_zhg * stride_lse_zhg + pid_m
