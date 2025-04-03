@@ -72,32 +72,35 @@ def _fwd_kernel_splitK(
     IS_CAUSAL: tl.constexpr,
     USE_ALIBI: tl.constexpr,
 ):
-    start_m = tl.program_id(0)
-    off_zhg = tl.program_id(1)
-    off_z = off_zhg // (H_q * G_q)
-    off_h_q = (off_zhg // G_q) % H_q
-    off_g_q = off_zhg % G_q
-    splitk_idx = tl.program_id(2)
+    # get program ids
+    pid_m = tl.program_id(0)
+    pid_zhg = tl.program_id(1)
+    pid_splitk = tl.program_id(2)
+
+    # compute z, h and g ids
+    z_id = pid_zhg // (H_q * G_q)
+    hq_id = (pid_zhg // G_q) % H_q
+    g_id = pid_zhg % G_q
 
     # figure out seqlens
-    lo = splitk_idx * BLOCK_N_PER_SPLIT
+    lo = pid_splitk * BLOCK_N_PER_SPLIT
     if USE_CACHE_SEQLENs:
-        cache_seqlen_last_idx = tl.load(Cache_seqlens + off_z)
+        cache_seqlen_last_idx = tl.load(Cache_seqlens + z_id)
         if NEW_KV:
             N_CTX_K_FINAL = cache_seqlen_last_idx + N_CTX_NEW
         else:
             N_CTX_K_FINAL = cache_seqlen_last_idx
     else:
         N_CTX_K_FINAL = N_CTX_K
-    hi = tl.minimum((splitk_idx + 1) * BLOCK_N_PER_SPLIT, N_CTX_K_FINAL)
+    hi = tl.minimum((pid_splitk + 1) * BLOCK_N_PER_SPLIT, N_CTX_K_FINAL)
 
     # compute offsets
-    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, BLOCK_DMODEL)
 
     # compute ptrs
-    q_offset = Q + off_h_q * stride_qh + off_z * stride_qz + off_g_q * stride_qg
+    q_offset = Q + hq_id * stride_qh + z_id * stride_qz + g_id * stride_qg
     q_ptrs = q_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qd
 
     # compute masks
@@ -124,36 +127,36 @@ def _fwd_kernel_splitK(
 
     # pick batch index
     if USE_CACHE_BATCH_IDX:
-        cache_batch_idx = tl.load(Cache_batch_idx + off_z)
+        cache_batch_idx = tl.load(Cache_batch_idx + z_id)
     else:
-        cache_batch_idx = off_z
+        cache_batch_idx = z_id
 
     # Load ALiBi slope if enabled
     if USE_ALIBI:
-        a_offset = off_z * stride_az + off_h_q * stride_ah
+        a_offset = z_id * stride_az + hq_id * stride_ah
         alibi_slope = tl.load(Alibi_slopes + a_offset)
     else:
         alibi_slope = None
 
     HEAD_RATIO: tl.constexpr = H_q // H_kv
     if IS_GQA:
-        k_head_idx = off_h_q // HEAD_RATIO
-        v_head_idx = k_head_idx
+        hk_id = hq_id // HEAD_RATIO
+        hv_id = hk_id
     else:
-        k_head_idx = off_h_q
-        v_head_idx = off_h_q
+        hk_id = hq_id
+        hv_id = hq_id
 
     # calculate base offset
-    k_offset = K + k_head_idx * stride_kh + cache_batch_idx * stride_kz + off_g_q * stride_kg
-    v_offset = V + v_head_idx * stride_vh + cache_batch_idx * stride_vz + off_g_q * stride_vg
+    k_offset = K + hk_id * stride_kh + cache_batch_idx * stride_kz + g_id * stride_kg
+    v_offset = V + hv_id * stride_vh + cache_batch_idx * stride_vz + g_id * stride_vg
 
     # Copy new Keys and Values into Cache
     if NEW_KV:
-        knew_base = K_new + k_head_idx * stride_kn_h + off_z * stride_kn_z + off_g_q * stride_kn_g
+        knew_base = K_new + hk_id * stride_kn_h + z_id * stride_kn_z + g_id * stride_kn_g
         
         # Determine the starting position for new data in the cache
         if USE_CACHE_SEQLENs:
-            start_idx = tl.load(Cache_seqlens + off_z)
+            start_idx = tl.load(Cache_seqlens + z_id)
         else:
             start_idx = N_CTX_K - N_CTX_NEW
 
@@ -180,7 +183,7 @@ def _fwd_kernel_splitK(
             )
 
         # Copy new Values
-        vnew_base = V_new + v_head_idx * stride_vn_h + off_z * stride_vn_z + off_g_q * stride_vn_g
+        vnew_base = V_new + hv_id * stride_vn_h + z_id * stride_vn_z + g_id * stride_vn_g
         for i in range(0, N_CTX_NEW, BLOCK_N):
             # Load from V_new
             v_new_block = tl.load(
@@ -224,7 +227,7 @@ def _fwd_kernel_splitK(
         qk += tl.dot(q, kT)  # noqa: F821
 
         if USE_ALIBI:
-            row_idx = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            row_idx = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
             col_idx = start_n + tl.arange(0, BLOCK_N)
             
             # Compute relative positions
@@ -237,7 +240,7 @@ def _fwd_kernel_splitK(
 
         # Apply causal mask if IS_CAUSAL is True
         if IS_CAUSAL:
-            row_idx = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            row_idx = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
             col_idx = start_n + tl.arange(0, BLOCK_N)
             
             # create a N_CTX_Q x kv_len causal mask
@@ -276,7 +279,7 @@ def _fwd_kernel_splitK(
         acc += tl.dot(p.to(v.dtype), v)
 
     # write back O
-    osk_offset = Out_splitK + off_zhg * stride_osk_zhg + splitk_idx * stride_osk_s
+    osk_offset = Out_splitK + pid_zhg * stride_osk_zhg + pid_splitk * stride_osk_s
     osk_ptrs = osk_offset + offs_m[:, None] * stride_osk_m + offs_d[None, :] * stride_osk_d 
     tl.store(
         osk_ptrs,
@@ -285,7 +288,7 @@ def _fwd_kernel_splitK(
     )
 
     # write metadata for split-K reduction
-    metadata_offset = Metadata + off_zhg * stride_mzhg + splitk_idx * stride_ms
+    metadata_offset = Metadata + pid_zhg * stride_mzhg + pid_splitk * stride_ms
     metadata_ptr = metadata_offset + offs_m
     tl.store(metadata_ptr, m_i)
     tl.store(metadata_ptr + stride_m2, l_i)
@@ -313,7 +316,7 @@ def _splitK_reduce(
     stride_lse_zhg,
     stride_lse_m,
     M_ceil: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+    K_BLOCK_SIZE: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     ACTUAL_BLOCK_DMODEL: tl.constexpr,
     H: tl.constexpr,
@@ -323,32 +326,32 @@ def _splitK_reduce(
     use_mask: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
 ):
-    off_zhg = tl.program_id(0)
-    off_z = off_zhg // (H * G)
-    off_h = (off_zhg // G) % H
-    off_g = off_zhg % G
-    off_m = tl.program_id(1)
-    off_k = tl.program_id(2)
+    # get pids
+    pid_zhg = tl.program_id(0)
+    pid_m = tl.program_id(1)
+    pid_k = tl.program_id(2)
 
-    # read  chunk
-    spk_idx = tl.arange(0, splitK_pow2)
-    kidx = tl.arange(0, BLOCK_SIZE)
+    # compute offsets
+    offs_splitK = tl.arange(0, splitK_pow2)
+    offs_k = tl.arange(0, K_BLOCK_SIZE)
 
-    Metadata_ptr = (Metadata + stride_mzhg * off_zhg + spk_idx * stride_ms + off_m * stride_mm)
+    # compute ptrs
+    metadata_offset = Metadata + pid_zhg * stride_mzhg + offs_splitK * stride_ms 
+    metadata_ptr = metadata_offset + pid_m * stride_mm
 
-    o_ptr = (Out_splitK + off_zhg * stride_osk_zhg + stride_osk_m * off_m + off_k * BLOCK_SIZE +
-             stride_osk_s * spk_idx[:, None] + kidx[None, :] * stride_osk_k)
+    osk_offset = Out_splitK + pid_zhg * stride_osk_zhg + pid_m *stride_osk_m
+    osk_ptr = osk_offset + pid_k * K_BLOCK_SIZE + stride_osk_s * offs_splitK[:, None] + offs_k[None, :] * stride_osk_k
 
     # read max values of each splitK
     if use_mask:
-        spk_mask = spk_idx < split_k
-        l_m = tl.load(Metadata_ptr, mask=spk_mask, other=float("-inf"))
-        l_sum = tl.load(Metadata_ptr + stride_m2, mask=spk_mask, other=0.0)
-        acc = tl.load(o_ptr, mask=spk_mask[:, None], other=0.0)
+        splitK_mask = offs_splitK < split_k
+        l_m = tl.load(metadata_ptr, mask=splitK_mask, other=float("-inf"))
+        l_sum = tl.load(metadata_ptr + stride_m2, mask=splitK_mask, other=0.0)
+        acc = tl.load(osk_ptr, mask=splitK_mask[:, None], other=0.0)
     else:
-        l_m = tl.load(Metadata_ptr)
-        l_sum = tl.load(Metadata_ptr + stride_m2)
-        acc = tl.load(o_ptr)
+        l_m = tl.load(metadata_ptr)
+        l_sum = tl.load(metadata_ptr + stride_m2)
+        acc = tl.load(osk_ptr)
 
     g_m = tl.max(l_m, axis=0)
     
@@ -371,12 +374,15 @@ def _splitK_reduce(
         acc_out = tl.sum(acc, axis=0) / g_sum
 
     # Store output
-    Out_ptr = (Out + stride_oz * off_z + stride_oh * off_h + stride_og * off_g + stride_om * off_m +
-               off_k * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE))
-    tl.store(Out_ptr, acc_out)
+    z_id = pid_zhg // (H * G)
+    h_id = (pid_zhg // G) % H
+    g_id = pid_zhg % G
+    out_ptr = (Out + stride_oz * z_id + stride_oh * h_id + stride_og * g_id + stride_om * pid_m +
+               pid_k * K_BLOCK_SIZE + tl.arange(0, K_BLOCK_SIZE))
+    tl.store(out_ptr, acc_out)
 
     # Store lse
-    l_ptrs = LSE + off_zhg * stride_lse_zhg + off_m
+    l_ptrs = LSE + pid_zhg * stride_lse_zhg + pid_m
     if IS_CAUSAL:
         lse = tl.where(g_sum > 0, (g_m + tl.math.log2(g_sum)) / 1.44269504, g_m)
         tl.store(l_ptrs, lse)
@@ -733,7 +739,7 @@ def attention_decode_forward_triton_impl_old(
         stride_lse_zhg=stride_lse_zhg,
         stride_lse_m=stride_lse_m,
         M_ceil=seqlen_q_ceil, 
-        BLOCK_SIZE=k_block_size,
+        K_BLOCK_SIZE=k_block_size,
         BLOCK_DMODEL=dim_padded,
         ACTUAL_BLOCK_DMODEL=dim_kc,
         G=n_group_q, 
@@ -999,7 +1005,7 @@ def attention_decode_forward_triton_impl(
         stride_lse_zhg=stride_lse_zhg,
         stride_lse_m=stride_lse_m,
         M_ceil=seqlen_q_ceil, 
-        BLOCK_SIZE=k_block_size,
+        K_BLOCK_SIZE=k_block_size,
         BLOCK_DMODEL=dim_padded,
         ACTUAL_BLOCK_DMODEL=dim_kc,
         G=n_group_q, 
