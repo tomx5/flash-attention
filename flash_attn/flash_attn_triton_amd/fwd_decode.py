@@ -10,8 +10,8 @@ def _fwd_kernel_splitK(
     K,
     V,
     sm_scale,
-    Out_splitK,  # [B, H, split_k, Mq, K]
-    Metadata,  # [B, H, 2, split_k, M_ceil] contains [mi, li]
+    Out_splitK,  # [B*H*G, split_k, Mq, K]
+    Metadata,  # [B*H*G, 2, split_k, M_ceil] contains [mi, li]
     K_new,
     V_new,
     Cache_seqlens,
@@ -296,10 +296,10 @@ def _fwd_kernel_splitK(
 
 @triton.jit
 def _splitK_reduce(
-    Out_splitK,  # [B, H, split_k, Mq, K]
-    Metadata,  # [B, H, 2, split_k, M_ceil] contains [mi, li]
-    Out,  # [B, H, M, K]
-    LSE,  # [B, H, M]
+    Out_splitK,  # [B*H*G, split_k, Mq, K]
+    Metadata,  # [B*H*G, 2, split_k, M_ceil] contains [mi, li]
+    Out,  # [B, H, G, M, K]
+    LSE,  # [B*H*G, M]
     stride_osk_zhg,
     stride_osk_s,
     stride_osk_m,
@@ -333,14 +333,14 @@ def _splitK_reduce(
 
     # compute offsets
     offs_splitK = tl.arange(0, splitK_pow2)
-    offs_k = tl.arange(0, K_BLOCK_SIZE)
+    offs_k = pid_k * K_BLOCK_SIZE + tl.arange(0, K_BLOCK_SIZE)
 
     # compute ptrs
-    metadata_offset = Metadata + pid_zhg * stride_mzhg + offs_splitK * stride_ms 
-    metadata_ptr = metadata_offset + pid_m * stride_mm
+    metadata_offset = Metadata + pid_zhg * stride_mzhg
+    metadata_ptr = metadata_offset + offs_splitK * stride_ms + pid_m * stride_mm
 
-    osk_offset = Out_splitK + pid_zhg * stride_osk_zhg + pid_m *stride_osk_m
-    osk_ptr = osk_offset + pid_k * K_BLOCK_SIZE + stride_osk_s * offs_splitK[:, None] + offs_k[None, :] * stride_osk_k
+    osk_offset = Out_splitK + pid_zhg * stride_osk_zhg + pid_m * stride_osk_m
+    osk_ptr = osk_offset + offs_splitK[:, None] * stride_osk_s + offs_k[None, :] * stride_osk_k
 
     # read max values of each splitK
     if use_mask:
@@ -377,9 +377,9 @@ def _splitK_reduce(
     z_id = pid_zhg // (H * G)
     h_id = (pid_zhg // G) % H
     g_id = pid_zhg % G
-    out_ptr = (Out + stride_oz * z_id + stride_oh * h_id + stride_og * g_id + stride_om * pid_m +
-               pid_k * K_BLOCK_SIZE + tl.arange(0, K_BLOCK_SIZE))
-    tl.store(out_ptr, acc_out)
+    out_offset = Out + z_id * stride_oz + h_id * stride_oh  + g_id * stride_og
+    out_ptr = out_offset + pid_m * stride_om + offs_k
+    tl.store(out_ptr, acc_out) # needs a mask
 
     # Store lse
     l_ptrs = LSE + pid_zhg * stride_lse_zhg + pid_m
