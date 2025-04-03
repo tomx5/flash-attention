@@ -561,6 +561,7 @@ def attention_decode_forward_triton_impl_old(
     NUM_QUANT_GROUPS = 1
 
     is_new_kv = True if k_new is not None and v_new is not None else False
+    use_alibi = False if alibi_slopes is None else True
 
     # kernels expects "bsghd"
     original_layout = layout
@@ -635,7 +636,7 @@ def attention_decode_forward_triton_impl_old(
     else:
         stride_kn_z, stride_kn_n, stride_kn_g, stride_kn_h, stride_kn_d  = (None, None, None, None, None)
         stride_vn_z, stride_vn_n, stride_vn_g, stride_vn_h, stride_vn_d  = (None, None, None, None, None)
-    if alibi_slopes:
+    if use_alibi:
         stride_az, stride_ah  = alibi_slopes.stride()
     else:
         stride_az, stride_ah  = (None, None)
@@ -731,7 +732,7 @@ def attention_decode_forward_triton_impl_old(
         NEW_KV=is_new_kv,
         IS_GQA=is_gqa,
         IS_CAUSAL=causal,
-        USE_ALIBI=False if alibi_slopes is None else True,
+        USE_ALIBI=use_alibi,
         num_warps=num_warps,
         num_stages=1,
     )
@@ -825,6 +826,7 @@ def attention_decode_forward_triton_impl(
         
     # kernel_configs
     is_new_kv = True if k_new is not None and v_new is not None else False
+    use_alibi = False if alibi_slopes is None else True
     use_cache_seqlens = cache_seqlens is not None
     SPLIT_K = None
     NUM_QUANT_GROUPS = 1
@@ -840,7 +842,7 @@ def attention_decode_forward_triton_impl(
         ( _, seqlen_kn, nheads_kn, dim_kn), (stride_kn_z, stride_kn_h, stride_kn_n, stride_kn_d) = (None, None, None, None), (None, None, None, None)
         (_, seqlen_vn, nheads_vn, dim_vn), (stride_vn_z, stride_vn_h, stride_vn_n, stride_vn_d) = (None, None, None, None), (None, None, None, None)
     (_, seqlen_o, nheads_o, dim_o), (stride_oz, stride_oh, stride_om, stride_od) = get_shape_and_strides_from_layout(out, layout)
-    if alibi_slopes:
+    if use_alibi:
         stride_az, stride_ah = alibi_slopes.stride()
     else:
         stride_az, stride_ah = (None, None)
@@ -981,7 +983,7 @@ def attention_decode_forward_triton_impl(
         NEW_KV=is_new_kv,
         IS_GQA=is_gqa,
         IS_CAUSAL=causal,
-        USE_ALIBI=False if alibi_slopes is None else True,
+        USE_ALIBI=use_alibi,
         num_warps=num_warps,
         num_stages=num_stages,
     )
