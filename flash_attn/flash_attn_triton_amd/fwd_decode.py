@@ -382,7 +382,6 @@ def _splitK_reduce(
     ACTUAL_BLOCK_DMODEL: tl.constexpr,
     H: tl.constexpr,
     G: tl.constexpr,
-    N_CTX_Q: tl.constexpr,
     split_k: tl.constexpr,
     splitK_pow2: tl.constexpr,
     MASK_SPLITK: tl.constexpr,
@@ -579,9 +578,9 @@ def attention_decode_forward_triton_impl(
     # triton configs
     BLOCK_M = 16
     BLOCK_N = 64
-    num_warps = 1
     num_stages = 1
-    num_warps_split_k = 4
+    num_warps_fwd = 1
+    num_warps_reduce = 4
         
     # kernel_configs
     is_new_kv = True if k_new is not None and v_new is not None else False
@@ -747,7 +746,7 @@ def attention_decode_forward_triton_impl(
         USE_ALIBI=use_alibi,
         PADDED_HEAD=is_padded_head,
         GROUP_SIZE=group_size,
-        num_warps=num_warps,
+        num_warps=num_warps_fwd,
         num_stages=num_stages,
     )
 
@@ -804,13 +803,12 @@ def attention_decode_forward_triton_impl(
         ACTUAL_BLOCK_DMODEL=dim_kc,
         G=n_group_q, 
         H=heads_per_group_q,
-        N_CTX_Q=seqlen_q,
         # TODO: Tune num_warps
         split_k=split_k, 
         splitK_pow2=splitK_pow2, 
         MASK_SPLITK=mask_split_k,
         IS_CAUSAL=causal,
         PADDED_HEAD=is_padded_head,
-        num_warps=num_warps_split_k)
+        num_warps=num_warps_reduce)
 
     return lse
