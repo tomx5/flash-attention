@@ -3,7 +3,7 @@ import os
 from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
 from .bwd_prefill_split import attention_prefill_backward_triton_split_impl
-from .fwd_decode import attention_decode_forward_triton_impl, attention_decode_forward_triton_impl_old
+from .fwd_decode import attention_decode_forward_triton_impl
 from .fwd_ref import attention_forward_pytorch_ref_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
 from .utils import DEBUG_TRITON, DEBUG_TRITON_DETAIL, MetaData, get_shapes_from_layout, DEBUG, is_fp8
@@ -672,39 +672,21 @@ def fwd_kvcache(
 
     # launch kernel
     # TODO: pass output as an arg. Maybe we are copying output which is causing slow down
-    OLD_DECODE = os.environ.get('OLD_DECODE', '0').lower() in ('1', 'true', 'yes')
-    if OLD_DECODE:
-        output_triton, softmax_lse_triton = attention_decode_forward_triton_impl_old(
-            q,
-            k_cache,
-            v_cache,
-            k_new,
-            v_new,
-            metadata.sm_scale,
-            metadata.causal,
-            metadata.alibi_slopes,
-            metadata.layout,
-            metadata.cache_seqlens,
-            metadata.cache_batch_idx,
-        )
-        out = output_triton
-        softmax_lse = softmax_lse_triton
-    else:
-        softmax_lse_triton = attention_decode_forward_triton_impl(
-            q,
-            k_cache,
-            v_cache,
-            k_new,
-            v_new,
-            out,
-            metadata.sm_scale,
-            metadata.causal,
-            metadata.alibi_slopes,
-            metadata.layout,
-            metadata.cache_seqlens,
-            metadata.cache_batch_idx,
-        )
-        softmax_lse = softmax_lse_triton
+    softmax_lse_triton = attention_decode_forward_triton_impl(
+        q,
+        k_cache,
+        v_cache,
+        k_new,
+        v_new,
+        out,
+        metadata.sm_scale,
+        metadata.causal,
+        metadata.alibi_slopes,
+        metadata.layout,
+        metadata.cache_seqlens,
+        metadata.cache_batch_idx,
+    )
+    softmax_lse = softmax_lse_triton
     
     if DEBUG:
         print("out:", out, out.shape)
