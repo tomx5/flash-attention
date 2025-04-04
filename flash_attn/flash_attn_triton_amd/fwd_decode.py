@@ -2,8 +2,66 @@ import torch
 import triton
 import triton.language as tl
 from typing import Literal, Optional, Union
-from .utils import DEBUG, get_padded_headsize, get_shape_and_strides_from_layout
+from .utils import AUTOTUNE, DEBUG, get_padded_headsize, get_shape_and_strides_from_layout, is_cdna
 
+def get_cdna_autotune_configs():
+    return [
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1,
+                      num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1,
+                      num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 3, 'PRE_LOAD_V': False}, num_stages=1,
+                      num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1,
+                      num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1,
+                      num_warps=4),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1,
+                      num_warps=4),
+        # Fall-back config.
+        triton.Config({'BLOCK_M': 16, 'BLOCK_N': 16, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1,
+                      num_warps=4),
+    ], ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK']
+
+def get_autotune_configs():
+    if AUTOTUNE:
+        if is_cdna():
+            autotune_configs, autotune_keys = get_cdna_autotune_configs()
+            fwd_auto_tune_configs, fwd_autotune_keys= autotune_configs, autotune_keys
+            reduce_auto_tune_configs, reduce_autotune_keys = autotune_configs, autotune_keys
+            return (fwd_auto_tune_configs, fwd_autotune_keys), (reduce_auto_tune_configs, reduce_autotune_keys)
+        else:
+            raise ValueError("Unknown Device Type")
+    else:
+        autotune_configs, autotune_keys = [
+            triton.Config(
+                {"BLOCK_M": 64, "BLOCK_N": 64, "waves_per_eu": 1, "PRE_LOAD_V": False},
+                num_stages=1,
+                num_warps=4,
+            ),
+        ], [
+            "IS_CAUSAL",
+            "dropout_p",
+            "MAX_SEQLENS_Q",
+            "MAX_SEQLENS_K",
+            "ACTUAL_BLOCK_DMODEL",
+            "VARLEN",
+            "HQ",
+            "HK",
+        ]
+
+        fwd_auto_tune_configs, fwd_autotune_keys= autotune_configs, autotune_keys
+        reduce_auto_tune_configs, reduce_autotune_keys = autotune_configs, autotune_keys
+        return (fwd_auto_tune_configs, fwd_autotune_keys), (reduce_auto_tune_configs, reduce_autotune_keys)
+
+
+(fwd_auto_tune_configs, fwd_autotune_keys), (reduce_auto_tune_configs, reduce_autotune_keys) = get_autotune_configs()
+
+# @triton.autotune(
+#     configs=fwd_auto_tune_configs,
+#     key=fwd_autotune_keys,
+#     use_cuda_graph=True,
+# )
 @triton.jit
 def _fwd_kernel_splitK(
     Q,
@@ -84,6 +142,14 @@ def _fwd_kernel_splitK(
     hq_id = (pid_zhg // G_q) % H_q
     g_id = pid_zhg % G_q
 
+    # is gqa
+    if IS_GQA:
+        hk_id = hq_id // GROUP_SIZE
+        hv_id = hk_id
+    else:
+        hk_id = hq_id
+        hv_id = hq_id
+
     # figure out seqlens
     lo = pid_splitk * BLOCK_N_PER_SPLIT
     if USE_CACHE_SEQLENs:
@@ -96,6 +162,12 @@ def _fwd_kernel_splitK(
         N_CTX_K_FINAL = N_CTX_K
     hi = tl.minimum((pid_splitk + 1) * BLOCK_N_PER_SPLIT, N_CTX_K_FINAL)
 
+    # pick batch index
+    if USE_CACHE_BATCH_IDX:
+        cache_batch_idx = tl.load(Cache_batch_idx + z_id)
+    else:
+        cache_batch_idx = z_id
+
     # compute offsets
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N)
@@ -104,6 +176,8 @@ def _fwd_kernel_splitK(
     # compute ptrs
     q_offset = Q + hq_id * stride_qh + z_id * stride_qz + g_id * stride_qg
     q_ptrs = q_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qd
+    k_offset = K + hk_id * stride_kh + cache_batch_idx * stride_kz + g_id * stride_kg
+    v_offset = V + hv_id * stride_vh + cache_batch_idx * stride_vz + g_id * stride_vg
 
     # compute masks
     if PADDED_HEAD:
@@ -126,30 +200,12 @@ def _fwd_kernel_splitK(
     q = tl.load(q_ptrs, mask=q_mask, other=0.0)
     q = (q * qk_scale).to(q.dtype)
 
-    # pick batch index
-    if USE_CACHE_BATCH_IDX:
-        cache_batch_idx = tl.load(Cache_batch_idx + z_id)
-    else:
-        cache_batch_idx = z_id
-
-    # Load ALiBi slope if enabled
+    # load ALiBi slope if enabled
     if USE_ALIBI:
         a_offset = z_id * stride_az + hq_id * stride_ah
         alibi_slope = tl.load(Alibi_slopes + a_offset)
     else:
         alibi_slope = None
-
-    # is gqa
-    if IS_GQA:
-        hk_id = hq_id // GROUP_SIZE
-        hv_id = hk_id
-    else:
-        hk_id = hq_id
-        hv_id = hq_id
-
-    # calculate base offset
-    k_offset = K + hk_id * stride_kh + cache_batch_idx * stride_kz + g_id * stride_kg
-    v_offset = V + hv_id * stride_vh + cache_batch_idx * stride_vz + g_id * stride_vg
 
     # Copy new Keys and Values into Cache
     if NEW_KV:
@@ -295,6 +351,11 @@ def _fwd_kernel_splitK(
     tl.store(metadata_ptr + stride_m2, l_i)
 
 
+# @triton.autotune(
+#     configs=reduce_auto_tune_configs,
+#     key=reduce_autotune_keys,
+#     use_cuda_graph=True,
+# )
 @triton.jit
 def _splitK_reduce(
     Out_splitK,  # [B*H*G, split_k, Mq, K]
@@ -316,7 +377,6 @@ def _splitK_reduce(
     stride_ok,
     stride_lse_zhg,
     stride_lse_m,
-    M_ceil: tl.constexpr,
     K_BLOCK_SIZE: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     ACTUAL_BLOCK_DMODEL: tl.constexpr,
@@ -583,7 +643,7 @@ def attention_decode_forward_triton_impl(
 
     # setup grid
     seqlen_q_ceil = (seqlen_q + BLOCK_M - 1) // BLOCK_M * BLOCK_M
-    grid = (triton.cdiv(seqlen_q, BLOCK_M), batch_size * n_group_q * heads_per_group_q, split_k)
+    grid = lambda META: (triton.cdiv(seqlen_q, META['BLOCK_M']),  batch_size * n_group_q * heads_per_group_q, split_k)
     
     # create intermediate tensors
     out_splitk = torch.empty([batch_size * n_group_q * heads_per_group_q, split_k, seqlen_q_ceil, dim_kc], dtype=torch.float32, device=q.device)
@@ -739,7 +799,6 @@ def attention_decode_forward_triton_impl(
         # LSE strides
         stride_lse_zhg=stride_lse_zhg,
         stride_lse_m=stride_lse_m,
-        M_ceil=seqlen_q_ceil, 
         K_BLOCK_SIZE=k_block_size,
         BLOCK_DMODEL=dim_padded,
         ACTUAL_BLOCK_DMODEL=dim_kc,
