@@ -273,7 +273,7 @@ autotune_configs, autotune_keys = get_autotune_configs()
     use_cuda_graph=True,
 )
 @triton.jit
-def attn_fwd(Q, K, V, bias,
+def attn_fwd(Q, K, V, bias, Cache_seqlens, Cache_batch_idx,
              Descale_Q, Descale_K, Descale_V, Descale_O, stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_o_z,
              SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_qh, stride_qm, stride_qk,
              stride_kz, stride_kh, stride_kn, stride_kk, stride_vz, stride_vh, stride_vk, stride_vn,
@@ -281,7 +281,7 @@ def attn_fwd(Q, K, V, bias,
              stride_sz, stride_sh, stride_sm, stride_sn, stride_lse_z, stride_lse_h, stride_lse_m, cu_seqlens_q, cu_seqlens_k,
              dropout_p, philox_seed, philox_offset_base, sd_mask, dropout_mask, alibi_slopes, HQ: tl.constexpr,
              HK: tl.constexpr, ACTUAL_BLOCK_DMODEL: tl.constexpr, MAX_SEQLENS_Q: tl.constexpr,
-             MAX_SEQLENS_K: tl.constexpr, VARLEN: tl.constexpr, IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr,
+             MAX_SEQLENS_K: tl.constexpr, IS_VARLEN: tl.constexpr, IS_INFERENCE: tl.constexpr,  IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr,
              BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, USE_BIAS: tl.constexpr,
              ENABLE_DROPOUT: tl.constexpr, RETURN_SCORES: tl.constexpr, USE_ALIBI: tl.constexpr, USE_EXP2: tl.constexpr, 
              IS_FP8: tl.constexpr, FP8_MAX: tl.constexpr, FP8_OUTPUT: tl.constexpr):
@@ -296,20 +296,23 @@ def attn_fwd(Q, K, V, bias,
     offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, BLOCK_DMODEL)
 
-    # handle varlen
-    if VARLEN:
+    # handle seqlen
+    if IS_VARLEN:
         cu_seqlens_q_start = tl.load(cu_seqlens_q + off_z)
         cu_seqlens_q_end = tl.load(cu_seqlens_q + off_z + 1)
-        # print("cu_seqlens_q_start:", cu_seqlens_q_start)
-
         seqlen_q = cu_seqlens_q_end - cu_seqlens_q_start
-        # We have a one-size-fits-all grid in id(0). Some seqlens might be too
-        # small for all start_m so for those we return early.
+        
+        # we have a one-size-fits-all grid in id(0). Some seqlens might be too small for all start_m so for those we return early.
         if start_m * BLOCK_M > seqlen_q:
             return
         cu_seqlens_k_start = tl.load(cu_seqlens_k + off_z)
         cu_seqlens_k_end = tl.load(cu_seqlens_k + off_z + 1)
         seqlen_k = cu_seqlens_k_end - cu_seqlens_k_start
+    elif IS_INFERENCE:
+        cu_seqlens_q_start = 0
+        cu_seqlens_k_start = 0
+        seqlen_q = MAX_SEQLENS_Q        
+        seqlen_k = tl.load(Cache_seqlens + off_z)
     else:
         cu_seqlens_q_start = 0
         cu_seqlens_k_start = 0
@@ -610,6 +613,8 @@ def attention_prefill_forward_triton_impl(
     # check flags
     is_varlen = layout == "thd"
     is_inference = False if cache_seqlens is None else True
+    if is_inference:
+        assert layout == "bshd", f"{layout} layout is not supported with inference. Use bshd layout"
     if DEBUG:
         print(f"is_inference:", is_inference)
 
@@ -667,13 +672,13 @@ def attention_prefill_forward_triton_impl(
     else:
         alibi_strides = (0, 0)
 
-    attn_fwd[grid](q, k, v, bias,
+    attn_fwd[grid](q, k, v, bias, cache_seqlens, cache_batch_idx,
                     descale_q, descale_k, descale_v, descale_o, stride_descale_q_z, stride_descale_k_z, stride_descale_v_z, stride_descale_o_z,
                     sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
                     *bias_strides, *alibi_strides, *scores_strides, stride_lse_z, stride_lse_h, stride_lse_m, cu_seqlens_q, cu_seqlens_k,
                     dropout_p=dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset, sd_mask=sd_mask, dropout_mask=dropout_mask, alibi_slopes=alibi_slopes, 
                     HQ=nheads_q, HK=nheads_k, ACTUAL_BLOCK_DMODEL=head_size, MAX_SEQLENS_Q=max_seqlens_q,
-                    MAX_SEQLENS_K=max_seqlens_k, IS_CAUSAL=causal, VARLEN=is_varlen,
+                    MAX_SEQLENS_K=max_seqlens_k, IS_CAUSAL=causal, IS_VARLEN=is_varlen, IS_INFERENCE=is_inference,
                     BLOCK_DMODEL=padded_d_model, USE_BIAS=False if bias is None else True,
                     USE_ALIBI=False if alibi_slopes is None else True, ENABLE_DROPOUT=dropout_p
                     > 0.0, USE_EXP2=use_exp2, RETURN_SCORES=return_softmax, IS_FP8=IS_FP8, FP8_MAX=FP8_MAX, FP8_OUTPUT=FP8_OUTPUT)
