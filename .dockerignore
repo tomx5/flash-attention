@@ -1,4 +1,6 @@
 .eggs
+.git
+.gitignore
 build
 dist
 flash_attn.egg-info
