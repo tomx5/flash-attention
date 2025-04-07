@@ -116,7 +116,7 @@ def fwd(q: torch.Tensor,
                                                 metadata.sm_scale,
                                                 metadata.alibi_slopes,
                                                 metadata.causal,
-                                                metadata.bias,
+                                                None,
                                                 metadata.layout,
                                                 metadata.cu_seqlens_q,
                                                 metadata.cu_seqlens_k,
@@ -399,7 +399,7 @@ def varlen_fwd(
                                                             metadata.sm_scale,
                                                             metadata.alibi_slopes,
                                                             metadata.causal,
-                                                            metadata.bias,
+                                                            None,
                                                             metadata.layout,
                                                             metadata.cu_seqlens_q,
                                                             metadata.cu_seqlens_k,
@@ -671,21 +671,48 @@ def fwd_kvcache(
         q, k_new = q_ro.to(q.dtype), k_ro.to(q.dtype)
 
     # launch kernel
-    # TODO: pass output as an arg. Maybe we are copying output which is causing slow down
-    softmax_lse_triton = attention_decode_forward_triton_impl(
-        q,
-        k_cache,
-        v_cache,
-        k_new,
-        v_new,
-        out,
-        metadata.sm_scale,
-        metadata.causal,
-        metadata.alibi_slopes,
-        metadata.layout,
-        metadata.cache_seqlens,
-        metadata.cache_batch_idx,
-    )
+    DECODE_KERNEL=os.environ.get('DECODE_KERNEL', '0').lower() in ('1', 'true', 'yes')
+    if DECODE_KERNEL:
+        softmax_lse_triton = attention_decode_forward_triton_impl(
+            q,
+            k_cache,
+            v_cache,
+            k_new,
+            v_new,
+            out,
+            metadata.sm_scale,
+            metadata.causal,
+            metadata.alibi_slopes,
+            metadata.layout,
+            metadata.cache_seqlens,
+            metadata.cache_batch_idx,
+        )
+    else:
+        softmax_lse_triton, sd_mask_triton = attention_prefill_forward_triton_impl(
+                                                q,
+                                                k_cache,
+                                                v_cache,
+                                                out,
+                                                metadata.sm_scale,
+                                                metadata.alibi_slopes,
+                                                metadata.causal,
+                                                None,
+                                                metadata.layout,
+                                                metadata.cu_seqlens_q,
+                                                metadata.cu_seqlens_k,
+                                                metadata.max_seqlens_q,
+                                                metadata.max_seqlens_k,
+                                                metadata.cache_seqlens,
+                                                metadata.cache_batch_idx,
+                                                metadata.dropout_p,
+                                                metadata.philox_seed,
+                                                metadata.philox_offset,
+                                                metadata.return_scores,
+                                                metadata.use_exp2,
+                                                None,
+                                                None,
+                                                None,
+                                                None)
     softmax_lse = softmax_lse_triton
     
     if DEBUG:

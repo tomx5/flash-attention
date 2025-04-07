@@ -1,8 +1,8 @@
 import torch
 import triton
 import triton.language as tl
-from typing import Literal, Optional
-from .utils import DROPOUT_USE_PYTORCH, DROPOUT_DUMP, AUTOTUNE, compute_fp8_scaling_factors, get_shapes_from_layout, get_strides_from_layout, is_cdna, is_fp8, is_rdna, write_dropout_mask, create_dropout_mask
+from typing import Literal, Optional, Union
+from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, AUTOTUNE, compute_fp8_scaling_factors, get_shapes_from_layout, get_strides_from_layout, is_cdna, is_fp8, is_rdna, write_dropout_mask, create_dropout_mask
 
 # NOTE: triton fails to import tl.constexprs so create them here for the file
 tl_DROPOUT_USE_PYTORCH: tl.constexpr = DROPOUT_USE_PYTORCH
@@ -567,7 +567,10 @@ def attention_prefill_forward_triton_impl(
                                         cu_seqlens_q: Optional[torch.Tensor], 
                                         cu_seqlens_k: Optional[torch.Tensor],
                                         max_seqlens_q: int, 
-                                        max_seqlens_k: int, 
+                                        max_seqlens_k: int,
+                                        # inference
+                                        cache_seqlens: Optional[Union[(int, torch.Tensor)]],
+                                        cache_batch_idx: Optional[torch.Tensor],
                                         # dropout
                                         dropout_p: float,
                                         philox_seed: Optional[int],
@@ -604,8 +607,11 @@ def attention_prefill_forward_triton_impl(
         descale_q = descale_k = descale_v = descale_o = None
         stride_descale_q_z = stride_descale_k_z = stride_descale_v_z = stride_descale_o_z = None
 
-    # check if varlen
+    # check flags
     is_varlen = layout == "thd"
+    is_inference = False if cache_seqlens is None else True
+    if DEBUG:
+        print(f"is_inference:", is_inference)
 
     # NOTE: a large bias tensor leads to overflow during pointer arithmetic
     if (bias is not None):
