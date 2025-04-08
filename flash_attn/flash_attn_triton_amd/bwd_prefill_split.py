@@ -1054,6 +1054,7 @@ def attention_prefill_backward_triton_split_impl(
         stride_descale_do_z = descale_do.stride(0) if descale_do is not None else None
     else:
         FP8_MAX = None
+        FP8_OUTPUT = False
         stride_descale_q_z = stride_descale_k_z = stride_descale_v_z = stride_descale_o_z = stride_descale_do_z = None
 
 

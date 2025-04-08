@@ -10,7 +10,7 @@ tl_DROPOUT_USE_PYTORCH: tl.constexpr = DROPOUT_USE_PYTORCH
 tl_DROPOUT_DUMP: tl.constexpr = DROPOUT_DUMP
 
 @triton.jit
-def _bwd_preprocess_use_o(
+def _bwd_preprocess(
     Out,
     DO,
     Delta,
@@ -721,7 +721,7 @@ def attention_prefill_backward_triton_impl(
         stride_dropoutz, stride_dropouth, stride_dropoutm, stride_dropoutn = (0, 0 , 0 , 0)
 
 
-    _bwd_preprocess_use_o[(batch * nheads_q, num_blocks_m)](
+    _bwd_preprocess[(batch * nheads_q, num_blocks_m)](
         o,
         do,
         delta,
