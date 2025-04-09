@@ -10,6 +10,8 @@ from typing import Dict, List, Literal, Optional, Tuple
 from functools import lru_cache
 from utils import input_helper
 
+DEBUG = False
+
 ENV_FLAGS = ["FLASH_ATTENTION_TRITON_AMD_ENABLE", "FLASH_ATTENTION_TRITON_AMD_AUTOTUNE", "FLASH_ATTENTION_TRITON_AMD_DEBUG"]
 
 SUPPORTED_DTYPES = {
@@ -87,7 +89,7 @@ def get_fn_params(fn_name):
     supported_dtypes = SUPPORTED_DTYPES.get(fn_name, [torch.float16])  # default to float16 if not found
     supported_backends = [backend for backend in SUPPORTED_BACKENDS.get(fn_name, ["triton"]) if backend in available_backends()]  # default to triton backend
     supports_backward = False if fn_name in ["flash_attn_with_kvcache"] else True
-    supported_modes = SUPPORTED_MODES.get(fn_name, ["fwd"])
+    supported_modes = ["bwd"] # SUPPORTED_MODES.get(fn_name, ["fwd"])
     device = "cuda"
 
     # check backward pass support
@@ -202,10 +204,12 @@ def create_benchmark_fn(
     fn_input,
     mode: Literal["fwd", "bwd", "full"]
 ):
-    print("flash_attn:", flash_attn)
-    print("fn_name:", fn_name)
-    print("fn_input:", len(fn_input))
-    print("mode:", mode)
+    if DEBUG:
+        print("create_benchmark_fn")
+        print("flash_attn:", flash_attn)
+        print("fn_name:", fn_name)
+        print("fn_input:", len(fn_input))
+        print("mode:", mode)
 
     if fn_name == "flash_attn_func":
         q, k, v, do, metadata = fn_input
@@ -238,7 +242,7 @@ def create_benchmark_fn(
                 return_attn_probs=True,
             )
             def flash_attn_bench_fn():
-                dq, dk, dv = torch.autograd.grad(out, (q, k, v), do)
+                dq, dk, dv = torch.autograd.grad(out, (q, k, v), do, retain_graph=True)
                 return dq, dk, dv
         elif mode == "full":
             def flash_attn_bench_fn():
@@ -254,7 +258,7 @@ def create_benchmark_fn(
                     deterministic=False,
                     return_attn_probs=True,
                 )
-                dq, dk, dv = torch.autograd.grad(out, (q, k, v), do)
+                dq, dk, dv = torch.autograd.grad(out, (q, k, v), do, retain_graph=True)
                 return dq, dk, dv
         else:
             raise ValueError(f"Unknown benchmarking mode: {mode}")
@@ -515,7 +519,8 @@ def run_benchmark(func_config, input_configs):
     """
     # print new line to seperate benchmark runs
     print()
-    print("func_config:", func_config)
+    if DEBUG:
+        print("func_config:", func_config)
 
     # extract function configuration parameters
     fn_name = func_config.fn_name
@@ -553,16 +558,18 @@ def run_benchmark(func_config, input_configs):
     def bench_function(
         BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, CAUSAL, DROPOUT, provider, device="cuda"
     ):
-        print("BATCH:", BATCH)
-        print("HQ:", HQ)
-        print("HK:", HK)
-        print("N_CTX_Q:", N_CTX_Q)
-        print("N_CTX_Q:", N_CTX_Q)
-        print("D_HEAD:", D_HEAD)
-        print("CAUSAL:", CAUSAL)
-        print("mode:", mode)
-        print("provider:", provider)
-        print("device:", device)
+        if DEBUG:
+            print("BATCH:", BATCH)
+            print("HQ:", HQ)
+            print("HK:", HK)
+            print("N_CTX_Q:", N_CTX_Q)
+            print("N_CTX_Q:", N_CTX_Q)
+            print("D_HEAD:", D_HEAD)
+            print("CAUSAL:", CAUSAL)
+            print("DROPOUT:", DROPOUT)
+            print("mode:", mode)
+            print("provider:", provider)
+            print("device:", device)
         fn_input = input_configs[(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, CAUSAL, DROPOUT)]
         benchmark_fn = create_benchmark_fn(flash_attn_module, fn_name, fn_input, mode)
 
@@ -583,7 +590,7 @@ def run_benchmark(func_config, input_configs):
 
 # First, let's create a clear structure for the function configuration
 class FunctionConfig:
-    def __init__(self, fn_name, mode: Literal["fwd", "bwd", "full"], dtype, backend: Literal["triton", "ck"]):
+    def __init__(self, fn_name: str, mode: Literal["fwd", "bwd", "full"], dtype, backend: Literal["triton", "ck"]):
         self.fn_name = fn_name
         self.mode: Literal["fwd", "bwd", "full"] = mode
         self.dtype = dtype
