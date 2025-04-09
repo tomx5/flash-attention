@@ -6,9 +6,9 @@ import triton
 import time
 import pandas as pd
 from logging import warning
-from flash_attn.flash_attn_triton_amd.utils import input_helper
 from typing import Dict, List, Literal, Optional, Tuple
 from functools import lru_cache
+from utils import input_helper
 
 ENV_FLAGS = ["FLASH_ATTENTION_TRITON_AMD_ENABLE", "FLASH_ATTENTION_TRITON_AMD_AUTOTUNE", "FLASH_ATTENTION_TRITON_AMD_DEBUG"]
 
@@ -43,13 +43,35 @@ SUPPORTED_BACKENDS = {
 FUNCTIONS = SUPPORTED_DTYPES.keys()
 
 @lru_cache()
+def available_backends():
+    available = []
+    
+    # try to load each backend
+    for backend in ["triton", "ck"]:
+        try:
+            # try loading the module with this backend
+            flash_attn = load_flash_attn_module(backend)
+            
+            # if we got here, the backend loaded successfully
+            available.append(backend)
+        except Exception as e:
+            # backend not available, just continue
+            print(f"Backend {backend} not available. Error: {e}")
+    
+    # if no backends available, default to triton
+    if not available:
+        raise ValueError("No Backends available")
+        
+    return available
+
+@lru_cache()
 def get_fn_params(fn_name):
     # get params for fn
     packing = get_packing_type(fn_name)
     is_varlen = True if "varlen" in fn_name else False
     is_fp8 = True if "fp8" in fn_name else False
     supported_dtypes = SUPPORTED_DTYPES.get(fn_name, [torch.float16])  # default to float16 if not found
-    supported_backends = SUPPORTED_BACKENDS.get(fn_name, ["triton"])  # default to triton backend
+    supported_backends = [backend for backend in SUPPORTED_BACKENDS.get(fn_name, ["triton"]) if backend in available_backends()]  # default to triton backend
     supports_backward = False if fn_name in ["flash_attn_with_kvcache"] else True
     # mode = "full" if supports_backward else "fwd"
     mode = "fwd"
@@ -400,7 +422,7 @@ def get_packing_type(fn_name: str) -> Optional[Literal["kv", "qkv"]]:
 
     return packing
 
-def load_flash_attn_module(backend: Literal["triton", "ck"]):
+def load_flash_attn_module(backend: Literal["triton", "ck"], verbose = False):
     """
     Load the flash_attn module with the specified backend configuration
     """
@@ -420,7 +442,8 @@ def load_flash_attn_module(backend: Literal["triton", "ck"]):
     else:
         raise ValueError(f"Unknown backend {backend}")
     
-    print(f"Loading flash_attn module with {backend} backend (FLASH_ATTENTION_TRITON_AMD_ENABLE={os.environ['FLASH_ATTENTION_TRITON_AMD_ENABLE']})")
+    if verbose:
+        print(f"Loading flash_attn module with {backend} backend.")
     
     # Remove any existing flash_attn modules from sys.modules
     for module_name in list(sys.modules.keys()):
@@ -449,7 +472,7 @@ def run_benchmark(func_config, input_configs):
     backend = func_config.backend
 
     # load flash attention module
-    flash_attn_module = load_flash_attn_module(backend)
+    flash_attn_module = load_flash_attn_module(backend, verbose=True)
  
     # start timing the benchmark
     start_time = time.time()
