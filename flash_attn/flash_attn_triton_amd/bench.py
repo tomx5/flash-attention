@@ -26,6 +26,8 @@ SUPPORTED_DTYPES = {
     "flash_attn_with_kvcache": [torch.float16],
 }
 
+FUNCTIONS = SUPPORTED_DTYPES.keys()
+
 SUPPORTED_BACKENDS = {
     "flash_attn_func": ["ck", "triton"],
     "flash_attn_fp8_func": ["triton"],
@@ -40,7 +42,19 @@ SUPPORTED_BACKENDS = {
     "flash_attn_with_kvcache": ["ck", "triton"],
 }
 
-FUNCTIONS = SUPPORTED_DTYPES.keys()
+SUPPORTED_MODES = {
+    "flash_attn_func": ["fwd", "bwd", "full"],
+    "flash_attn_fp8_func": ["fwd", "bwd", "full"],
+    "flash_attn_kvpacked_func": ["fwd", "bwd", "full"],
+    "flash_attn_varlen_func": ["fwd", "bwd", "full"],
+    "flash_attn_varlen_fp8_func": ["fwd", "bwd", "full"],
+    "flash_attn_varlen_kvpacked_func": ["fwd", "bwd", "full"],
+    "flash_attn_qkvpacked_func": ["fwd", "bwd", "full"],
+    "flash_attn_qkvpacked_fp8_func": ["fwd", "bwd", "full"],
+    "flash_attn_varlen_qkvpacked_func": ["fwd", "bwd", "full"],
+    "flash_attn_varlen_qkvpacked_fp8_func": ["fwd", "bwd", "full"],
+    "flash_attn_with_kvcache": ["fwd"],
+}
 
 @lru_cache()
 def available_backends():
@@ -73,15 +87,14 @@ def get_fn_params(fn_name):
     supported_dtypes = SUPPORTED_DTYPES.get(fn_name, [torch.float16])  # default to float16 if not found
     supported_backends = [backend for backend in SUPPORTED_BACKENDS.get(fn_name, ["triton"]) if backend in available_backends()]  # default to triton backend
     supports_backward = False if fn_name in ["flash_attn_with_kvcache"] else True
-    # mode = "full" if supports_backward else "fwd"
-    mode = "fwd"
+    supported_modes = SUPPORTED_MODES.get(fn_name, ["fwd"])
     device = "cuda"
 
     # check backward pass support
     if not supports_backward:
         warning(f"{fn_name} does not have a backward pass so benching forward pass only.")
 
-    return is_varlen, is_fp8, packing, supported_dtypes, supported_backends, mode, device
+    return is_varlen, is_fp8, packing, supported_dtypes, supported_backends, supported_modes, device
 
 def generate_fn_inputs(
     fn_name: str,
@@ -187,11 +200,31 @@ def create_benchmark_fn(
     flash_attn,
     fn_name,
     fn_input,
-    mode
+    mode: Literal["fwd", "bwd", "full"]
 ):
+    print("flash_attn:", flash_attn)
+    print("fn_name:", fn_name)
+    print("fn_input:", len(fn_input))
+    print("mode:", mode)
+
     if fn_name == "flash_attn_func":
         q, k, v, do, metadata = fn_input
-        def flash_attn_bench_fn():
+        if mode == "fwd":
+            def flash_attn_bench_fn():
+                out, lse, S_dmask = flash_attn.flash_attn_func(
+                    q,
+                    k,
+                    v,
+                    metadata.dropout_p,
+                    causal=metadata.causal,
+                    window_size=(-1, -1),
+                    softcap=0.0,
+                    alibi_slopes=None,
+                    deterministic=False,
+                    return_attn_probs=True,
+                )
+                return out
+        elif mode == "bwd":
             out, lse, S_dmask = flash_attn.flash_attn_func(
                 q,
                 k,
@@ -204,8 +237,27 @@ def create_benchmark_fn(
                 deterministic=False,
                 return_attn_probs=True,
             )
-            if mode == "full":
+            def flash_attn_bench_fn():
                 dq, dk, dv = torch.autograd.grad(out, (q, k, v), do)
+                return dq, dk, dv
+        elif mode == "full":
+            def flash_attn_bench_fn():
+                out, lse, S_dmask = flash_attn.flash_attn_func(
+                    q,
+                    k,
+                    v,
+                    metadata.dropout_p,
+                    causal=metadata.causal,
+                    window_size=(-1, -1),
+                    softcap=0.0,
+                    alibi_slopes=None,
+                    deterministic=False,
+                    return_attn_probs=True,
+                )
+                dq, dk, dv = torch.autograd.grad(out, (q, k, v), do)
+                return dq, dk, dv
+        else:
+            raise ValueError(f"Unknown benchmarking mode: {mode}")
 
         return flash_attn_bench_fn
 
@@ -411,7 +463,6 @@ def create_benchmark_fn(
         valid_fn_names = ", ".join(FUNCTIONS)
         raise ValueError(f"{fn_name} should be one of the following functions. {valid_fn_names}")
 
-
 def get_packing_type(fn_name: str) -> Optional[Literal["kv", "qkv"]]:
     if "_kvpacked" in fn_name:
         packing = "kv"
@@ -464,6 +515,7 @@ def run_benchmark(func_config, input_configs):
     """
     # print new line to seperate benchmark runs
     print()
+    print("func_config:", func_config)
 
     # extract function configuration parameters
     fn_name = func_config.fn_name
@@ -493,15 +545,24 @@ def run_benchmark(func_config, input_configs):
             ylabel="ms",
             plot_name=f"benchmark-{fn_name}-{mode}-{dtype}-{backend}",
             args={
-                "mode": mode
             },
         )
     ]
 
     @triton.testing.perf_report(bench_configs)
     def bench_function(
-        BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, CAUSAL, DROPOUT, mode, provider, device="cuda"
+        BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, CAUSAL, DROPOUT, provider, device="cuda"
     ):
+        print("BATCH:", BATCH)
+        print("HQ:", HQ)
+        print("HK:", HK)
+        print("N_CTX_Q:", N_CTX_Q)
+        print("N_CTX_Q:", N_CTX_Q)
+        print("D_HEAD:", D_HEAD)
+        print("CAUSAL:", CAUSAL)
+        print("mode:", mode)
+        print("provider:", provider)
+        print("device:", device)
         fn_input = input_configs[(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, CAUSAL, DROPOUT)]
         benchmark_fn = create_benchmark_fn(flash_attn_module, fn_name, fn_input, mode)
 
@@ -522,11 +583,11 @@ def run_benchmark(func_config, input_configs):
 
 # First, let's create a clear structure for the function configuration
 class FunctionConfig:
-    def __init__(self, fn_name, mode, dtype, backend):
+    def __init__(self, fn_name, mode: Literal["fwd", "bwd", "full"], dtype, backend: Literal["triton", "ck"]):
         self.fn_name = fn_name
-        self.mode = mode
+        self.mode: Literal["fwd", "bwd", "full"] = mode
         self.dtype = dtype
-        self.backend = backend
+        self.backend: Literal["triton", "ck"] = backend
     
     def __str__(self):
         return f"{self.fn_name}_{self.mode}_{self.dtype}_{self.backend}"
@@ -579,7 +640,7 @@ def process_args():
     all_input_configs = {}  # Maps function config -> input configs
     
     for fn_name in benchmark_fns:
-        is_varlen, is_fp8, packing, supported_dtypes, supported_backends, mode, device = get_fn_params(fn_name)
+        is_varlen, is_fp8, packing, supported_dtypes, supported_backends, supported_modes, device = get_fn_params(fn_name)
         
         # Generate or use custom input configurations
         if args.b or args.hq or args.hk or args.sq or args.sk or args.d:
@@ -602,15 +663,16 @@ def process_args():
         # Create a function config for each backend and dtype combination
         for backend in supported_backends:
             for dtype in supported_dtypes:
-                func_config = FunctionConfig(fn_name, mode, dtype, backend)
-                function_configs.append(func_config)
-                
-                # Generate inputs for this function configuration
-                fn_inputs = {}
-                for input_config in input_configs:
-                    fn_inputs[input_config] = generate_fn_inputs(fn_name, *input_config, dtype, device)
-                
-                all_input_configs[func_config] = fn_inputs
+                for mode in supported_modes:
+                    func_config = FunctionConfig(fn_name, mode, dtype, backend)
+                    function_configs.append(func_config)
+                    
+                    # Generate inputs for this function configuration
+                    fn_inputs = {}
+                    for input_config in input_configs:
+                        fn_inputs[input_config] = generate_fn_inputs(fn_name, *input_config, dtype, device)
+                    
+                    all_input_configs[func_config] = fn_inputs
 
     return function_configs, all_input_configs
 
