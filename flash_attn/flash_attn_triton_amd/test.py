@@ -40,7 +40,7 @@ ATOL_fp8, RTOL_fp8 = 2.5e-1, 2.5e-1 #  fp8
 EQUAL_NAN = True
 
 @pytest.mark.parametrize(
-    "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD",
+    "BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD",
     [
         (1, 1, 1, 1, 1, 1),
         (1, 1, 1, 2, 4, 16),
@@ -77,16 +77,16 @@ EQUAL_NAN = True
 )
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('dropout_p', [0.0])
+@pytest.mark.parametrize('alibi_slopes', [None])
 @pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
+@pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.parametrize('use_exp2', [True, False]) # works when use_exp2 is false
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues
-def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, use_exp2, DEBUG_INPUT):
-    dtype = torch.float16
-    torch.manual_seed(0)
-    alibi_slopes = None
+def test_op_prefill_fwd_impl(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, alibi_slopes, layout, dtype, use_exp2, DEBUG_INPUT):
+    torch.manual_seed(42)
     device = "cuda"
 
-    q, k, v, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
+    q, k, v, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dtype, layout=layout, device=device)
     if DEBUG_INPUT:
         output_triton = torch.zeros_like(q).contiguous()
     else:
@@ -108,7 +108,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 
 
     # call Triton's forward implementation directly
-    output_triton, softmax_lse_triton, sd_mask_triton = attention_prefill_forward_triton_impl(
+    softmax_lse_triton, sd_mask_triton = attention_prefill_forward_triton_impl(
                                                 q, 
                                                 k, 
                                                 v, 
@@ -122,6 +122,8 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
                                                 metadata.cu_seqlens_k,
                                                 metadata.max_seqlens_q, 
                                                 metadata.max_seqlens_k,
+                                                metadata.cache_seqlens, 
+                                                metadata.cache_batch_idx,
                                                 metadata.dropout_p,
                                                 metadata.philox_seed, 
                                                 metadata.philox_offset, 
@@ -158,7 +160,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
         if DEBUG:
             print("sd_mask_triton:", sd_mask_triton, sd_mask_triton.shape)
             print("sd_mask_ref:", sd_mask_ref, sd_mask_ref.shape)
-        torch.testing.assert_close(sd_mask_triton, sd_mask_ref, atol=ATOL, rtol=RTOL)
+        torch.testing.assert_close(sd_mask_triton.to(sd_mask_ref.dtype), sd_mask_ref, atol=ATOL, rtol=RTOL)
 
     if DEBUG:
         print("softmax_lse_triton:", softmax_lse_triton, softmax_lse_triton.shape)
