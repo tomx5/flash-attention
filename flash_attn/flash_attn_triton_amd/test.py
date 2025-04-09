@@ -78,7 +78,7 @@ EQUAL_NAN = True
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('dropout_p', [0.0])
 @pytest.mark.parametrize('alibi_slopes', [None])
-@pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
+@pytest.mark.parametrize('layout', ["bshd", "thd"])
 @pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.parametrize('use_exp2', [True, False]) # works when use_exp2 is false
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues
@@ -87,10 +87,6 @@ def test_op_prefill_fwd_impl(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dr
     device = "cuda"
 
     q, k, v, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dtype, layout=layout, device=device)
-    if DEBUG_INPUT:
-        output_triton = torch.zeros_like(q).contiguous()
-    else:
-        output_triton = torch.empty_like(q)
 
     if DEBUG:
         if HQ // HK != 1:
@@ -108,11 +104,15 @@ def test_op_prefill_fwd_impl(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dr
 
 
     # call Triton's forward implementation directly
+    q_triton = q.clone()
+    k_triton = k.clone()
+    v_triton = v.clone()
+    o_triton = torch.zeros_like(q).contiguous() if DEBUG_INPUT else torch.empty_like(q)
     softmax_lse_triton, sd_mask_triton = attention_prefill_forward_triton_impl(
-                                                q, 
-                                                k, 
-                                                v, 
-                                                output_triton, 
+                                                q_triton, 
+                                                k_triton, 
+                                                v_triton, 
+                                                o_triton, 
                                                 metadata.sm_scale, 
                                                 metadata.alibi_slopes, 
                                                 metadata.causal, 
@@ -134,10 +134,14 @@ def test_op_prefill_fwd_impl(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dr
                                                 None,
                                                 None)
 
-    output_ref, softmax_lse_ref, sd_mask_ref  = attention_forward_pytorch_ref_impl(
-        q.clone(), 
-        k.clone(), 
-        v.clone(), 
+    # ref forward
+    q_ref = q.clone()
+    k_ref = k.clone()
+    v_ref = v.clone()
+    o_ref, softmax_lse_ref, sd_mask_ref  = attention_forward_pytorch_ref_impl(
+        q_ref, 
+        k_ref, 
+        v_ref, 
         metadata.sm_scale, 
         causal, 
         layout,
@@ -168,12 +172,12 @@ def test_op_prefill_fwd_impl(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dr
     torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=ATOL, rtol=RTOL)
     
     if DEBUG:
-        print("output_triton:", output_triton, output_triton.shape)
-        print("output_ref:", output_ref, output_ref.shape)
-    torch.testing.assert_close(output_triton, output_ref, atol=ATOL, rtol=RTOL)
+        print("output_triton:", o_triton, o_triton.shape)
+        print("output_ref:", o_ref, o_ref.shape)
+    torch.testing.assert_close(o_triton, o_ref, atol=ATOL, rtol=RTOL)
 
 @pytest.mark.parametrize(
-    "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD", [
+    "BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD", [
     (1, 1, 1, 1, 1, 1),
     (1, 1, 1, 4, 4, 4),
     (2, 1, 1, 4, 4, 16),
@@ -221,25 +225,23 @@ def test_op_prefill_fwd_impl(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dr
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('dropout_p', [0.0])
+@pytest.mark.parametrize('alibi_slopes', [None])
+@pytest.mark.parametrize('layout', ["bshd", "thd"])
+@pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.parametrize('use_exp2', [False]) # FIXME: using exp2 causes issue when used with causal
-@pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
-@pytest.mark.parametrize('sequence_parallel', [True, False])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans on larger tensors
-def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, use_exp2, layout, sequence_parallel, DEBUG_INPUT):
-    if get_arch() == "gfx90a":
-        if layout == "thd" and Z == 4 and HQ == 48 and HK == 48 and N_CTX_Q == 1024 and N_CTX_K == 1024:
-            pytest.skip("This config doesnot work on MI200 Devices but works on MI300.")
+def test_op_prefill_bwd_impl(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, alibi_slopes, layout, dtype, use_exp2, DEBUG_INPUT):
+    torch.manual_seed(20)
+    device="cuda"
 
-    dtype = torch.float16
-    torch.manual_seed(20) # seed from test_op_bwd
-
-    alibi_slopes = None
-    q, k, v, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=DEBUG_INPUT)
+    # gen inputs
+    q, k, v, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dtype, layout=layout, device=device)
 
     # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
     metadata.need_dropout(dropout_p)
 
     # =============================================== Reference ==============================================================
+    # fwd
     q_ref = q.clone() 
     k_ref = k.clone()
     v_ref = v.clone()    
@@ -260,21 +262,7 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
         use_exp2
     )
 
-
-    if DEBUG:
-        if HQ // HK != 1:
-            print("MQA/GQA")
-        else:
-            print("MHA")
-
-    dq = torch.zeros_like(q, dtype=q.dtype) # NOTE: the kernel does inplace accumlation on dq so dq has to be zeros
-    if DEBUG_INPUT:
-        dk = torch.zeros_like(k, dtype=k.dtype)
-        dv = torch.zeros_like(v, dtype=v.dtype)
-    else:
-        dk = torch.empty_like(k, dtype=k.dtype)
-        dv = torch.empty_like(v, dtype=v.dtype)
-
+    # bwd
     do_ref = do.clone()
     dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
         do_ref,
@@ -297,18 +285,25 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     )
 
     # =============================================== Triton ==============================================================
-    o = output_ref.clone().contiguous()
-    softmax_lse = softmax_lse_ref.clone().contiguous()
-    dq_triton, dk_triton, dv_triton, delta_triton = attention_prefill_backward_triton_impl(
-        do,
-        q,
-        k,
-        v,
-        o,
-        softmax_lse,
-        dq,
-        dk,
-        dv,
+    do_triton = do.clone()
+    q_triton = q.clone()
+    k_triton = k.clone()
+    v_triton = v.clone()
+    o_triton = output_ref.clone().contiguous()
+    softmax_lse_triton = softmax_lse_ref.clone().contiguous()
+    dq_triton = torch.zeros_like(q_triton, dtype=q.dtype) # NOTE: the kernel does inplace accumlation on dq so dq has to be zeros
+    dk_triton = torch.zeros_like(k_triton, dtype=k.dtype) if DEBUG_INPUT else torch.empty_like(k_triton, dtype=k.dtype)
+    dv_triton = torch.zeros_like(v_triton, dtype=v.dtype) if DEBUG_INPUT else torch.empty_like(v_triton, dtype=v.dtype)
+    delta_triton = attention_prefill_backward_triton_split_impl(
+        do_triton,
+        q_triton,
+        k_triton,
+        v_triton,
+        o_triton,
+        softmax_lse_triton,
+        dq_triton,
+        dk_triton,
+        dv_triton,
         metadata.sm_scale,
         alibi_slopes,
         causal,
@@ -321,7 +316,14 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
         metadata.philox_seed, 
         metadata.philox_offset, 
         use_exp2,
-        sequence_parallel=sequence_parallel
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
 
     # =============================================== Check ==============================================================
@@ -348,7 +350,7 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     torch.testing.assert_close(dq_triton, dq_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
 
 @pytest.mark.parametrize(
-    "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD", [
+    "BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD", [
     (1, 1, 1, 1, 1, 1),
     (1, 1, 1, 4, 4, 4),
     (2, 1, 1, 4, 4, 16),
@@ -426,17 +428,16 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('dropout_p', [0.0, 0.2])
+@pytest.mark.parametrize('layout', ["bshd", "thd"])
+@pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.parametrize('use_exp2', [True, False]) # FIXME: using exp2 causes issue when used with causal
-# @pytest.mark.parametrize('layout', ["bhsd"])
-@pytest.mark.parametrize('layout', ["bhsd", "thd"])
-@pytest.mark.parametrize('sequence_parallel', [True])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans on larger tensors
-def test_op_prefill_bwd_split_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, use_exp2, layout, sequence_parallel, DEBUG_INPUT):
-    dtype = torch.float16
-    torch.manual_seed(20) # seed from test_op_bwd
+def test_op_prefill_bwd_split_impl(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, use_exp2, layout, dtype, DEBUG_INPUT):
+    torch.manual_seed(20)
+    device = "cuda"
 
     alibi_slopes = None
-    q, k, v, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=DEBUG_INPUT)
+    q, k, v, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dtype, layout=layout, device=device)
 
     # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
     metadata.need_dropout(dropout_p)
