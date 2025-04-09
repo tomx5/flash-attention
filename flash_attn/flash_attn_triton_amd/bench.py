@@ -665,7 +665,23 @@ def process_args():
             dropout = args.dropout if args.dropout is not None else 0.0
             input_configs = [(batch, hq, hk, sq, sk, d_head, causal, dropout)]
         else:
-            input_configs = generate_benchmark_configs(is_varlen, packing)
+            config_type = "llama"
+            if config_type == "llama":
+                # batch, hq, hk, sq, sk, d_head, causal, dropout
+                input_configs = [
+                    # LLaMA 3 8B
+                    (1, 32, 8, 8192, 8192, 128, True, 0.0),
+                    # LLaMA 3 70B
+                    (1, 64, 8, 8192, 8192, 128, True, 0.0),
+                    # # LLaMA 3.1 8B
+                    # (1, 32, 8, 128000, 128000, 128, True, 0.1),
+                    # # LLaMA 3.1 70B
+                    # (1, 64, 8, 128000, 128000, 128, True, 0.1),
+                    # # LLaMA 3.1 405B
+                    # (1, 128, 16, 128000, 128000, 128, True, 0.1),
+                ]
+            else:
+                input_configs = generate_benchmark_configs(is_varlen, packing)
         
         # Create a function config for each backend and dtype combination
         for backend in supported_backends:
