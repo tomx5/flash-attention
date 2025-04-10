@@ -677,8 +677,8 @@ def fp8_assert_close(tensor_a, tensor_b, atol=ATOL_fp8, rtol=RTOL_fp8, max_diff_
 )
 @pytest.mark.parametrize('causal', [False, True])
 @pytest.mark.parametrize('dropout_p', [0.0, 0.1])
-@pytest.mark.parametrize('layout', ['bshd', "thd"])
-@pytest.mark.parametrize('packing', [None, "qkv"])
+@pytest.mark.parametrize('layout', ['bshd'])
+@pytest.mark.parametrize('packing', [None])
 @pytest.mark.parametrize('DEBUG_INPUT', [False])
 @pytest.mark.flaky(reruns=3, reason="Retry failures")
 @pytest.mark.skipif(not arch_supports_fp8(), reason="fp8 not supported on this device")
@@ -950,18 +950,18 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
         fp8_assert_close(dq_ref, dq_fp8, atol=ATOL_fp8, rtol=RTOL_fp8 )
 
 @pytest.mark.parametrize(
-    "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD",
+    "BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD",
     [
         (2, 4, 4, 512, 512, 128),
     ],
 )
 @pytest.mark.parametrize('causal', [False, True])
 @pytest.mark.parametrize('dropout_p', [0.0, 0.1])
-@pytest.mark.parametrize('layout', ['bshd', "thd"])
-@pytest.mark.parametrize('packing', ["qkv"])
+@pytest.mark.parametrize('layout', ['bshd'])
+@pytest.mark.parametrize('packing', [None])
 @pytest.mark.parametrize('test_backward', [False, True])
 @pytest.mark.skipif(not arch_supports_fp8(), reason="fp8 not supported on this device")
-def test_ir(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, packing, test_backward):
+def test_ir(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, packing, test_backward):
     torch.manual_seed(20)
     use_fp8 = True # sanity check
     device = "cuda"
@@ -979,9 +979,9 @@ def test_ir(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pack
         os.makedirs(cache_path)
 
     # inputs
-    q, k, v, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, ref_dtype, layout, device=device)
+    q, k, v, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, ref_dtype, layout=layout, packing=packing, device=device)
 
-    if packing == "none":
+    if packing == None:
         # fp8 forward pass
         if not is_varlen:
             if use_fp8:

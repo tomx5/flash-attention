@@ -55,7 +55,6 @@ def fwd(q: torch.Tensor,
     if is_fp8(q):
         assert out is not None, "fp8 output tensor should be passed in."
         assert (descale_q is not None) and (descale_k is not None) and (descale_v is not None), f"For fp8, you need to pass descale factors for q, k and v"
-        assert descale_o is not None, f"descale_o is None. In fp8, you need to pass a tensor for descale_o along with a tensor for the output."
     else:
         out = torch.zeros_like(q) if out is None else out.zero_()
 
