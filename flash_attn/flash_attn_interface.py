@@ -11,9 +11,9 @@ import os
 USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_TRITON_AMD_ENABLE", "FALSE") == "TRUE"
 if USE_TRITON_ROCM:
     from .flash_attn_triton_amd import interface_fa as flash_attn_gpu
-    from .flash_attn_triton_amd.fp8 import flash_attn_fp8_func, flash_attn_varlen_fp8_func, flash_attn_qkvpacked_fp8_func, flash_attn_varlen_qkvpacked_fp8_func
 else:
     import flash_attn_2_cuda as flash_attn_gpu
+from .flash_attn_triton_amd.fp8 import flash_attn_fp8_func, flash_attn_varlen_fp8_func, flash_attn_qkvpacked_fp8_func, flash_attn_varlen_qkvpacked_fp8_func
 
 # isort: on
 
