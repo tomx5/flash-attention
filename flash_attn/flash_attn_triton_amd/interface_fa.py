@@ -674,7 +674,7 @@ def fwd_kvcache(
         q, k_new = q_ro.to(q.dtype), k_ro.to(q.dtype)
 
     # launch kernel
-    DECODE_KERNEL=os.environ.get('DECODE_KERNEL', '0').lower() in ('1', 'true', 'yes')
+    DECODE_KERNEL= True # os.environ.get('DECODE_KERNEL', '0').lower() in ('1', 'true', 'yes')
     if DECODE_KERNEL:
         softmax_lse_triton = attention_decode_forward_triton_impl(
             q,
