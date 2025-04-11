@@ -147,6 +147,7 @@ def fwd(q: torch.Tensor,
 
     return out, softmax_lse, sd_mask, rng_state
 
+BWD_MODE = os.environ.get('BWD_MODE', 'split').lower()
 def bwd(
     dout: torch.Tensor,
     q: torch.Tensor,
@@ -245,7 +246,6 @@ def bwd(
     else:
         if DEBUG:
             print("Using Triton implementation")
-        BWD_MODE: Literal["split", "fused", "one"] = "one"
         if BWD_MODE == "split":
             delta_triton = attention_prefill_backward_triton_split_impl(
                 dout,
