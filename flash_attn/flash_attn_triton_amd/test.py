@@ -18,10 +18,9 @@ from flash_attn import (
     flash_attn_varlen_qkvpacked_fp8_func
 )
 
-from .utils import DEBUG, DEBUG_TRITON, DEBUG_TRITON_DETAIL, input_helper, get_arch, arch_supports_fp8
+from .utils import DEBUG, input_helper, arch_supports_fp8
 from .fwd_ref import attention_forward_pytorch_ref_impl
 from .fwd_prefill import attention_prefill_forward_triton_impl
-from .bwd_prefill import attention_prefill_backward_triton_impl
 from .bwd_prefill_split import attention_prefill_backward_triton_split_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
 
@@ -214,7 +213,7 @@ def test_op_prefill_fwd_impl(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dr
     (1, 1, 1, 256, 512, 16),
     # old tests that work
     (4, 48, 6, 1024, 1024, 64),
-    (4, 48, 12, 1024, 1024, 64),
+    (4, 48, 12, 2048, 1024, 64),
     (4, 48, 24, 1024, 1024, 64),
     (4, 48, 48, 1024, 1024, 64),
     (4, 48, 48, 1024, 1024, 73),
@@ -222,6 +221,31 @@ def test_op_prefill_fwd_impl(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dr
     (1, 24, 24, 4096, 4096, 64),
     (1, 16, 16, 1024, 1024, 64),
     (1, 16, 16, 1024, 1024, 128),
+    # testcase new
+    # seqlen q == k
+    (1, 1, 1, 2, 2, 2),  # small enough to debug
+    (1, 1, 1, 128, 128, 32),  # only one block
+    (1, 1, 1, 127, 127, 32),  # only one block but with masking
+    (1, 1, 1, 129, 129, 1),  # two blocks with 2nd block small enough to debug
+    (1, 1, 1, 350, 350, 1),  # two blocks with 2nd block small enough to debug
+    (1, 1, 1, 350, 350, 68),  # generic masking on q, k and head
+    (4, 1, 1, 512, 512, 128),  # batch > 1
+    (4, 8, 2, 512, 512, 128),  # GQA
+    (4, 8, 2, 512, 512, 68),   # non-power-of-2 head_dim
+    (4, 8, 2, 500, 500, 68),  # comprehensive case for seqlen q == k
+    # seqlen q > k
+    (1, 1, 1, 64, 32, 8),  # seqlen_q > seqlen_k
+    (1, 1, 1, 192, 128, 32),  # seqlen_q > seqlen_k
+    (4, 8, 2, 1024, 512, 68),  # seqlen_q < seqlen_k
+    (1, 1, 1, 729, 516, 68),  # seqlen_q > seqlen_k
+    (16, 16, 4, 2753, 1528, 68),  # a comprehensive seqlen_q > seqlen_k
+    # seqlen q < k
+    (1, 1, 1, 32, 64, 8),  # seqlen_q > seqlen_k
+    (1, 1, 1, 128, 192, 32),  # seqlen_q < seqlen_k
+    (4, 8, 2, 512, 1024, 68),  # seqlen_q < seqlen_k
+    (1, 1, 1, 200, 413, 1),  # seqlen_q < seqlen_k
+    (1, 1, 1, 782, 1546, 1),  # seqlen_q < seqlen_k
+    (16, 16, 4, 1528, 2753, 68),  # a comprehensive seqlen_q < seqlen_k
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('dropout_p', [0.0])
@@ -347,229 +371,6 @@ def test_op_prefill_bwd_impl(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dr
     if DEBUG:
         print("dq_triton:", dq_triton, dq_triton.shape)
         print("dq_ref:", dq_ref, dq_ref.shape)
-    torch.testing.assert_close(dq_triton, dq_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
-
-@pytest.mark.parametrize(
-    "BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD", [
-    (1, 1, 1, 1, 1, 1),
-    (1, 1, 1, 4, 4, 4),
-    (2, 1, 1, 4, 4, 16),
-    (1, 2, 2, 4, 4, 16),
-    (1, 4, 1, 2, 4, 16),
-    (1, 8, 1, 2, 4, 16),
-    (1, 16, 1, 2, 4, 16),
-    (1, 32, 1, 2, 4, 16),
-    (1, 64, 1, 2, 4, 16),
-    (1, 4, 2, 2, 4, 16),
-    (2, 2, 2, 4, 4, 16),
-    (1, 1, 1, 4, 4, 16),
-    (2, 1, 1, 4, 4 , 16),
-    (4, 6, 6, 8, 8 , 16),
-    (1, 1, 1, 4, 4, 32),
-    (1, 1, 1, 16, 16, 16),
-    (1, 1, 1, 32, 32, 16),
-    (1, 1, 1, 64, 64, 16),
-    (1, 1, 1, 64, 64, 16),
-    (1, 1, 1, 64, 128, 16),
-    (1, 1, 1, 64, 64, 32),
-    (1, 1, 1, 64, 128, 32),
-    (1, 1, 1, 128, 128, 64),
-    (1, 1, 1, 128, 256, 45),
-    (1, 1, 1, 113, 203, 192),
-    (1, 1, 1, 256, 256, 64),
-    (1, 1, 1, 256, 512, 16),
-    (1, 1, 1, 512, 512, 64),
-    (1, 1, 1, 1024, 1024, 64),
-    # fa configs
-    (2, 2, 2, 128, 128, 65),
-    (2, 2, 2, 128, 128, 224),
-    (4, 6, 6, 108, 256, 224),
-    (1, 1, 1, 256, 512, 16),
-    # old tests that work
-    (4, 48, 6, 1024, 1024, 64),
-    (4, 48, 12, 2048, 1024, 64),
-    (4, 48, 24, 1024, 1024, 64),
-    (4, 48, 48, 1024, 1024, 64),
-    (4, 48, 48, 1024, 1024, 73),
-    (4, 48, 48, 2048, 2048, 64),
-    (1, 24, 24, 4096, 4096, 64),
-    (1, 16, 16, 1024, 1024, 64),
-    (1, 16, 16, 1024, 1024, 128),
-    # testcase new
-    # seqlen q == k
-    (1, 1, 1, 2, 2, 2),  # small enough to debug
-    (1, 1, 1, 128, 128, 32),  # only one block
-    (1, 1, 1, 127, 127, 32),  # only one block but with masking
-    (1, 1, 1, 129, 129, 1),  # two blocks with 2nd block small enough to debug
-    (1, 1, 1, 350, 350, 1),  # two blocks with 2nd block small enough to debug
-    (1, 1, 1, 350, 350, 68),  # generic masking on q, k and head
-    (4, 1, 1, 512, 512, 128),  # batch > 1
-    (4, 8, 2, 512, 512, 128),  # GQA
-    (4, 8, 2, 512, 512, 68),   # non-power-of-2 head_dim
-    (4, 8, 2, 500, 500, 68),  # comprehensive case for seqlen q == k
-    # seqlen q > k
-    (1, 1, 1, 64, 32, 8),  # seqlen_q > seqlen_k
-    (1, 1, 1, 192, 128, 32),  # seqlen_q > seqlen_k
-    (4, 8, 2, 1024, 512, 68),  # seqlen_q < seqlen_k
-    (1, 1, 1, 729, 516, 68),  # seqlen_q > seqlen_k
-    (16, 16, 4, 2753, 1528, 68),  # a comprehensive seqlen_q > seqlen_k
-    # seqlen q < k
-    (1, 1, 1, 32, 64, 8),  # seqlen_q > seqlen_k
-    (1, 1, 1, 128, 192, 32),  # seqlen_q < seqlen_k
-    (4, 8, 2, 512, 1024, 68),  # seqlen_q < seqlen_k
-    (1, 1, 1, 200, 413, 1),  # seqlen_q < seqlen_k
-    (1, 1, 1, 782, 1546, 1),  # seqlen_q < seqlen_k
-    (16, 16, 4, 1528, 2753, 68),  # a comprehensive seqlen_q < seqlen_k
-
-# varlen
-# dropout
-# direct comparison among tutorial, Michael's implementation bwd and this one
-
-])
-@pytest.mark.parametrize('causal', [True, False])
-@pytest.mark.parametrize('dropout_p', [0.0, 0.2])
-@pytest.mark.parametrize('layout', ["bshd", "thd"])
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.parametrize('use_exp2', [True, False]) # FIXME: using exp2 causes issue when used with causal
-@pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans on larger tensors
-def test_op_prefill_bwd_split_impl(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, use_exp2, layout, dtype, DEBUG_INPUT):
-    torch.manual_seed(20)
-    device = "cuda"
-
-    alibi_slopes = None
-    q, k, v, do, metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, dtype, layout=layout, device=device)
-
-    # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
-    metadata.need_dropout(dropout_p)
-
-    # print("from the very beginning")
-    # print("q:", q.shape)
-    # print("k:", k.shape)
-    # print("v:", v.shape)
-
-    # =============================================== Reference ==============================================================
-    q_ref = q.clone()
-    k_ref = k.clone()
-    v_ref = v.clone()
-    output_ref, softmax_lse_ref, sd_mask_ref = attention_forward_pytorch_ref_impl(
-        q_ref,
-        k_ref,
-        v_ref,
-        metadata.sm_scale,
-        causal,
-        layout,
-        metadata.cu_seqlens_q,
-        metadata.cu_seqlens_k,
-        metadata.max_seqlens_q,
-        metadata.max_seqlens_k,
-        metadata.dropout_p,
-        metadata.philox_seed,
-        metadata.philox_offset,
-        use_exp2
-    )
-
-
-    if DEBUG:
-        if HQ // HK != 1:
-            print("MQA/GQA")
-        else:
-            print("MHA")
-
-    dq = torch.zeros_like(q, dtype=q.dtype) # NOTE: the kernel does inplace accumlation on dq so dq has to be zeros
-    if DEBUG_INPUT:
-        dk = torch.zeros_like(k, dtype=k.dtype)
-        dv = torch.zeros_like(v, dtype=v.dtype)
-    else:
-        dk = torch.empty_like(k, dtype=k.dtype)
-        dv = torch.empty_like(v, dtype=v.dtype)
-
-    do_ref = do.clone()
-    dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
-        do_ref,
-        q_ref,
-        k_ref,
-        v_ref,
-        output_ref,
-        softmax_lse_ref,
-        metadata.sm_scale,
-        causal,
-        layout,
-        metadata.cu_seqlens_q,
-        metadata.cu_seqlens_k,
-        metadata.max_seqlens_q,
-        metadata.max_seqlens_k,
-        metadata.dropout_p,
-        metadata.philox_seed,
-        metadata.philox_offset,
-        use_exp2
-    )
-    # =============================================== Triton ==============================================================
-    o = output_ref.clone().contiguous()
-    softmax_lse = softmax_lse_ref.clone().contiguous()
-    delta_triton = attention_prefill_backward_triton_split_impl(
-        do,
-        q,
-        k,
-        v,
-        o,
-        softmax_lse,
-        dq,
-        dk,
-        dv,
-        metadata.sm_scale,
-        alibi_slopes,
-        causal,
-        layout,
-        metadata.cu_seqlens_q,
-        metadata.cu_seqlens_k,
-        metadata.max_seqlens_q,
-        metadata.max_seqlens_k,
-        metadata.dropout_p,
-        metadata.philox_seed,
-        metadata.philox_offset,
-        use_exp2,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-
-    # =============================================== Check ==============================================================
-    if DEBUG:
-        print()
-    if DEBUG:
-        print("delta_triton:", delta_triton, delta_triton.shape)
-        print("delta_ref:", delta_ref, delta_ref.shape)
-    if DEBUG:
-        dim_names = ["batch", "qhead", "seqlen_kv", "head_dim"]
-        mismatch = torch.where(torch.isclose(dv_triton, dv_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN) != 1)
-        num_error_dv = mismatch[0].numel()
-        if num_error_dv > 0:
-            print(f"\nnumber of mismatch in dv: {num_error_dv}")
-            for m, name in zip(mismatch, dim_names):
-                print(f"{name}: {m.unique().cpu()}")
-        dim_names = ["batch", "kvhead", "seqlen_kv", "head_dim"]
-        mismatch = torch.where(torch.isclose(dk_triton, dk_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN) != 1)
-        num_error_dk = mismatch[0].numel()
-        if num_error_dk > 0:
-            print(f"\nnumber of mismatch in dk: {num_error_dk}")
-            for m, name in zip(mismatch, dim_names):
-                print(f"{name}: {m.unique().cpu()}")
-        dim_names = ["batch", "qhead", "seqlen_q", "head_dim"]
-        mismatch = torch.where(torch.isclose(dq_triton, dq_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN) != 1)
-        num_error_dq = mismatch[0].numel()
-        if num_error_dq > 0:
-            print(f"\nnumber of mismatch in dq: {num_error_dq}")
-            for m, name in zip(mismatch, dim_names):
-                print(f"{name}: {m.unique().cpu()}")
-
-    torch.testing.assert_close(delta_triton, delta_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
-    torch.testing.assert_close(dv_triton, dv_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
-    torch.testing.assert_close(dk_triton, dk_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
     torch.testing.assert_close(dq_triton, dq_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
 
 def fp8_assert_close(tensor_a, tensor_b, atol=ATOL_fp8, rtol=RTOL_fp8, max_diff_percentage=0.5):

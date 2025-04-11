@@ -768,33 +768,34 @@ def main():
                 (func1.backend == "ck" and func2.backend == "triton")
             )
             
+            # For triton vs ck comparisons
             if is_triton_vs_ck:
-                # For triton vs ck comparisons, always make triton the baseline and ensure positive means triton is faster
+                # For triton vs ck comparisons, always make triton the baseline
                 if func1.backend == "triton" and func2.backend == "ck":
                     triton_col = col1
                     ck_col = col2
-                    pct_col = f"triton_vs_ck_percent"
+                    ratio_col = f"ck_to_triton_ratio"
                 else:
                     triton_col = col2
                     ck_col = col1
-                    pct_col = f"triton_vs_ck_percent"
+                    ratio_col = f"ck_to_triton_ratio"
                     
-                # Calculate percentage: positive means triton faster, negative means ck faster
-                combined_df[pct_col] = (combined_df[ck_col] - combined_df[triton_col]) / combined_df[triton_col] * 100
+                # Calculate ratio: ck_time / triton_time (values > 1 mean triton is faster)
+                combined_df[ratio_col] = combined_df[ck_col] / combined_df[triton_col]
                 
                 # print explanation
                 print(f"Comparison Results (triton vs ck):")
-                print(f"Percentage values: positive means triton is faster by that percentage, negative means ck is faster")
+                print(f"Ratio values: values > 1 mean triton is faster (by that factor), values < 1 mean ck is faster")
             else:
                 # For other comparisons, use the standard approach
-                pct_col = f"{func1}_vs_{func2}_percent"
+                ratio_col = f"{func1}_to_{func2}_ratio"
                 
-                # Calculate the relative difference as a percentage
-                combined_df[pct_col] = (combined_df[col2] - combined_df[col1]) / combined_df[col1] * 100
+                # Calculate the ratio
+                combined_df[ratio_col] = combined_df[col2] / combined_df[col1]
                 
                 # print explanation
                 print(f"Comparison Results ({func1} vs {func2}):")
-                print(f"Percentage values: positive means {func1} is faster than {func2}, negative means slower")
+                print(f"Ratio values: values > 1 mean {func1} is faster than {func2} (by that factor), values < 1 mean slower")
        
         print(f"Combined data:")
         print(combined_df)
