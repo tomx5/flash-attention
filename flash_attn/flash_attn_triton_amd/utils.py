@@ -729,7 +729,7 @@ def get_arch():
 
 @functools.cache
 def is_cdna():
-    return is_hip() and get_arch() in ('gfx908', 'gfx90a', 'gfx940', 'gfx941', 'gfx942')
+    return is_hip() and get_arch() in ('gfx908', 'gfx90a', 'gfx940', 'gfx941', 'gfx942', 'gfx950')
 
 @functools.cache
 def is_rdna():
