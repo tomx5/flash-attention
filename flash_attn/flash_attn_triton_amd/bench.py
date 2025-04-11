@@ -8,7 +8,7 @@ import pandas as pd
 from logging import warning
 from typing import Dict, List, Literal, Optional, Tuple
 from functools import lru_cache
-from utils import input_helper
+from utils import get_arch, input_helper
 
 DEBUG = False
 
@@ -548,7 +548,7 @@ def run_benchmark(func_config, input_configs):
             line_names=["Time (ms)"],
             styles=[("red", "-")],
             ylabel="ms",
-            plot_name=f"benchmark-{fn_name}-{mode}-{dtype}-{backend}",
+            plot_name=f"benchmark-{func_config}",
             args={
             },
         )
@@ -588,21 +588,24 @@ def run_benchmark(func_config, input_configs):
 
     return df
 
-# First, let's create a clear structure for the function configuration
 class FunctionConfig:
     def __init__(self, fn_name: str, mode: Literal["fwd", "bwd", "full"], dtype, backend: Literal["triton", "ck"]):
         self.fn_name = fn_name
         self.mode: Literal["fwd", "bwd", "full"] = mode
         self.dtype = dtype
         self.backend: Literal["triton", "ck"] = backend
+        self.arch = get_arch()
     
     def __str__(self):
-        return f"{self.fn_name}_{self.mode}_{self.dtype}_{self.backend}"
+        # extract base dtype name if it's a torch dtype
+        dtype_str = str(self.dtype)
+        if "torch." in dtype_str:
+            dtype_str = dtype_str.split(".")[-1]
+        return f"{self.fn_name}_{self.mode}_{dtype_str}_{self.backend}_{self.arch}"
     
     def column_name(self):
-        return f"{self}__ms"
+        return f"{self}_ms"
 
-# Modify process_args() to create separate function configs and input configs
 def process_args():
     """
     Parses command-line arguments and returns function configs and input configs.
