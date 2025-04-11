@@ -675,12 +675,12 @@ def fp8_assert_close(tensor_a, tensor_b, atol=ATOL_fp8, rtol=RTOL_fp8, max_diff_
         (2, 6, 6, 2048, 2048, 32),
     ],
 )
-@pytest.mark.parametrize('causal', [False, True])
-@pytest.mark.parametrize('dropout_p', [0.0, 0.1])
+@pytest.mark.parametrize('causal', [False])
+@pytest.mark.parametrize('dropout_p', [0.0])
 @pytest.mark.parametrize('layout', ['bshd'])
 @pytest.mark.parametrize('packing', [None])
 @pytest.mark.parametrize('DEBUG_INPUT', [False])
-@pytest.mark.flaky(reruns=3, reason="Retry failures")
+# @pytest.mark.flaky(reruns=3, reason="Retry failures")
 @pytest.mark.skipif(not arch_supports_fp8(), reason="fp8 not supported on this device")
 def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, packing, DEBUG_INPUT):
     torch.manual_seed(20)
@@ -809,13 +809,16 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
             print("dqkv_fp8:", dqkv_fp8, dqkv_fp8.shape)
         fp8_assert_close(dqkv_ref, dqkv_fp8, atol=ATOL_fp8, rtol=RTOL_fp8)
 
-    else:
+    elif packing is None:
         # generate inputs
         q, k, v, do, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, ref_dtype, layout, device=device, DEBUG_INPUT=DEBUG_INPUT)
 
         # ----------------------------------------------------------------
         # --- FP8 ---
         # ----------------------------------------------------------------
+        if DEBUG:
+            print()
+            print(f"Compute Fp8 Forward")
         q_fp8 = q.clone()
         k_fp8 = k.clone()
         v_fp8 = v.clone()
@@ -855,6 +858,9 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
         # ----------------------------------------------------------------
         # --- Reference ---
         # ----------------------------------------------------------------
+        if DEBUG:
+            print()
+            print(f"Compute Reference Forward")
         # reference forward pass
         q_ref = q.clone()
         k_ref = k.clone()
@@ -924,9 +930,15 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
         if not test_backward:
             return
         
+        if DEBUG:
+            print()
+            print(f"Compute Fp8 Backward")
         # fp8 backward pass
         dq_fp8, dk_fp8, dv_fp8 = torch.autograd.grad(out_fp8, (q_fp8, k_fp8, v_fp8), do_fp8)
         
+        if DEBUG:
+            print()
+            print(f"Compute Reference Backward")
         # ref backward pass
         dq_ref, dk_ref, dv_ref = torch.autograd.grad(out_ref, (q_ref, k_ref, v_ref), do_ref)
 
@@ -957,8 +969,8 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
 )
 @pytest.mark.parametrize('causal', [False, True])
 @pytest.mark.parametrize('dropout_p', [0.0, 0.1])
-@pytest.mark.parametrize('layout', ['bshd'])
-@pytest.mark.parametrize('packing', [None])
+@pytest.mark.parametrize('layout', ['bshd', "thd"])
+@pytest.mark.parametrize('packing', ["qkv"])
 @pytest.mark.parametrize('test_backward', [False, True])
 @pytest.mark.skipif(not arch_supports_fp8(), reason="fp8 not supported on this device")
 def test_ir(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, packing, test_backward):

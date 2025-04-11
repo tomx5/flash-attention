@@ -518,7 +518,7 @@ def cast_to_fp8(
     cu_seqlens: Optional[torch.Tensor] = None,
     max_seqlen: Optional[int] = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if DEBUG:
+    if False:
         print()
         print("cast_to_fp8")
         print("x:", x, x.shape)
@@ -534,7 +534,7 @@ def cast_to_fp8(
     batch, max_seqlen_final, num_heads, head_dim = get_shape_from_layout(x, layout, cu_seqlens, max_seqlen)
     is_varlen = layout == "thd"
     fp8_max = torch.finfo(fp8_dtype).max
-    if DEBUG:
+    if False:
         print("batch:", batch)
         print("max_seqlen_final:", max_seqlen_final)
         print("num_heads:", num_heads)
@@ -554,7 +554,7 @@ def cast_to_fp8(
     stride_out_batch, stride_out_head, stride_out_seq, stride_out_dim = get_stride_from_layout(x_fp8, layout)
     stride_desc_batch, stride_desc_head = descale_factors.stride()
 
-    if DEBUG:
+    if False:
         print("stride_batch", stride_batch)
         print("stride_head", stride_head)
         print("stride_seq", stride_seq)
@@ -580,7 +580,7 @@ def cast_to_fp8(
         IS_VARLEN=is_varlen
     )
     
-    if DEBUG:
+    if False:
         print("x_fp8:", x_fp8, x_fp8.shape)
         print("descale_factors:", descale_factors, descale_factors.shape)
     return x_fp8, descale_factors

@@ -99,7 +99,7 @@ class FlashAttnFP8Func(torch.autograd.Function):
         # figure out bwd parameters
         if is_fp8(dout): # fp8 input and output
             assert (descale_do is not None), f"You need to pass descale factors for do"
-            dout_padded_fp8 = dout
+            dout_padded_fp8 = dout_padded
             dq, descale_dq = torch.zeros_like(q_fp8), torch.zeros_like(descale_q)
             dk, descale_dk = torch.zeros_like(k_fp8), torch.zeros_like(descale_k)
             dv, descale_dv = torch.zeros_like(v_fp8), torch.zeros_like(descale_v)
@@ -111,7 +111,7 @@ class FlashAttnFP8Func(torch.autograd.Function):
             dv, descale_dv = torch.zeros_like(v_fp8, dtype=torch.float32), None
         
         # dq, dk, dv are allocated by us so they should already be contiguous
-        dout_padded_fp8, q_fp8, q_fp8, v_fp8, out_fp8 = [maybe_contiguous(x) for x in (dout, q_fp8, k_fp8, v_fp8, out_fp8)]
+        dout_padded_fp8, q_fp8, k_fp8, v_fp8, out_fp8 = [maybe_contiguous(x) for x in (dout_padded_fp8, q_fp8, k_fp8, v_fp8, out_fp8)]
         flash_attn_gpu.bwd(
             dout_padded_fp8,
             q_fp8,
