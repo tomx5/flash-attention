@@ -50,15 +50,14 @@ jobs:
         run: |
           pip install matplotlib pandas pytest
 
-      # FIXME: run the full suite
       - name: AMD Internal Tests
         run: |
-          FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE" pytest flash_attn/flash_attn_triton_amd/test.py::test_fp8
+          FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE" pytest flash_attn/flash_attn_triton_amd/test.py
 
       - name: AMD Bench
         if: False
         run: |
-          FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE" FLASH_ATTENTION_TRITON_AMD_AUTOTUNE=1 python flash_attn/flash_attn_triton_amd/bench.py
+          python flash_attn/flash_attn_triton_amd/bench.py
 
       # run big test suites
       - name: Flash Attention Tests using Pytorch reference implementation
