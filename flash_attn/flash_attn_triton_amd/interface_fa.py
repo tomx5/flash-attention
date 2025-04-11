@@ -244,7 +244,7 @@ def bwd(
     else:
         if DEBUG:
             print("Using Triton implementation")
-        SPLIT_KERNEL = False
+        SPLIT_KERNEL = True
         if SPLIT_KERNEL:
             delta_triton = attention_prefill_backward_triton_split_impl(
                 dout,
