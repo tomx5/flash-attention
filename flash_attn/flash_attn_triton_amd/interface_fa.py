@@ -4,13 +4,14 @@ from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
 from .bwd_prefill_split import attention_prefill_backward_triton_split_impl
 from .bwd_prefill_fused import _flash_attn_backward as attention_prefill_backward_triton_fused_impl
+from .bwd_prefill_onekernel import attention_prefill_backward_triton_split_oneKernel_impl
 from .fwd_decode import attention_decode_forward_triton_impl
 from .fwd_ref import attention_forward_pytorch_ref_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
-from .utils import DEBUG_TRITON, DEBUG_TRITON_DETAIL, MetaData, get_shapes_from_layout, DEBUG, is_fp8
+from .utils import DEBUG, MetaData, get_shapes_from_layout, is_fp8
 from einops import rearrange, repeat
 from flash_attn.layers.rotary import apply_rotary_emb
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 
 USE_REF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_REF', '0').lower() in ('1', 'true', 'yes')
 
@@ -244,8 +245,8 @@ def bwd(
     else:
         if DEBUG:
             print("Using Triton implementation")
-        SPLIT_KERNEL = True
-        if SPLIT_KERNEL:
+        BWD_MODE: Literal["split", "fused", "one"] = "one"
+        if BWD_MODE == "split":
             delta_triton = attention_prefill_backward_triton_split_impl(
                 dout,
                 q,
@@ -278,7 +279,7 @@ def bwd(
                 descale_dv,
             )
             delta = delta_triton
-        else:
+        elif BWD_MODE == "fused":
             delta_triton = attention_prefill_backward_triton_fused_impl(
                 dout,
                 q,
@@ -306,6 +307,33 @@ def bwd(
                 True,
             )
             delta = delta_triton
+        elif BWD_MODE == "one":
+            delta_triton = attention_prefill_backward_triton_split_oneKernel_impl(
+                dout,
+                q,
+                k,
+                v,
+                out,
+                softmax_lse,
+                dq,
+                dk,
+                dv,
+                softmax_scale,
+                alibi_slopes,
+                causal,
+                "bshd",
+                None,
+                None,
+                None,
+                None,
+                dropout_p,
+                philox_seed,
+                philox_offset,
+                False
+            )
+            delta = delta_triton
+        else:
+            raise ValueError(f"Unknown bwd mode {BWD_MODE}")
 
     if DEBUG:
         print("flash_attn_triton_amd.py::bwd outputs")

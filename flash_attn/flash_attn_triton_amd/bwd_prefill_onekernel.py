@@ -1,6 +1,7 @@
 import torch
 import triton # type: ignore
 import triton.language as tl # type: ignore
+from typing import Literal, Optional
 from .utils import DROPOUT_USE_PYTORCH, DROPOUT_DUMP, get_shapes_from_layout, \
     get_strides_from_layout, create_dropout_mask, create_dropout_mask_varlen
 from .bwd_prefill_split import _bwd_preprocess, _bwd_dkdv_inner, _bwd_dq_inner
@@ -17,6 +18,7 @@ def bwd_kernel(
     M, Delta,
     stride_qb, stride_qh, stride_qm, stride_qk,
     stride_kb, stride_kh, stride_kn, stride_kk,
+    stride_vb, stride_vh, stride_vn, stride_vk,
     stride_dqb, stride_dqh, stride_dqm, stride_dqk,
     stride_dkb, stride_dkh, stride_dkn, stride_dkk,
     stride_deltab, stride_deltah, stride_deltam,
@@ -159,9 +161,12 @@ def bwd_kernel(
                 dropout_p, philox_seed, batch_philox_offset, dropout_offset,  #
                 seqlen_q, seqlen_k,  # max sequence length for q and k
                 start_n, start_m, num_steps,  # iteration numbers
+                None, None, None, None,
                 MASK=True,  # causal masking
                 ENABLE_DROPOUT=ENABLE_DROPOUT,  # activate dropout
                 USE_EXP2=USE_EXP2,
+                IS_FP8=False,
+                FP8_MAX=None,
                 DEBUG_TRITON=DEBUG_TRITON,
                 DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
             )
@@ -184,9 +189,12 @@ def bwd_kernel(
                 dropout_p, philox_seed, batch_philox_offset, dropout_offset,  #
                 seqlen_q, seqlen_k,  # max sequence length for q and k
                 start_n, start_m, num_steps,  # iteration numbers
+                None, None, None, None,
                 MASK=False,  # causal masking
                 ENABLE_DROPOUT=ENABLE_DROPOUT,  # activate dropout
                 USE_EXP2=USE_EXP2,
+                IS_FP8=False,
+                FP8_MAX=None,
                 DEBUG_TRITON=DEBUG_TRITON,
                 DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
             )
@@ -258,7 +266,7 @@ def bwd_kernel(
             dq = _bwd_dq_inner(
                 dq,
                 q, K, V, do, m, Delta_ptr, sm_scale, #
-                stride_qm, stride_qk, stride_kn,
+                stride_qm, stride_qk, stride_kn, stride_kk, stride_vn, stride_vk,
                 stride_dropoutm, stride_dropoutn,  #
                 stride_deltam,
                 seqlen_q, seqlen_k,  #
@@ -266,9 +274,12 @@ def bwd_kernel(
                 HEAD_DIM, ACTUAL_HEAD_DIM,  #
                 dropout_p, philox_seed, batch_philox_offset, dropout_offset,  #
                 start_m, start_n, end_n, num_steps,  #
+                None, None, None, None,
                 MASK=True,  #
                 ENABLE_DROPOUT=ENABLE_DROPOUT,
                 USE_EXP2=USE_EXP2,
+                IS_FP8=False,
+                FP8_MAX=None,
                 DEBUG_TRITON=DEBUG_TRITON,
                 DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
             )
@@ -279,7 +290,7 @@ def bwd_kernel(
             dq = _bwd_dq_inner(
                 dq,  #
                 q, K, V, do, m, Delta_ptr, sm_scale, #
-                stride_qm, stride_qk, stride_kn,  #
+                stride_qm, stride_qk, stride_kn, stride_kk, stride_vn, stride_vk, #
                 stride_dropoutm, stride_dropoutn,  #
                 stride_deltam,
                 seqlen_q, seqlen_k,  #
@@ -287,9 +298,12 @@ def bwd_kernel(
                 HEAD_DIM, ACTUAL_HEAD_DIM,  #
                 dropout_p, philox_seed, batch_philox_offset, dropout_offset,  #
                 start_m, start_n, end_n, num_steps,  #
+                None, None, None, None,
                 MASK=False,  #
                 ENABLE_DROPOUT=ENABLE_DROPOUT,
                 USE_EXP2=USE_EXP2,
+                IS_FP8=False,
+                FP8_MAX=None,
                 DEBUG_TRITON=DEBUG_TRITON,
                 DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
             )
@@ -307,6 +321,7 @@ def bwd_kernel_noncausal(
     M, Delta,
     stride_qb, stride_qh, stride_qm, stride_qk,
     stride_kb, stride_kh, stride_kn, stride_kk,
+    stride_vb, stride_vh, stride_vn, stride_vk,
     stride_dqb, stride_dqh, stride_dqm, stride_dqk,
     stride_dkb, stride_dkh, stride_dkn, stride_dkk,
     stride_deltab, stride_deltah, stride_deltam,
@@ -406,9 +421,12 @@ def bwd_kernel_noncausal(
                 dropout_p, philox_seed, batch_philox_offset, dropout_offset,  #
                 seqlen_q, seqlen_k,  # max sequence length for q and k
                 start_n, start_m, num_steps,  # iteration numbers
+                None, None, None, None,
                 MASK=False,  # causal masking
                 ENABLE_DROPOUT=ENABLE_DROPOUT,  # activate dropout
                 USE_EXP2=USE_EXP2,
+                IS_FP8=False,
+                FP8_MAX=None,
                 DEBUG_TRITON=DEBUG_TRITON,
                 DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
             )
@@ -469,7 +487,7 @@ def bwd_kernel_noncausal(
             dq = _bwd_dq_inner(
                 dq,  #
                 q, K, V, do, m, Delta_ptr, sm_scale, #
-                stride_qm, stride_qk, stride_kn,  #
+                stride_qm, stride_qk, stride_kn, stride_kk, stride_vn, stride_vk, #
                 stride_dropoutm, stride_dropoutn,  #
                 stride_deltam,
                 seqlen_q, seqlen_k,  #
@@ -477,9 +495,12 @@ def bwd_kernel_noncausal(
                 HEAD_DIM, ACTUAL_HEAD_DIM,  #
                 dropout_p, philox_seed, batch_philox_offset, dropout_offset,  #
                 start_m, start_n, end_n, num_steps,  #
+                None, None, None, None,
                 MASK=False,  #
                 ENABLE_DROPOUT=ENABLE_DROPOUT,
                 USE_EXP2=USE_EXP2,
+                IS_FP8=False,
+                FP8_MAX=None,
                 DEBUG_TRITON=DEBUG_TRITON,
                 DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
             )
@@ -491,51 +512,44 @@ def bwd_kernel_noncausal(
 
 
 def attention_prefill_backward_triton_split_oneKernel_impl(
-    do,
-    q,
-    k,
-    v,
-    o,
-    softmax_lse,
-    dq,
-    dk,
-    dv,
+    do: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    o: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    dq: torch.Tensor,
+    dk: torch.Tensor,
+    dv: torch.Tensor,
     sm_scale: float,
-    alibi_slopes,
-    causal,
-    layout: str,
-    cu_seqlens_q,
-    cu_seqlens_k,
-    max_seqlen_q: int,
-    max_seqlen_k: int,
-    dropout_p,
-    philox_seed,
-    philox_offset,
+    alibi_slopes: Optional[torch.Tensor],
+    causal: bool,
+    layout: Literal["bshd", "bhsd", "thd"],
+    cu_seqlens_q: Optional[torch.Tensor],
+    cu_seqlens_k: Optional[torch.Tensor],
+    max_seqlen_q: Optional[int],
+    max_seqlen_k: Optional[int],
+    dropout_p: float,
+    philox_seed: Optional[int],
+    philox_offset: Optional[int],
     use_exp2: bool,
-    DEBUG_TRITON: bool = False,
-    DEBUG_TRITON_DETAIL: bool = False,
 ):
-    if dq is None:
-        dq = torch.empty_like(q)
-    if dk is None:
-        dk = torch.empty_like(k)
-    if dv is None:
-        dv = torch.empty_like(v)
-    dq.zero_()
-    dk.zero_()
-    dv.zero_()
+    # debug
+    DEBUG_TRITON: bool = False
+    DEBUG_TRITON_DETAIL: bool = False
 
     # get strides and shape
-    batch, nheads_q, nheads_k, head_size, max_seqlen_q, max_seqlen_k = \
+    batch, nheads_q, nheads_k, head_size, max_seqlen_q_final, max_seqlen_k_final = \
         get_shapes_from_layout(
             q, k, layout,
             cu_seqlens_q, cu_seqlens_k,
             max_seqlen_q, max_seqlen_k
         )
-    q_strides, k_strides, _, o_strides = \
+    q_strides, k_strides, v_strides, o_strides = \
         get_strides_from_layout(q, k, v, o, layout)
     stride_qb, stride_qh, stride_qm, stride_qk =  q_strides
     stride_kb, stride_kh, stride_kn, stride_kk = k_strides
+    stride_vb, stride_vh, stride_vn, stride_vk = v_strides
     stride_ob, stride_oh, stride_om, stride_ok = o_strides
     dq_strides, dk_strides, _, do_strides = \
         get_strides_from_layout(dq, dk, dv, do, layout)
@@ -565,17 +579,20 @@ def attention_prefill_backward_triton_split_oneKernel_impl(
         stride_deltam, stride_deltah = delta.stride()
     else:
         stride_deltab, stride_deltah, stride_deltam = delta.stride()
-    pre_grid = (triton.cdiv(max_seqlen_q, PRE_BLOCK), batch, nheads_q)
+    pre_grid = (triton.cdiv(max_seqlen_q_final, PRE_BLOCK), batch, nheads_q)
     _bwd_preprocess[pre_grid](
         o, do,
         delta,
         stride_ob, stride_oh, stride_om, stride_ok,
         stride_deltab, stride_deltah, stride_deltam,
-        cu_seqlens_q, max_seqlen_q,
+        0,
+        cu_seqlens_q, max_seqlen_q_final,
+        None,
         BLOCK_M=PRE_BLOCK,
         HEAD_DIM=HEAD_DIM,
         ACTUAL_HEAD_DIM=ACTUAL_HEAD_DIM,
-        IS_VARLEN=IS_VARLEN
+        IS_VARLEN=IS_VARLEN,
+        IS_FP8=False
     )
 
     # dropout mask tensor for debugging. We dump the dropout mask created in
@@ -585,7 +602,7 @@ def attention_prefill_backward_triton_split_oneKernel_impl(
         (0, 0 , 0 , 0)
     if use_dropout:
         dropout_mask = torch.zeros(
-            (batch, nheads_q, max_seqlen_q, max_seqlen_k),
+            (batch, nheads_q, max_seqlen_q_final, max_seqlen_k_final),
             device=q.device,
             dtype=torch.float32
         )
@@ -594,7 +611,7 @@ def attention_prefill_backward_triton_split_oneKernel_impl(
             if not IS_VARLEN:
                 dropout_mask = create_dropout_mask(
                     dropout_p,
-                    (batch, nheads_q, max_seqlen_q, max_seqlen_k),
+                    (batch, nheads_q, max_seqlen_q_final, max_seqlen_k_final),
                     seed = philox_seed
                 )
             else:
@@ -606,7 +623,7 @@ def attention_prefill_backward_triton_split_oneKernel_impl(
             dropout_mask.stride()
 
     assert BLOCK_N1 == BLOCK_M2
-    seqlen = max(max_seqlen_q, max_seqlen_k)
+    seqlen = max(max_seqlen_q_final, max_seqlen_k_final)
     grid = ((seqlen + BLOCK_N1 - 1) // BLOCK_N1, batch, nheads_k)
     if causal:
         if DEBUG_TRITON: print(f"bwd_kernel: grid = {grid}, block_size = ({BLOCK_M1, BLOCK_N1})", )  # noqa: E701
@@ -615,6 +632,7 @@ def attention_prefill_backward_triton_split_oneKernel_impl(
             softmax_lse, delta,
             stride_qb, stride_qh, stride_qm, stride_qk,
             stride_kb, stride_kh, stride_kn, stride_kk,
+            stride_vb, stride_vh, stride_vn, stride_vk,
             stride_dqb, stride_dqh, stride_dqm, stride_dqk,
             stride_dkb, stride_dkh, stride_dkn, stride_dkk,
             stride_deltab, stride_deltah, stride_deltam,
@@ -622,7 +640,7 @@ def attention_prefill_backward_triton_split_oneKernel_impl(
             stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
             nheads_q, nheads_k,
             cu_seqlens_q, cu_seqlens_k,
-            max_seqlen_q, max_seqlen_k,
+            max_seqlen_q_final, max_seqlen_k_final,
             dropout_mask, dropout_p, philox_seed, philox_offset,
             BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2, BLK_SLICE_FACTOR,
             HEAD_DIM, ACTUAL_HEAD_DIM,
@@ -641,6 +659,7 @@ def attention_prefill_backward_triton_split_oneKernel_impl(
             softmax_lse, delta,
             stride_qb, stride_qh, stride_qm, stride_qk,
             stride_kb, stride_kh, stride_kn, stride_kk,
+            stride_vb, stride_vh, stride_vn, stride_vk,
             stride_dqb, stride_dqh, stride_dqm, stride_dqk,
             stride_dkb, stride_dkh, stride_dkn, stride_dkk,
             stride_deltab, stride_deltah, stride_deltam,
@@ -648,7 +667,7 @@ def attention_prefill_backward_triton_split_oneKernel_impl(
             stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn,
             nheads_q, nheads_k,
             cu_seqlens_q, cu_seqlens_k,
-            max_seqlen_q, max_seqlen_k,
+            max_seqlen_q_final, max_seqlen_k_final,
             dropout_mask, dropout_p, philox_seed, philox_offset,
             BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2, BLK_SLICE_FACTOR,
             HEAD_DIM, ACTUAL_HEAD_DIM,
