@@ -535,8 +535,12 @@ def run_benchmark(func_config, input_configs):
     start_time = time.time()
 
     # print bench fn
-    mode_text = "forward" if mode == "fwd" else "forward and backward"
-    print(f"Benchmarking {fn_name} {mode_text} with {len(input_configs)} configs in {dtype} on the {backend} backend ...")
+    mode_text_dict = {
+        "fwd": "forward",
+        "bwd": "backward",
+        "full": "forward and backward"
+    }
+    print(f"Benchmarking {fn_name} {mode_text_dict[mode]} with {len(input_configs)} configs in {dtype} on the {backend} backend ...")
 
     # Setup benchmark configurations
     bench_configs = [

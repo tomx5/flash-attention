@@ -3,6 +3,7 @@ import os
 from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
 from .bwd_prefill_split import attention_prefill_backward_triton_split_impl
+from .bwd_prefill_fused import _flash_attn_backward as attention_prefill_backward_triton_fused_impl
 from .fwd_decode import attention_decode_forward_triton_impl
 from .fwd_ref import attention_forward_pytorch_ref_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
@@ -243,38 +244,68 @@ def bwd(
     else:
         if DEBUG:
             print("Using Triton implementation")
-        delta_triton = attention_prefill_backward_triton_split_impl(
-            dout,
-            q,
-            k,
-            v,
-            out,
-            softmax_lse,
-            dq,
-            dk,
-            dv,
-            softmax_scale,
-            alibi_slopes,
-            causal,
-            "bshd",
-            None,
-            None,
-            None,
-            None,
-            dropout_p,
-            philox_seed,
-            philox_offset,
-            False,
-            descale_q,
-            descale_k,
-            descale_v,
-            descale_o,
-            descale_do,
-            descale_dq,
-            descale_dk,
-            descale_dv,
-        )
-        delta = delta_triton
+        SPLIT_KERNEL = False
+        if SPLIT_KERNEL:
+            delta_triton = attention_prefill_backward_triton_split_impl(
+                dout,
+                q,
+                k,
+                v,
+                out,
+                softmax_lse,
+                dq,
+                dk,
+                dv,
+                softmax_scale,
+                alibi_slopes,
+                causal,
+                "bshd",
+                None,
+                None,
+                None,
+                None,
+                dropout_p,
+                philox_seed,
+                philox_offset,
+                False,
+                descale_q,
+                descale_k,
+                descale_v,
+                descale_o,
+                descale_do,
+                descale_dq,
+                descale_dk,
+                descale_dv,
+            )
+            delta = delta_triton
+        else:
+            delta_triton = attention_prefill_backward_triton_fused_impl(
+                dout,
+                q,
+                k,
+                v,
+                out,
+                softmax_lse,
+                dq,
+                dk,
+                dv,
+                softmax_scale,
+                alibi_slopes,
+                causal,
+                None,
+                None,
+                q.shape[1],
+                k.shape[1],
+                dropout_p,
+                philox_seed,
+                philox_offset,
+                descale_q,
+                descale_k,
+                descale_v,
+                descale_o,
+                True,
+            )
+            delta = delta_triton
 
     if DEBUG:
         print("flash_attn_triton_amd.py::bwd outputs")
