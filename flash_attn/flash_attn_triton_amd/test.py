@@ -1,8 +1,10 @@
 import os
 import glob
 import shutil
+import time
 import torch
 import pytest
+import logging
 import numpy as np
 from pathlib import Path
 from flash_attn import (
@@ -774,9 +776,8 @@ def test_fp8(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, pac
 @pytest.mark.parametrize('packing', [None])
 @pytest.mark.parametrize('test_backward', [False, True])
 @pytest.mark.skipif(not arch_supports_fp8(), reason="fp8 not supported on this device")
-def test_ir(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, packing, test_backward):
+def test_ir(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, packing, test_backward): # Don't run this test in parallel. It clears the cache so it doesnot work properly if run in parallel.
     torch.manual_seed(20)
-    use_fp8 = True # sanity check
     device = "cuda"
     window_size = (-1, -1)
     softcap = 0.0
@@ -796,60 +797,28 @@ def test_ir(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, 
 
     if packing == None:
         # fp8 forward pass
-        if not is_varlen:
-            if use_fp8:
-                out, lse, S_dmask = flash_attn_fp8_func(
-                    q,
-                    k,
-                    v,
-                    dropout_p,
-                    causal=causal,
-                    window_size=window_size,
-                    softcap=softcap,
-                    alibi_slopes=alibi_slopes,
-                    deterministic=deterministic,
-                    return_attn_probs=True,
-                )
-            else:
-                out, lse, S_dmask = flash_attn_func(
-                    q,
-                    k,
-                    v,
-                    dropout_p,
-                    causal=causal,
-                    window_size=window_size,
-                    softcap=softcap,
-                    alibi_slopes=alibi_slopes,
-                    deterministic=deterministic,
-                    return_attn_probs=True,
-                )
+        if is_varlen:
+            out, lse, S_dmask = flash_attn_varlen_fp8_func(
+                q,
+                k,
+                v,
+                metadata.cu_seqlens_q,
+                metadata.cu_seqlens_k,
+                metadata.max_seqlens_q,
+                metadata.max_seqlens_k,
+                dropout_p,
+                causal=causal,
+                window_size=window_size,
+                softcap=softcap,
+                alibi_slopes=alibi_slopes,
+                deterministic=deterministic,
+                return_attn_probs=True,
+            )
         else:
-            if use_fp8:
-                out, lse, S_dmask = flash_attn_varlen_fp8_func(
+            out, lse, S_dmask = flash_attn_fp8_func(
                     q,
                     k,
                     v,
-                    metadata.cu_seqlens_q,
-                    metadata.cu_seqlens_k,
-                    metadata.max_seqlens_q,
-                    metadata.max_seqlens_k,
-                    dropout_p,
-                    causal=causal,
-                    window_size=window_size,
-                    softcap=softcap,
-                    alibi_slopes=alibi_slopes,
-                    deterministic=deterministic,
-                    return_attn_probs=True,
-                )
-            else:
-                out, lse, S_dmask = flash_attn_varlen_func(
-                    q,
-                    k,
-                    v,
-                    metadata.cu_seqlens_q,
-                    metadata.cu_seqlens_k,
-                    metadata.max_seqlens_q,
-                    metadata.max_seqlens_k,
                     dropout_p,
                     causal=causal,
                     window_size=window_size,
@@ -871,56 +840,30 @@ def test_ir(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, 
             qkv = torch.stack([q, k, v], dim=2)
 
         # fp8 forward pass for qkv-packed input
-        if not is_varlen:
-            if use_fp8:
-                out, lse, S_dmask = flash_attn_qkvpacked_fp8_func(
-                    qkv,
-                    dropout_p,
-                    causal=causal,
-                    window_size=window_size,
-                    softcap=softcap,
-                    alibi_slopes=alibi_slopes,
-                    deterministic=deterministic,
-                    return_attn_probs=True,
-                )
-            else:
-                out, lse, S_dmask = flash_attn_qkvpacked_func(
-                    qkv,
-                    dropout_p,
-                    causal=causal,
-                    window_size=window_size,
-                    softcap=softcap,
-                    alibi_slopes=alibi_slopes,
-                    deterministic=deterministic,
-                    return_attn_probs=True,
-                )
+        if is_varlen:
+            out, lse, S_dmask = flash_attn_varlen_qkvpacked_fp8_func(
+                qkv,
+                metadata.cu_seqlens_q,
+                metadata.max_seqlens_q,
+                dropout_p,
+                causal=causal,
+                window_size=window_size,
+                softcap=softcap,
+                alibi_slopes=alibi_slopes,
+                deterministic=deterministic,
+                return_attn_probs=True,
+            )
         else:
-            if use_fp8:
-                out, lse, S_dmask = flash_attn_varlen_qkvpacked_fp8_func(
-                    qkv,
-                    metadata.cu_seqlens_q,
-                    metadata.max_seqlens_q,
-                    dropout_p,
-                    causal=causal,
-                    window_size=window_size,
-                    softcap=softcap,
-                    alibi_slopes=alibi_slopes,
-                    deterministic=deterministic,
-                    return_attn_probs=True,
-                )
-            else:
-                out, lse, S_dmask = flash_attn_varlen_qkvpacked_func(
-                    qkv,
-                    metadata.cu_seqlens_q,
-                    metadata.max_seqlens_q,
-                    dropout_p,
-                    causal=causal,
-                    window_size=window_size,
-                    softcap=softcap,
-                    alibi_slopes=alibi_slopes,
-                    deterministic=deterministic,
-                    return_attn_probs=True,
-                )
+            out, lse, S_dmask = flash_attn_qkvpacked_fp8_func(
+                qkv,
+                dropout_p,
+                causal=causal,
+                window_size=window_size,
+                softcap=softcap,
+                alibi_slopes=alibi_slopes,
+                deterministic=deterministic,
+                return_attn_probs=True,
+            )
 
         # fp8 backward pass for qkv-packed input
         if test_backward:
@@ -928,10 +871,34 @@ def test_ir(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, 
     else:
         raise ValueError(f"unknown packing type {packing}")
     
-    # search the cache for .ttir files and check for fp8 type string
-    ttir_files = glob.glob(str(cache_path) + "/**/*.ttir", recursive=True)
-    assert len(ttir_files) > 0, "No .ttir files found in cache"
-    
+    # search for .ttir files
+    max_retries = 5
+    retry_delay = 0.5
+    ttir_files = []
+    logging.info(f"Checking for .ttir files in {cache_path}...")
+    for attempt in range(max_retries):
+        # search for .ttir files recursively within the cache path
+        ttir_files = glob.glob(str(cache_path) + "/**/*.ttir", recursive=True)
+
+        if ttir_files:
+            # Files found, log success and exit the loop
+            logging.info(f"Found {len(ttir_files)} .ttir files on attempt {attempt + 1}.")
+            break
+        else:
+            # Files not found yet
+            if attempt < max_retries - 1:
+                # If not the last attempt, wait and log before retrying
+                logging.warning(
+                    f"No .ttir files found on attempt {attempt + 1}. "
+                    f"Retrying in {retry_delay}s..."
+                )
+                time.sleep(retry_delay)
+            else:
+                pytest.fail(
+                    f"FATAL: No .ttir files found in cache {cache_path} "
+                    f"after {max_retries} attempts."
+                )
+
     # check if there is fp8
     ttir_files_fp8_found_status = {}
     fp8_types = ['f8E4M3', 'f8E5M2']
