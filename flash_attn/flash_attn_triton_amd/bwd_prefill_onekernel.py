@@ -11,90 +11,80 @@ tl_DROPOUT_DUMP: tl.constexpr = DROPOUT_DUMP
 
 
 def get_autotune_configs():
-    if AUTOTUNE:
+    if False:
         if is_cdna():
-            preprocess_autotune_configs =  [
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 3, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-                triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-                # Fall-back config.
-                triton.Config({'BLOCK_M': 16, 'BLOCK_N': 16, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-            ] 
-            preprocess_autotune_keys = ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'IS_VARLEN', 'HQ', 'HK']
-
-            causal_autotune_configs =  [
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 3, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-                triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-                # Fall-back config.
-                triton.Config({'BLOCK_M': 16, 'BLOCK_N': 16, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-            ] 
-            causal_autotune_keys = ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'IS_VARLEN', 'HQ', 'HK']
-
-            noncausal_autotune_configs =  [
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 3, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-                triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-                triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-                # Fall-back config.
-                triton.Config({'BLOCK_M': 16, 'BLOCK_N': 16, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-            ] 
-            noncausal_autotune_keys = ['IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'ACTUAL_BLOCK_DMODEL', 'IS_VARLEN', 'HQ', 'HK']
+            preprocess_autotune_configs = [
+                triton.Config({'PRE_BLOCK': 128}, num_stages=1, num_warps=4),
+                triton.Config({'PRE_BLOCK': 64}, num_stages=1, num_warps=4),
+                triton.Config({'PRE_BLOCK': 32}, num_stages=1, num_warps=4),
+                triton.Config({'PRE_BLOCK': 16}, num_stages=1, num_warps=2),
+            ]
+            preprocess_autotune_keys = [
+                "IS_CAUSAL", "dropout_p", "MAX_SEQLENS_Q", "MAX_SEQLENS_K", 
+                "ACTUAL_HEAD_DIM", "IS_VARLEN", "HQ", "HK"
+            ]
+            
+            # Configs for causal backward kernel - needs BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2
+            causal_autotune_configs = [
+                triton.Config({'BLOCK_M1': 32, 'BLOCK_N1': 128, 'BLOCK_M2': 128, 'BLOCK_N2': 32, 'BLK_SLICE_FACTOR': 2}, num_stages=1, num_warps=8),
+                triton.Config({'BLOCK_M1': 64, 'BLOCK_N1': 64, 'BLOCK_M2': 64, 'BLOCK_N2': 64, 'BLK_SLICE_FACTOR': 2}, num_stages=1, num_warps=8),
+                triton.Config({'BLOCK_M1': 32, 'BLOCK_N1': 64, 'BLOCK_M2': 64, 'BLOCK_N2': 32, 'BLK_SLICE_FACTOR': 2}, num_stages=1, num_warps=4),
+                triton.Config({'BLOCK_M1': 16, 'BLOCK_N1': 32, 'BLOCK_M2': 32, 'BLOCK_N2': 16, 'BLK_SLICE_FACTOR': 2}, num_stages=1, num_warps=4),
+            ]
+            causal_autotune_keys = [
+                "IS_CAUSAL", "dropout_p", "MAX_SEQLENS_Q", "MAX_SEQLENS_K", 
+                "ACTUAL_HEAD_DIM", "IS_VARLEN", "HQ", "HK"
+            ]
+            
+            # Configs for non-causal backward kernel
+            noncausal_autotune_configs = [
+                triton.Config({'BLOCK_M1': 32, 'BLOCK_N1': 128, 'BLOCK_M2': 128, 'BLOCK_N2': 32, 'BLK_SLICE_FACTOR': 2}, num_stages=1, num_warps=8),
+                triton.Config({'BLOCK_M1': 64, 'BLOCK_N1': 64, 'BLOCK_M2': 64, 'BLOCK_N2': 64, 'BLK_SLICE_FACTOR': 2}, num_stages=1, num_warps=8),
+                triton.Config({'BLOCK_M1': 32, 'BLOCK_N1': 64, 'BLOCK_M2': 64, 'BLOCK_N2': 32, 'BLK_SLICE_FACTOR': 2}, num_stages=1, num_warps=4),
+                triton.Config({'BLOCK_M1': 16, 'BLOCK_N1': 32, 'BLOCK_M2': 32, 'BLOCK_N2': 16, 'BLK_SLICE_FACTOR': 2}, num_stages=1, num_warps=4),
+            ]
+            noncausal_autotune_keys = [
+                "IS_CAUSAL", "dropout_p", "MAX_SEQLENS_Q", "MAX_SEQLENS_K", 
+                "ACTUAL_HEAD_DIM", "IS_VARLEN", "HQ", "HK"
+            ]
+            
             return (preprocess_autotune_configs, preprocess_autotune_keys), (causal_autotune_configs, causal_autotune_keys), (noncausal_autotune_configs, noncausal_autotune_keys)
         else:
             raise ValueError("Unknown Device Type")
     else:
-        preprocess_autotune_configs =  [
-            triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "waves_per_eu": 1, "PRE_LOAD_V": False}, num_stages=1, num_warps=4,),
-        ]
-        preprocess_autotune_keys= [
-            "IS_CAUSAL",
-            "dropout_p",
-            "MAX_SEQLENS_Q",
-            "MAX_SEQLENS_K",
-            "ACTUAL_BLOCK_DMODEL",
-            "IS_VARLEN",
-            "HQ",
-            "HK",
-        ]
+        # meta-parameters
+        # TODO: fix num_stages later
+        NUM_WARPS, NUM_STAGES = 4, 1
+        WAVES_PER_EU = 1
+        PRE_BLOCK = 128
+        BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 128, 128, 32
+        BLK_SLICE_FACTOR = 2
 
-        causal_autotune_configs =  [
-            triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "waves_per_eu": 1, "PRE_LOAD_V": False}, num_stages=1, num_warps=4,),
+        assert BLOCK_N1 == BLOCK_M2
+        
+        # configs for the kernels
+        preprocess_autotune_configs = [
+            triton.Config({"PRE_BLOCK": PRE_BLOCK, "waves_per_eu": WAVES_PER_EU}, num_stages=NUM_STAGES, num_warps=NUM_WARPS),
         ]
-        causal_autotune_keys= [
-            "IS_CAUSAL",
-            "dropout_p",
-            "MAX_SEQLENS_Q",
-            "MAX_SEQLENS_K",
-            "ACTUAL_BLOCK_DMODEL",
-            "IS_VARLEN",
-            "HQ",
-            "HK",
+        preprocess_autotune_keys = [
+            "IS_CAUSAL", "dropout_p", "MAX_SEQLENS_Q", "MAX_SEQLENS_K", 
+            "ACTUAL_HEAD_DIM", "IS_VARLEN", "HQ", "HK",
         ]
-
-        noncausal_autotune_configs =  [
-            triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "waves_per_eu": 1, "PRE_LOAD_V": False}, num_stages=1, num_warps=4,),
+        causal_autotune_configs = [
+            triton.Config({"BLOCK_M1": BLOCK_M1, "BLOCK_N1": BLOCK_N1, "BLOCK_M2": BLOCK_M2, "BLOCK_N2": BLOCK_N2, "BLK_SLICE_FACTOR": BLK_SLICE_FACTOR, "waves_per_eu": WAVES_PER_EU}, num_stages=NUM_STAGES, num_warps=NUM_WARPS),
         ]
-        noncausal_autotune_keys= [
-            "IS_CAUSAL",
-            "dropout_p",
-            "MAX_SEQLENS_Q",
-            "MAX_SEQLENS_K",
-            "ACTUAL_BLOCK_DMODEL",
-            "IS_VARLEN",
-            "HQ",
-            "HK",
+        causal_autotune_keys = [
+            "IS_CAUSAL", "dropout_p", "MAX_SEQLENS_Q", "MAX_SEQLENS_K", 
+            "ACTUAL_HEAD_DIM", "IS_VARLEN", "HQ", "HK",
+        ]
+        noncausal_autotune_configs = [
+            triton.Config({"BLOCK_M1": BLOCK_M1, "BLOCK_N1": BLOCK_N1, "BLOCK_M2": BLOCK_M2, "BLOCK_N2": BLOCK_N2, "BLK_SLICE_FACTOR": BLK_SLICE_FACTOR, "waves_per_eu": WAVES_PER_EU}, num_stages=NUM_STAGES, num_warps=NUM_WARPS),
+        ]
+        noncausal_autotune_keys = [
+            "IS_CAUSAL", "dropout_p", "MAX_SEQLENS_Q", "MAX_SEQLENS_K", 
+            "ACTUAL_HEAD_DIM", "IS_VARLEN", "HQ", "HK",
         ]
         return (preprocess_autotune_configs, preprocess_autotune_keys), (causal_autotune_configs, causal_autotune_keys), (noncausal_autotune_configs, noncausal_autotune_keys)
-
     
 
 
@@ -121,7 +111,7 @@ def _bwd_preprocess(
     stride_descale_do_z,
     cu_seqlens_q, max_seqlen_q,
     Descale_do,
-    BLOCK_M: tl.constexpr,
+    PRE_BLOCK: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     ACTUAL_HEAD_DIM: tl.constexpr,
     IS_VARLEN: tl.constexpr,
@@ -142,7 +132,7 @@ def _bwd_preprocess(
         seqlen_q = max_seqlen_q
 
     # Compute offsets
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_m = pid_m * PRE_BLOCK + tl.arange(0, PRE_BLOCK)
     offs_k = tl.arange(0, HEAD_DIM)
     # Offset O/DO by batch, head and q_start
     O += bid * stride_ob + hid * stride_oh + q_start * stride_om  # noqa: E741
@@ -994,13 +984,6 @@ def attention_prefill_backward_triton_split_oneKernel_impl(
     padded_d_model = max(padded_d_model, 16)
     HEAD_DIM = padded_d_model
     ACTUAL_HEAD_DIM = head_size
-    # meta-parameters
-    # TODO: fix num_stages later
-    NUM_WARPS, NUM_STAGES = 4, 1
-    WAVES_PER_EU = 1
-    PRE_BLOCK = 128
-    BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 128, 128, 32
-    BLK_SLICE_FACTOR = 2
 
     # init delta
     delta = torch.empty_like(softmax_lse)
@@ -1009,7 +992,7 @@ def attention_prefill_backward_triton_split_oneKernel_impl(
         stride_deltam, stride_deltah = delta.stride()
     else:
         stride_deltab, stride_deltah, stride_deltam = delta.stride()
-    pre_grid = (triton.cdiv(max_seqlen_q_final, PRE_BLOCK), batch, nheads_q)
+    pre_grid = lambda META:  (triton.cdiv(max_seqlen_q_final, META['PRE_BLOCK']), batch, nheads_q)
     _bwd_preprocess[pre_grid](
         o, do,
         delta,
@@ -1018,7 +1001,6 @@ def attention_prefill_backward_triton_split_oneKernel_impl(
         0,
         cu_seqlens_q, max_seqlen_q_final,
         None,
-        BLOCK_M=PRE_BLOCK,
         HEAD_DIM=HEAD_DIM,
         ACTUAL_HEAD_DIM=ACTUAL_HEAD_DIM,
         IS_VARLEN=IS_VARLEN,
@@ -1052,11 +1034,10 @@ def attention_prefill_backward_triton_split_oneKernel_impl(
         stride_dropoutb, stride_dropouth, stride_dropoutm, stride_dropoutn = \
             dropout_mask.stride()
 
-    assert BLOCK_N1 == BLOCK_M2
     seqlen = max(max_seqlen_q_final, max_seqlen_k_final)
-    grid = ((seqlen + BLOCK_N1 - 1) // BLOCK_N1, batch, nheads_k)
+    grid = lambda META: ((seqlen + META['BLOCK_N1'] - 1) // META['BLOCK_N1'], batch, nheads_k)
     if causal:
-        if DEBUG_TRITON: print(f"bwd_kernel: grid = {grid}, block_size = ({BLOCK_M1, BLOCK_N1})", )  # noqa: E701
+        if DEBUG_TRITON: print(f"bwd_kernel: grid = {grid}" )  # noqa: E701
         bwd_kernel_causal[grid](
             q, k, v, sm_scale, do, dq, dk, dv,
             softmax_lse, delta,
@@ -1072,14 +1053,11 @@ def attention_prefill_backward_triton_split_oneKernel_impl(
             cu_seqlens_q, cu_seqlens_k,
             max_seqlen_q_final, max_seqlen_k_final,
             dropout_mask, dropout_p, philox_seed, philox_offset,
-            BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2, BLK_SLICE_FACTOR,
-            HEAD_DIM, ACTUAL_HEAD_DIM,
+            HEAD_DIM=HEAD_DIM, 
+            ACTUAL_HEAD_DIM=ACTUAL_HEAD_DIM,
             ENABLE_DROPOUT=use_dropout,
             IS_VARLEN=IS_VARLEN,
             USE_EXP2=use_exp2,
-            num_warps=NUM_WARPS,
-            num_stages=NUM_STAGES,
-            waves_per_eu = WAVES_PER_EU,
             DEBUG_TRITON=DEBUG_TRITON,
             DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
@@ -1099,14 +1077,11 @@ def attention_prefill_backward_triton_split_oneKernel_impl(
             cu_seqlens_q, cu_seqlens_k,
             max_seqlen_q_final, max_seqlen_k_final,
             dropout_mask, dropout_p, philox_seed, philox_offset,
-            BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2, BLK_SLICE_FACTOR,
-            HEAD_DIM, ACTUAL_HEAD_DIM,
+            HEAD_DIM=HEAD_DIM,
+            ACTUAL_HEAD_DIM=ACTUAL_HEAD_DIM,
             ENABLE_DROPOUT=use_dropout,
             IS_VARLEN=IS_VARLEN,
             USE_EXP2=use_exp2,
-            num_warps=NUM_WARPS,
-            num_stages=NUM_STAGES,
-            waves_per_eu = WAVES_PER_EU,
             DEBUG_TRITON=DEBUG_TRITON,
             DEBUG_TRITON_DETAIL=DEBUG_TRITON_DETAIL,
         )
